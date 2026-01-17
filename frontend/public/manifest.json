@@ -1,0 +1,23 @@
+{
+    "name": "Nia - AI Companion",
+    "short_name": "Nia",
+    "description": "Your AI companion that grows with you",
+    "start_url": "/?source=pwa",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#0f0f12",
+    "theme_color": "#0f0f12",
+    "orientation": "portrait",
+    "icons": [
+        {
+            "src": "/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        }
+    ]
+}

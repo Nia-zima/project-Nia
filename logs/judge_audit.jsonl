@@ -1,0 +1,5 @@
+{"timestamp": "2026-01-14T21:30:17.105229", "thread_id": "default_thread", "user_input": "ニア、この前話した自然の写真が見たいって覚えてる？", "summary": null, "surprise": 0.0, "importance": 0.0, "saved": false, "reason_tag": "smalltalk"}
+{"timestamp": "2026-01-14T21:30:51.580896", "thread_id": "default_thread", "user_input": "違う、俺が言ったんじゃなくてニアが言ったんだよ", "summary": "Userは、自分が言ったのではないニアが発言したと主張している。", "surprise": 0.0, "importance": 0.5, "saved": false, "reason_tag": "statement"}
+{"timestamp": "2026-01-14T21:31:29.576576", "thread_id": "default_thread", "user_input": "覚えてないときは覚えてないって言ってね", "summary": "覚えていないときは覚えていないと言ってほしい。", "surprise": 0.0, "importance": 0.2, "saved": false, "reason_tag": "instruction"}
+{"timestamp": "2026-01-14T21:32:28.228312", "thread_id": "default_thread", "user_input": "だから、違うよ。俺が自然の画像を見たいって言ったんじゃなくて、ニアが見たいって言ったんだよ？", "summary": null, "surprise": 0.0, "importance": 0.0, "saved": false, "reason_tag": "misunderstanding"}
+{"timestamp": "2026-01-14T21:33:15.251505", "thread_id": "default_thread", "user_input": "気楽に話してってことも忘れちゃった？", "summary": null, "surprise": 0.0, "importance": 0.0, "saved": false, "reason_tag": "smalltalk"}

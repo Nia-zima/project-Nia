@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0f0f12;
+  --foreground: #ededed;
+  --primary: #3b82f6;
+  --primary-glow: rgba(59, 130, 246, 0.5);
+  --glass-bg: rgba(20, 20, 25, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.1);
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: 'Inter', sans-serif;
+  overflow: hidden;
+  /* App-like feel */
+}
+
+/* Mobile viewport height fix - prevents browser address bar from cutting off content */
+html,
+body {
+  height: 100%;
+  height: -webkit-fill-available;
+  overflow-x: hidden;
+  /* Prevent horizontal scroll on mobile */
+  max-width: 100vw;
+}
+
+/* Use dynamic viewport height for mobile */
+.h-screen {
+  height: 100vh;
+  height: 100dvh;
+  /* Dynamic viewport height - accounts for mobile browser UI */
+}
+
+/* Glassmorphism Utilities */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+}
+
+.glass-panel {
+  background: rgba(30, 30, 35, 0.6);
+  backdrop-filter: blur(16px);
+  border-right: 1px solid var(--glass-border);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Animations */
+@keyframes pulse-glow {
+
+  0%,
+  100% {
+    box-shadow: 0 0 10px var(--primary-glow);
+  }
+
+  50% {
+    box-shadow: 0 0 20px var(--primary-glow);
+  }
+}
+
+.animate-glow {
+  animation: pulse-glow 2s infinite;
+}

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nia Monitor</title>
+    <style>
+        body {
+            font-family: "Helvetica Neue", Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            display: flex;
+            justify-content: center; /* ★修正: content-center -> justify-content */
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .card {
+            background: #2d2d2d;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            text-align: center;
+            width: 80%;
+            max-width: 400px;
+        }
+        h1 { margin: 0 0 10px 0; font-size: 2em; color: #fff; }
+        .label { font-size: 0.8em; color: #888; text-transform: uppercase; letter-spacing: 2px; }
+        .value { font-size: 1.2em; margin-bottom: 20px; font-weight: bold; color: #4CAF50; }
+        .note { font-size: 0.9em; color: #aaa; font-style: italic; border-top: 1px solid #444; padding-top: 15px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="label">Chapter</div>
+        <h1 id="chapter">Loading...</h1>
+        
+        <div class="label">Current Vibe</div>
+        <div class="value" id="vibe">...</div>
+        
+        <div class="note" id="note">Connecting to Nia...</div>
+    </div>
+
+    <script>
+        async function update() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                
+                document.getElementById('chapter').innerText = data.chapter_title || "Unknown";
+                document.getElementById('vibe').innerText = data.vibe || "Neutral";
+                document.getElementById('note').innerText = data.note || "";
+            } catch (e) {
+                document.getElementById('note').innerText = "Offline (Sleeping)";
+            }
+        }
+        
+        // ★修正: スマホのバッテリー対策で2秒間隔に変更
+        setInterval(update, 2000);
+        update();
+    </script>
+</body>
+</html>
