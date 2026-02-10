@@ -6,16 +6,20 @@
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "lint:priority": "node scripts/priority-lint-report.mjs",
+    "lint:priority:update": "node scripts/priority-lint-report.mjs --update-baseline"
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.4.4",
+    "@ricky0123/vad-web": "^0.0.30",
     "clsx": "^2.1.1",
     "framer-motion": "^12.23.26",
     "lucide-react": "^0.562.0",
     "next": "16.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "swr": "^2.4.0",
     "tailwind-merge": "^3.4.0",
     "three": "^0.182.0"
   },

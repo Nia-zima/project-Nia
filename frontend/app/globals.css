@@ -1,18 +1,22 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0f0f12;
-  --foreground: #ededed;
-  --primary: #3b82f6;
-  --primary-glow: rgba(59, 130, 246, 0.5);
-  --glass-bg: rgba(20, 20, 25, 0.7);
+  --background: #0d0f14;
+  --foreground: #eef2f7;
+  --primary: #34d399;
+  --primary-glow: rgba(52, 211, 153, 0.4);
+  --glass-bg: rgba(17, 20, 26, 0.72);
   --glass-border: rgba(255, 255, 255, 0.1);
+  --surface-1: rgba(15, 18, 24, 0.85);
+  --surface-2: rgba(24, 28, 36, 0.78);
+  --accent-cyan: rgba(34, 211, 238, 0.18);
+  --accent-amber: rgba(251, 191, 36, 0.16);
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-space-grotesk), ui-sans-serif, system-ui, -apple-system, sans-serif;
   overflow: hidden;
   /* App-like feel */
 }
@@ -46,6 +50,10 @@ body {
   background: rgba(30, 30, 35, 0.6);
   backdrop-filter: blur(16px);
   border-right: 1px solid var(--glass-border);
+}
+
+.font-mono {
+  font-family: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 /* Scrollbar */
@@ -82,4 +90,32 @@ body {
 
 .animate-glow {
   animation: pulse-glow 2s infinite;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise {
+  animation: rise-in 0.5s ease-out both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade {
+  animation: fade-in 0.6s ease-out both;
 }

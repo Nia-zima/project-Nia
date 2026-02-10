@@ -1,6 +1,5 @@
-
 "use client";
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, VRM } from '@pixiv/three-vrm';
@@ -8,39 +7,45 @@ import { VRMLoaderPlugin, VRMUtils, VRM } from '@pixiv/three-vrm';
 interface AvatarProps {
     isTalking: boolean;
     emotion: string;
+    isThinking?: boolean;
+    stateTag?: string;
 }
 
-export default function AvatarView({ isTalking, emotion }: AvatarProps) {
+export default function AvatarView({ isTalking, emotion, isThinking = false, stateTag = "" }: AvatarProps) {
     const containerRef = useRef<HTMLDivElement>(null);
-    // Using Ref for VRM to ensure the animation loop always has the latest instance
     const vrmRef = useRef<VRM | null>(null);
     const clockRef = useRef(new THREE.Clock());
+    const emotionRef = useRef<string>(emotion);
+    const stateRef = useRef<string>(stateTag);
+    const thinkingRef = useRef<boolean>(isThinking);
+    const noiseRef = useRef({
+        currentFreq: 1.0,
+        targetFreq: 1.0,
+        nextUpdateAt: 0,
+        phase: 0,
+        seed: 42.1337,
+    });
 
     useEffect(() => {
         if (!containerRef.current) return;
 
-        // Scene Setup
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x0f0f12);
 
-        // Camera
         const camera = new THREE.PerspectiveCamera(30, containerRef.current.clientWidth / containerRef.current.clientHeight, 0.1, 20.0);
         camera.position.set(0.0, 1.3, 1.4);
 
-        // Renderer
         const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
         renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
         containerRef.current.appendChild(renderer.domElement);
 
-        // Light
         const light = new THREE.DirectionalLight(0xffffff);
         light.position.set(1.0, 1.0, 1.0).normalize();
         scene.add(light);
         const ambient = new THREE.AmbientLight(0x404040);
         scene.add(ambient);
 
-        // Loader
         const loader = new GLTFLoader();
         loader.register((parser) => new VRMLoaderPlugin(parser));
 
@@ -50,40 +55,97 @@ export default function AvatarView({ isTalking, emotion }: AvatarProps) {
                 const vrm = gltf.userData.vrm;
                 VRMUtils.removeUnnecessaryVertices(gltf.scene);
                 VRMUtils.combineSkeletons(gltf.scene);
-
                 vrm.scene.rotation.y = 0;
                 scene.add(vrm.scene);
-                vrmRef.current = vrm; // Set to Ref
-                console.log("VRM Charged and Ready");
+                vrmRef.current = vrm;
             },
             (progress) => console.log('Loading VRM...', 100.0 * (progress.loaded / progress.total), '%'),
             (error) => console.error("VRM Load Failed:", error)
         );
 
-        // Animation Loop
+        const getMotionParams = () => {
+            const state = (stateRef.current || "").toLowerCase();
+            const emotionTag = (emotionRef.current || "").toLowerCase();
+            const tag = state || emotionTag;
+            const pondering = Boolean(thinkingRef.current) || tag === "pondering";
+
+            let amplitude = 0.0045;
+            let baseFrequency = 0.55;
+            let jitter = 0.18;
+            let damping = 0.08;
+
+            if (tag === "consent") {
+                amplitude = 0.0030;
+                damping = 0.14;
+                jitter = 0.08;
+            }
+
+            if (tag === "dissonance") {
+                amplitude = 0.0060;
+                baseFrequency = 0.8;
+                jitter = 0.35;
+                damping = 0.05;
+            }
+
+            if (pondering) {
+                baseFrequency = 0.5;
+                jitter = 0.12;
+            }
+
+            return { amplitude, baseFrequency, jitter, damping, pondering };
+        };
+
         const animate = () => {
             requestAnimationFrame(animate);
             const delta = clockRef.current.getDelta();
             const vrm = vrmRef.current;
 
             if (vrm) {
-                // --- 1. Override Pose (Every frame to beat constraints) ---
                 const humanoid = vrm.humanoid;
                 if (humanoid) {
                     const leftArm = humanoid.getNormalizedBoneNode('leftUpperArm');
                     const rightArm = humanoid.getNormalizedBoneNode('rightUpperArm');
-                    if (leftArm) leftArm.rotation.z = -1.3; // Lower arm
+                    if (leftArm) leftArm.rotation.z = -1.3;
                     if (rightArm) rightArm.rotation.z = 1.3;
                 }
 
-                // --- 2. Update VRM ---
                 vrm.update(delta);
 
-                // --- 3. Idle Motion (Breathing) ---
-                const s = Math.sin(clockRef.current.elapsedTime);
-                vrm.scene.rotation.z = s * 0.005;
+                const t = clockRef.current.elapsedTime;
+                const { amplitude, baseFrequency, jitter, damping, pondering } = getMotionParams();
 
-                // Blink Logic
+                if (t >= noiseRef.current.nextUpdateAt) {
+                    const pseudo = Math.sin(t * 1.731 + noiseRef.current.seed) * 0.5 + 0.5;
+                    noiseRef.current.targetFreq = Math.max(0.4, baseFrequency + (pseudo - 0.5) * jitter * 2.0);
+                    const interval = 1.5 + (pseudo * 1.5); // 1.5〜3.0秒
+                    noiseRef.current.nextUpdateAt = t + interval;
+                }
+
+                noiseRef.current.currentFreq += (noiseRef.current.targetFreq - noiseRef.current.currentFreq) * damping;
+                noiseRef.current.phase += noiseRef.current.currentFreq * delta * Math.PI * 2.0;
+
+                let amp = amplitude;
+                if (pondering) {
+                    const slowT = t * (Math.PI * 2.0) * 0.2; // 0.2Hz
+                    const wave = 0.5 + 0.5 * Math.sin(slowT);
+                    amp = amplitude * (0.3 + 0.7 * wave);
+                }
+
+                vrm.scene.rotation.z = Math.sin(noiseRef.current.phase) * amp;
+
+                if (humanoid) {
+                    const head = humanoid.getNormalizedBoneNode('head');
+                    if (head) {
+                        if (thinkingRef.current) {
+                            head.rotation.y = Math.sin(t * 0.7) * 0.15;
+                            head.rotation.x = -0.06 + Math.sin(t * 0.9) * 0.03;
+                        } else {
+                            head.rotation.x = 0;
+                            head.rotation.y = 0;
+                        }
+                    }
+                }
+
                 if (Math.random() < 0.005) {
                     vrm.expressionManager?.setValue('blink', 1.0);
                     setTimeout(() => vrm.expressionManager?.setValue('blink', 0.0), 100);
@@ -94,7 +156,6 @@ export default function AvatarView({ isTalking, emotion }: AvatarProps) {
         };
         animate();
 
-        // Resize Handler
         const handleResize = () => {
             if (!containerRef.current) return;
             camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
@@ -112,12 +173,22 @@ export default function AvatarView({ isTalking, emotion }: AvatarProps) {
         };
     }, []);
 
-    // --- Sync Emotion & Talking State (Runs on props change) ---
+    useEffect(() => {
+        emotionRef.current = emotion;
+    }, [emotion]);
+
+    useEffect(() => {
+        stateRef.current = stateTag;
+    }, [stateTag]);
+
+    useEffect(() => {
+        thinkingRef.current = isThinking;
+    }, [isThinking]);
+
     useEffect(() => {
         const vrm = vrmRef.current;
         if (!vrm || !vrm.expressionManager) return;
 
-        // Reset Expressions (Keep current one)
         const list = vrm.expressionManager.expressions;
         list.forEach(e => {
             if (e.expressionName !== 'blink' && e.expressionName !== 'aa') {
@@ -125,23 +196,23 @@ export default function AvatarView({ isTalking, emotion }: AvatarProps) {
             }
         });
 
-        // Set Emotion
         let targetExpression = 'neutral';
         if (emotion === 'happy') targetExpression = 'happy';
         if (emotion === 'sad') targetExpression = 'sad';
         if (emotion === 'angry') targetExpression = 'angry';
         if (emotion === 'surprised') targetExpression = 'surprised';
+        if (emotion === 'consent') targetExpression = 'neutral';
+        if (emotion === 'dissonance') targetExpression = 'neutral';
+        if (emotion === 'pondering') targetExpression = 'neutral';
 
         if (vrm.expressionManager.getExpression(targetExpression)) {
             vrm.expressionManager.setValue(targetExpression, 1.0);
         } else {
-            // Fallback to joy if happy missing
             if (emotion === 'happy') vrm.expressionManager.setValue('joy', 1.0);
             else vrm.expressionManager.setValue('neutral', 1.0);
         }
     }, [emotion]);
 
-    // Lip Sync Animation Loop (Independent)
     useEffect(() => {
         let frameId: number;
         const lipLoop = () => {

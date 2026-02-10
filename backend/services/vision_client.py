@@ -12,11 +12,13 @@ from typing import Optional, Dict, Any
 import httpx
 from PIL import Image, ImageOps
 
+from backend.core.config import settings
+
 logger = logging.getLogger("AI_Buddy")
 
 # ===== Config =====
-OLLAMA_URL = "http://localhost:11434"
-VISION_MODEL = "qwen3-vl:4b"
+OLLAMA_URL = settings.OLLAMA_BASE_URL
+VISION_MODEL = settings.VISION_MODEL
 
 MAX_IMAGE_SIZE = 768          # 長辺最大(px)
 JPEG_QUALITY = 82             # 70-90くらいがバランス良い
@@ -130,6 +132,17 @@ async def analyze_image(
 
     resized_b64 = _b64encode_ascii(jpeg_bytes)
 
+    
+    provider = getattr(settings, "VISION_PROVIDER", "ollama").lower()
+    
+    if provider in ("openai", "lmstudio"):
+        return await analyze_image_openai(
+            resized_b64,
+            prompt=prompt,
+            timeout_sec=timeout_sec
+        )
+
+    # --- Default: Ollama ---
     # 4) Ollamaへ
     payload: Dict[str, Any] = {
         "model": VISION_MODEL,
@@ -143,6 +156,69 @@ async def analyze_image(
     }
 
     url = f"{OLLAMA_URL}/api/generate"
+
+async def analyze_image_openai(
+    base64_image: str,
+    prompt: str,
+    timeout_sec: float
+) -> str:
+    """OpenAI互換 (LM Studio) 用"""
+    from backend.core.config import settings
+    
+    # settingsからURL/Key/Modelを取得
+    # .envで VISION_BASE_URL, VISION_API_KEY を設定可能にする想定
+    # 指定なければ通常の OPENAI_BASE_URL をフォールバック利用
+    base_url = getattr(settings, "VISION_BASE_URL", None) or settings.OPENAI_BASE_URL
+    api_key = getattr(settings, "VISION_API_KEY", None) or settings.OPENAI_API_KEY
+    model = settings.VISION_MODEL
+    
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1" if not base_url.endswith("/") else f"{base_url}v1"
+
+    url = f"{base_url}/chat/completions"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 300,
+        "temperature": VISION_TEMPERATURE,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            r = await client.post(url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content", "")
+        return content.strip() or "[画像の説明を生成できませんでした]"
+
+    except httpx.TimeoutException:
+        logger.warning("[VISION] OpenAI/LMStudio Timeout (%.1fs)", timeout_sec)
+        return "[画像の解析がタイムアウトしました]"
+    except Exception as e:
+        logger.exception("[VISION] OpenAI/LMStudio Error: %s", e)
+        return "[画像の解析に失敗しました]"
 
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:

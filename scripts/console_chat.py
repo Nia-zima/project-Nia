@@ -1,14 +1,10 @@
 import asyncio
 import sys
-import os
 
-# backendモジュールを読み込めるようにパスを通す
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from backend.core.agent import run_agent_stream
+from backend.services.memory_manager import memory_manager
 
-from backend.agent import run_agent_stream
-from backend.memory_manager import memory_manager
-
-async def main():
+async def main() -> None:
     # 起動時の演出
     print("\n" + "="*50)
     print(" 🤖 AI相棒システム (Gemma 3 Version) 起動中...")
@@ -53,7 +49,7 @@ async def main():
 
 if __name__ == "__main__":
     # Windowsでの非同期ループポリシー設定（エラー回避用）
-    if sys.platform.startswith('win'):
+    if sys.platform.startswith("win"):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
     asyncio.run(main())

@@ -1,9 +1,10 @@
 
-import networkx as nx
 import aiosqlite
+import networkx as nx
 import sqlite3
 from typing import List, Dict
-from backend.services.memory_manager import memory_manager
+
+from backend.core.config import settings
 from backend.core.logger import logger
 
 class KnowledgeGraph:
@@ -15,9 +16,7 @@ class KnowledgeGraph:
         """データベースからトリプレットを読み込み、NetworkXグラフを構築する"""
         self.graph.clear()
         try:
-            # Getting DB Path from memory manager instance
-            db_path = memory_manager.db_path
-            async with aiosqlite.connect(db_path) as conn:
+            async with aiosqlite.connect(str(settings.DB_PATH)) as conn:
                 async with conn.execute("SELECT subject, predicate, object FROM triplets") as cursor:
                     rows = await cursor.fetchall()
                 
@@ -41,8 +40,7 @@ class KnowledgeGraph:
         """Sync build for tools"""
         self.graph.clear()
         try:
-            db_path = memory_manager.db_path
-            with sqlite3.connect(db_path) as conn:
+            with sqlite3.connect(str(settings.DB_PATH)) as conn:
                 cursor = conn.execute("SELECT subject, predicate, object FROM triplets")
                 rows = cursor.fetchall()
             

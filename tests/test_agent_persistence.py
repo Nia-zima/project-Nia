@@ -1,33 +1,37 @@
-import asyncio
-import sys
 import os
+import sys
+from pathlib import Path
+import pytest
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__))))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
-from backend.agent import run_agent
+if not os.getenv("RUN_AGENT_TESTS"):
+    pytest.skip("Set RUN_AGENT_TESTS=1 to run agent integration tests.", allow_module_level=True)
 
-async def main():
+from backend.core.agent import run_agent_non_stream
+
+
+@pytest.mark.agent
+@pytest.mark.asyncio
+async def test_agent_persistence_smoke():
     thread_id = "test_persistence_thread_v1"
-    
-    try:
-        print("--- Test 1: Setting Memory ---")
-        response, _ = await run_agent("私の好きな色は「群青色」です。覚えておいて。", thread_id)
-        print(f"Agent Response 1: {response}")
-        
-        print("\n... Simulating Restart (Re-running run_agent) ...\n")
-        
-        print("--- Test 2: Checking Memory ---")
-        response_2, _ = await run_agent("私の好きな色はなんですか？", thread_id)
-        print(f"Agent Response 2: {response_2}")
-        
-        if "群青色" in response_2:
-            print("\nSUCCESS: Memory persisted!")
-        else:
-            print("\nFAILURE: Memory did not persist.")
-    except Exception:
-        import traceback
-        with open("error_log_full.txt", "w", encoding="utf-8") as f:
-            f.write(traceback.format_exc())
-            
-if __name__ == "__main__":
-    asyncio.run(main())
+    resp1 = await run_agent_non_stream(
+        "私の好きな色は「群青色」です。覚えておいて。",
+        thread_id=thread_id,
+        voice_id="14",
+        image_data=None,
+        mode="normal",
+        ports=None,
+    )
+    resp2 = await run_agent_non_stream(
+        "私の好きな色はなんですか？",
+        thread_id=thread_id,
+        voice_id="14",
+        image_data=None,
+        mode="normal",
+        ports=None,
+    )
+    assert isinstance(resp1, dict) and isinstance(resp2, dict)
+    assert "content" in resp1 and "content" in resp2

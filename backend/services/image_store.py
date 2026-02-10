@@ -3,15 +3,16 @@
 画像をファイル保存してURLを返すサービス。
 音声B案と同じ方式で、base64ではなくURLで配信する。
 """
-import os
-import io
 import base64
+import io
 import uuid
+from pathlib import Path
 from typing import Optional, Tuple
+
 from PIL import Image
 
-import logging
-logger = logging.getLogger("AI_Buddy")
+from backend.core.config import settings
+from backend.core.logger import logger
 
 
 def _strip_data_url_prefix(b64_or_dataurl: str) -> str:
@@ -30,7 +31,7 @@ def save_image_dataurl_to_file(
     thread_id: str = "default_thread",
     max_size: int = 1280,          # 長辺
     quality: int = 85,             # JPEG品質
-    base_dir: Optional[str] = None # static/images の実体パス
+    base_dir: Optional[Path] = None # static/images の実体パス
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     dataURL(base64)をファイルに保存してURLを返す。
@@ -40,11 +41,11 @@ def save_image_dataurl_to_file(
     """
     try:
         if base_dir is None:
-            # backend/static/images
-            here = os.path.dirname(os.path.abspath(__file__))
-            base_dir = os.path.join(here, "..", "static", "images")
+            base_dir = settings.STATIC_DIR / "images"
+        elif not isinstance(base_dir, Path):
+            base_dir = Path(base_dir)
 
-        os.makedirs(base_dir, exist_ok=True)
+        base_dir.mkdir(parents=True, exist_ok=True)
 
         clean_b64 = _strip_data_url_prefix(image_dataurl)
         if not clean_b64:
@@ -68,11 +69,11 @@ def save_image_dataurl_to_file(
             logger.info(f"[IMAGE] Size OK: {w}x{h}")
 
         # 保存先
-        thread_dir = os.path.join(base_dir, thread_id)
-        os.makedirs(thread_dir, exist_ok=True)
+        thread_dir = base_dir / thread_id
+        thread_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"{uuid.uuid4().hex}.jpg"
-        filepath = os.path.join(thread_dir, filename)
+        filepath = thread_dir / filename
 
         img.save(filepath, format="JPEG", quality=quality, optimize=True)
 

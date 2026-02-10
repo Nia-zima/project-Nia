@@ -1,55 +1,31 @@
-import os
 import asyncio
-import aiohttp
-import json
 import logging
-from datetime import datetime, timedelta
+import sys
+
+from backend.core.config import settings
+from backend.core.logger import setup_logging
 
 # モジュール
+from backend.services.llm_client import call_llm
 from backend.services.memory_manager import memory_manager
 from backend.services.vector_store import vector_store
 
 # ロガー設定
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+setup_logging(level="INFO", log_file=settings.PROJECT_ROOT / "logs" / "stream_digest.log", console=True)
 logger = logging.getLogger("StreamDigest")
 
-# 設定
-from backend.core.config import settings
-
-# API URL構築
-base = settings.OPENAI_BASE_URL.rstrip("/")
-if not base.endswith("/v1"):
-    base += "/v1"
-LLM_API_URL = f"{base}/chat/completions"
-
-MODEL_NAME = settings.OPENAI_MODEL 
-
-async def call_llm(messages, temperature=0.3):
-    payload = {"model": MODEL_NAME, "messages": messages, "temperature": temperature, "max_tokens": 1000}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(LLM_API_URL, json=payload) as resp:
-                if resp.status != 200:
-                    logger.error(f"LLM Error: {await resp.text()}")
-                    return None
-                data = await resp.json()
-                return data['choices'][0]['message']['content']
-    except Exception as e:
-        logger.error(f"Connection Error: {e}")
-        return None
-
-async def digest_streams(days=7):
+async def digest_streams(days: int = 7) -> None:
     """
     直近の配信記憶(livestream)を収集し、
     「具体的な単語」を排除した「雰囲気」だけのダイジェストを作成してPrivate保存する。
     """
-    logger.info("🎬 === Stream Memory Digest Protocol === 🎬")
+    logger.info("🎬 === Stream Memory Digest Protocol (%s days) === 🎬", days)
     
     # 1. 配信記憶の収集 (VectorStoreの機能を使うか、直接DBを叩く)
     # ここでは簡易的に VectorStore の private コレクションメソッドを流用しつつ ChromaDB のフィルタ機能を使う想定
     # ※ 厳密には Stream Memory は別の Collection (col_stream) にある
     
-    if not vector_store:
+    if not vector_store or not vector_store.is_active:
         logger.error("VectorStore not initialized.")
         return
 
@@ -107,8 +83,6 @@ async def digest_streams(days=7):
             
             # 3. Private Memory への昇華
             # これで「配信の記憶」は消えても「配信をしたという事実と雰囲気」は一生残る
-            # 3. Private Memory への昇華
-            # これで「配信の記憶」は消えても「配信をしたという事実と雰囲気」は一生残る
             await memory_manager.add_episode(
                 summary=digest,
                 category="stream_digest",
@@ -123,6 +97,6 @@ async def digest_streams(days=7):
         logger.error(f"Digest Error: {e}")
 
 if __name__ == "__main__":
-    import sys
-    if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(digest_streams(days=7))

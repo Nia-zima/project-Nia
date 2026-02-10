@@ -1,7 +1,8 @@
-import json
 import asyncio
-from backend.core.logger import logger
+import json
+
 from backend.core.db import get_conn
+from backend.core.logger import logger
 
 class TelemetryLogger:
     def __init__(self):
@@ -13,16 +14,14 @@ class TelemetryLogger:
         pass
 
     def _event_sync(self, thread_id: str | None, event_type: str, payload_json: str):
-        conn = get_conn()
         try:
-            conn.execute(
-                "INSERT INTO events (thread_id, event_type, payload_json) VALUES (?, ?, ?)",
-                (thread_id, event_type, payload_json)
-            )
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO events (thread_id, event_type, payload_json) VALUES (?, ?, ?)",
+                    (thread_id, event_type, payload_json),
+                )
         except Exception:
             logger.exception("[telemetry] failed to write event")
-        finally:
-            conn.close()
 
     async def event(self, thread_id: str | None, event_type: str, payload: dict | None = None):
         try:

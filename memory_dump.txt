@@ -1,0 +1,38 @@
+--- Testing Memory ---
+Current memories table:
+{'id': 30, 'ts': '2026-02-04 12:11:51', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 29, 'ts': '2026-02-04 12:11:51', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 28, 'ts': '2026-02-04 10:25:42', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 27, 'ts': '2026-02-04 10:25:42', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 26, 'ts': '2026-02-04 10:23:12', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 25, 'ts': '2026-02-04 10:23:12', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 24, 'ts': '2026-02-01 11:27:31', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 23, 'ts': '2026-02-01 11:27:31', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 22, 'ts': '2026-02-01 11:26:42', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 21, 'ts': '2026-02-01 11:26:42', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 20, 'ts': '2026-02-01 11:06:03', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 19, 'ts': '2026-02-01 11:06:03', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 18, 'ts': '2026-02-01 11:01:13', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 17, 'ts': '2026-02-01 11:01:13', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 16, 'ts': '2026-02-01 10:53:09', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 15, 'ts': '2026-02-01 10:53:09', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 14, 'ts': '2026-02-01 10:42:52', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 13, 'ts': '2026-02-01 10:42:51', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 12, 'ts': '2026-02-01 10:40:44', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 11, 'ts': '2026-02-01 10:40:44', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 10, 'ts': '2026-02-01 10:29:22', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 9, 'ts': '2026-02-01 10:29:22', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 8, 'ts': '2026-02-01 10:27:04', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 7, 'ts': '2026-02-01 10:27:04', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 6, 'ts': '2026-02-01 10:24:27', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 5, 'ts': '2026-02-01 10:24:27', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 4, 'ts': '2026-02-01 10:11:56', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 3, 'ts': '2026-02-01 10:11:56', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 2, 'ts': '2026-02-01 06:40:41', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+{'id': 1, 'ts': '2026-02-01 06:39:27', 'content': '記憶に保存します', 'tags_json': '[]', 'confidence': 0.8, 'surprise': 0.0, 'source': 'manual_save', 'thread_id': None}
+
+--- Testing recall_memories('ジュン') ---
+(no results)
+
+--- Testing recall_memories('仕事') ---
+(no results)

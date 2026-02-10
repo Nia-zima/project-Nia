@@ -1,56 +1,38 @@
-import os
 import asyncio
-import aiohttp
 import json
 import logging
+import sys
 from datetime import datetime, timedelta
-from typing import List, Dict
+from pathlib import Path
+from typing import Any
 
 # モジュール群
 from backend.services.identity_manager import identity_manager
 from backend.services.memory_manager import memory_manager
+from backend.services.llm_client import call_llm
+from backend.services.public_status import read_public_status, write_public_status
 from backend.core.config import settings
+from backend.core.logger import setup_logging
 
 # ロガー設定
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+setup_logging(level="INFO", log_file=settings.PROJECT_ROOT / "logs" / "chapter_reflection.log", console=True)
 logger = logging.getLogger("ChapterReflection")
 
-# API URL構築
-base = settings.OPENAI_BASE_URL.rstrip("/")
-if not base.endswith("/v1"):
-    base += "/v1"
-LLM_API_URL = f"{base}/chat/completions"
-
-MODEL_NAME = settings.OPENAI_MODEL
-
 # パス設定
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DIGEST_FILE = os.path.join(PROJECT_ROOT, "logs", "world_context", "stream_digests.jsonl")
-CHAPTER_DIR = os.path.join(PROJECT_ROOT, "logs", "chapters")
-os.makedirs(CHAPTER_DIR, exist_ok=True)
+PROJECT_ROOT = settings.PROJECT_ROOT
+DIGEST_FILE = PROJECT_ROOT / "logs" / "world_context" / "stream_digests.jsonl"
+CHAPTER_DIR = PROJECT_ROOT / "logs" / "chapters"
+CHAPTER_DIR.mkdir(parents=True, exist_ok=True)
 
 # 設定: 軍事レベルのセキュリティ (Digestの原文を破棄し統計のみにする)
 MILITARY_GRADE_SAFETY = True 
 
-async def call_llm(messages, temperature=0.4):
-    payload = {"model": MODEL_NAME, "messages": messages, "temperature": temperature, "max_tokens": 2000}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(LLM_API_URL, json=payload) as resp:
-                if resp.status != 200:
-                    logger.error(f"LLM Error: {await resp.text()}")
-                    return None
-                data = await resp.json()
-                return data['choices'][0]['message']['content']
-    except Exception as e:
-        logger.error(f"Connection Error: {e}")
-        return None
 
 class ChapterEngine:
-    def __init__(self):
+    def __init__(self) -> None:
         self.today = datetime.now()
 
-    def _simplify_digest(self, entries: List[Dict]) -> str:
+    def _simplify_digest(self, entries: list[dict[str, Any]]) -> str:
         """【軍事レベル防壁】Digestの文章を捨て、事実と統計だけにする"""
         count = len(entries)
         if count == 0:
@@ -65,12 +47,12 @@ class ChapterEngine:
 
     def load_digests(self, start_date: str, end_date: str) -> str:
         """Phase 4.5 Digest読み込み"""
-        if not os.path.exists(DIGEST_FILE):
+        if not DIGEST_FILE.exists():
             return "（配信記録なし）"
         
         relevant_entries = []
         try:
-            with open(DIGEST_FILE, "r", encoding="utf-8") as f:
+            with DIGEST_FILE.open("r", encoding="utf-8") as f:
                 for line in f:
                     entry = json.loads(line)
                     if start_date <= entry["date"] <= end_date:
@@ -92,7 +74,7 @@ class ChapterEngine:
             logger.error(f"Digest Load Error: {e}")
             return "（ダイジェスト読み込みエラー）"
 
-    def save_public_view(self, chapter_data, date_str):
+    def save_public_view(self, chapter_data: dict[str, Any], date_str: str) -> None:
         """Phase 5.3: 視聴者向け「章の可視化」＆ 新章突入ログ"""
         new_chapter_id = f"chapter_{date_str.replace('-', '')}"
         
@@ -106,19 +88,11 @@ class ChapterEngine:
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M")
         }
         
-        public_path = os.path.join(PROJECT_ROOT, "public_status.json")
-        
         # 変更検知用
-        old_chapter_id = None
-        if os.path.exists(public_path):
-            try:
-                with open(public_path, "r", encoding="utf-8") as f:
-                    old_chapter_id = json.load(f).get("chapter_id")
-            except: pass
+        old_chapter_id = read_public_status(default={}).get("chapter_id")
 
         try:
-            with open(public_path, "w", encoding="utf-8") as f:
-                json.dump(public_view, f, ensure_ascii=False, indent=2)
+            write_public_status(public_view)
             
             # ★ 改善: 新章突入ログ
             if old_chapter_id != new_chapter_id:
@@ -129,7 +103,7 @@ class ChapterEngine:
         except Exception as e:
             logger.error(f"Failed to save public view: {e}")
 
-    async def reflect(self, days=7):
+    async def reflect(self, days: int = 7) -> None:
         logger.info("📚 === Phase 5: Chapter Reflection Protocol === 📚")
 
         end_date_str = self.today.strftime("%Y-%m-%d")
@@ -200,7 +174,11 @@ class ChapterEngine:
 
 ※ 注意: Core Identity（存在理由など）には触れないでください。
 """
-        response = await call_llm([{"role": "system", "content": prompt}], temperature=0.3)
+        response = await call_llm(
+            [{"role": "system", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2000,
+        )
         if not response:
             logger.error("❌ Reflection failed.")
             return
@@ -229,8 +207,8 @@ class ChapterEngine:
 
             # 保存
             filename = f"chapter_reflection_{end_date_str}.json"
-            path = os.path.join(CHAPTER_DIR, filename)
-            with open(path, "w", encoding="utf-8") as f:
+            path = CHAPTER_DIR / filename
+            with path.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             
             logger.info(f"💾 Reflection saved to {path}")
@@ -243,8 +221,8 @@ class ChapterEngine:
             logger.error(f"Raw Response: {response}")
 
 if __name__ == "__main__":
-    import sys
-    if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
     engine = ChapterEngine()
     asyncio.run(engine.reflect(days=7))

@@ -1,8 +1,10 @@
-import os
+from pathlib import Path
+
+from backend.core.config import settings
 
 # プロジェクトルートの特定
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DOCS_DIR = os.path.join(PROJECT_ROOT, "docs")
+PROJECT_ROOT = settings.PROJECT_ROOT
+DOCS_DIR = PROJECT_ROOT / "docs"
 
 # 1. 運用マニュアル (OPERATION_MANUAL.md)
 MANUAL_TEXT = """# 📘 ニア(Near) 運用マニュアル
@@ -107,18 +109,18 @@ DIR_TEXT = """# 📂 ディレクトリマップ
 """
 
 def generate():
-    os.makedirs(DOCS_DIR, exist_ok=True)
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
     
     # Manual
-    with open(os.path.join(DOCS_DIR, "OPERATION_MANUAL.md"), "w", encoding="utf-8") as f:
+    with open(DOCS_DIR / "OPERATION_MANUAL.md", "w", encoding="utf-8") as f:
         f.write(MANUAL_TEXT)
     
     # Specs
-    with open(os.path.join(DOCS_DIR, "SYSTEM_SPEC.md"), "w", encoding="utf-8") as f:
+    with open(DOCS_DIR / "SYSTEM_SPEC.md", "w", encoding="utf-8") as f:
         f.write(SPEC_TEXT)
     
     # Dir Map
-    with open(os.path.join(DOCS_DIR, "DIRECTORY_MAP.md"), "w", encoding="utf-8") as f:
+    with open(DOCS_DIR / "DIRECTORY_MAP.md", "w", encoding="utf-8") as f:
         f.write(DIR_TEXT)
     
     print(f"✅ Documentation generated in: {DOCS_DIR}")

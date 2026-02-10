@@ -1,9 +1,11 @@
 # backend/services/memory_store.py
 from __future__ import annotations
+
+import json
 import time
 import uuid
-import json
 from typing import List, Optional, Dict
+
 from backend.core.db import get_conn
 from backend.core.logger import logger
 
@@ -138,14 +140,10 @@ class MemoryStore:
         """
         Record memory judgment result for audit logging.
         """
-        import time, uuid
-        from backend.core.db import get_conn
-
         jid = uuid.uuid4().hex
         ts = int(time.time())
-        conn = get_conn()
         try:
-            with conn: # Context manager handles parsing transaction
+            with get_conn() as conn:
                 conn.execute(
                     """
                     INSERT INTO memory_judgments
@@ -159,8 +157,6 @@ class MemoryStore:
         except Exception as e:
             logger.error(f"[MemoryStore] Failed to record judgment: {e}")
             return ""
-        finally:
-            conn.close()
 
 memory_store = MemoryStore()
 

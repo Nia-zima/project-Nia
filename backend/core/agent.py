@@ -1,704 +1,416 @@
-import os
 import re
-import json
-import uuid
-import base64
 import asyncio
+import base64
+import json
 import datetime
-import time
-import copy
-import operator
-from typing import Annotated, Sequence, TypedDict, List, Optional, Dict, Any
-from langgraph.checkpoint.memory import MemorySaver
+import logging
+from typing import Optional
 
-def extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
-    """Extract the first JSON object from model output robustly."""
-    if not text:
-        return None
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-    # 1) Prefer fenced code block: ```json ... ```
-    codeblock_patterns = [
-        r"```json\s*(\{.*?\})\s*```",
-        r"```\s*(\{.*?\})\s*```",
-    ]
-    for pat in codeblock_patterns:
-        m = re.search(pat, text, flags=re.DOTALL | re.IGNORECASE)
-        if m:
-            candidate = m.group(1).strip()
-            try:
-                obj = json.loads(candidate)
-                return obj if isinstance(obj, dict) else None
-            except json.JSONDecodeError:
-                pass
+# --- New Refactored Modules ---
+from backend.core.agent_graph.state import AgentState
+from backend.core.agent_graph.review_window import (
+    build_hold_cancelled_event,
+    build_hold_request_event,
+    get_review_token,
+)
+from backend.core.agent_graph.graph import workflow
+from backend.core.agent_graph.utils import _log_task_exception
 
-    # 2) Scan for the first decodable JSON object in raw text
-    decoder = json.JSONDecoder()
-    for m in re.finditer(r"\{", text):
-        start = m.start()
-        try:
-            obj, end = decoder.raw_decode(text[start:])
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            continue
-
-    return None
-
-FORBIDDEN_STORY_WORDS = [
-    "貢献", "創造", "生まれ", "作った", "作成", "間接的", "影響", "きっかけ",
-    "記録されています", "確か", "〜ですね", "誕生日", "年齢",
-]
-
-def normalize_ja(s: str) -> str:
-    s = s or ""
-    s = s.lower()
-    s = re.sub(r"\s+", "", s)
-    return s
-
-def is_summary_grounded(summary: str, user_text: str) -> bool:
-    """Check if the summary is based on the user's explicit input (grounded)."""
-    if not summary:
-        return False
-    ns = normalize_ja(summary)
-    nu = normalize_ja(user_text)
-
-    # ストーリー/因果っぽいワードが入ってたら要注意（Direct保存は禁止）
-    if any(w in summary for w in FORBIDDEN_STORY_WORDS):
-        return False
-
-    # 単純な根拠チェック：summaryの主要トークンがユーザー文に含まれるか
-    tokens = set(re.findall(r"[一-龠ぁ-んァ-ンa-zA-Z0-9]{2,}", summary))
-    tokens = {t for t in tokens if t not in {"です", "ます", "だよ", "よね", "ありがとう"}}
-
-    if not tokens:
-        return False
-
-    hit = sum(1 for t in tokens if normalize_ja(t) in nu)
-    ratio = hit / max(len(tokens), 1)
-
-    # 7割以上根拠があればOK
-    return ratio >= 0.7
-
-# プロジェクトルートの定義
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# LangChain / LangGraph
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-
-# Internal Services
+# --- Services ---
 from backend.core.config import settings
 from backend.core.logger import logger
-from backend.services.tools import tools
 from backend.services.memory_manager import memory_manager
 from backend.services.voicevox_client import voicevox_client
+from backend.services.speech_sanitizer import (
+    SILENCE_DEFAULT,
+    detect_internal_leak,
+    extract_metadata,
+    finalize_output,
+    is_critical_leak,
+    StreamSanitizer,
+)
+from backend.services.pending_actions_service import enqueue_memory_add
+PONDERING_TAG_RE = re.compile(r"\[PONDERING\]", re.IGNORECASE)
+HEARING_QUERY_RE = re.compile(r"(聞こえ|聞こえる|声|マイク|音声)", re.IGNORECASE)
+UNCERTAIN_RE = re.compile(r"(わからない|分からない|不明|判断できない|難しい|確信がない)")
 
-# Phase 7/8 Modules
-from backend.services.vision_adapter import vision_adapter
-from backend.services.hearing_adapter import hearing_adapter
-from backend.services.thought_engine import thought_engine
-from backend.services.inner_monologue_logger import log_inner_thought
 
-from backend.services.speech_sanitizer import finalize_output
-
-
-def _log_task_exception(t: asyncio.Task):
-    try:
-        t.result()
-    except Exception:
-        logger.exception("background task failed")
-
-# Optional Ollama for Vision
-try:
-    from langchain_ollama import ChatOllama
-except ImportError:
-    ChatOllama = None
-
-# --- Global State for Throttling ---
-_LAST_SENSE_TIME = 0
-_SENSE_COOLDOWN = 10.0  # 感覚器を動かす最小間隔(秒)
-_LAST_THOUGHT_CACHE = None # 直前の思考をキャッシュ
-
-# TypedDict State
-class AgentState(TypedDict, total=False):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    has_user_text: bool
-
-# --- LLM Factory ---
-def get_llm():
-    if settings.LLM_TYPE == "openai":
-        return ChatOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            model=settings.OPENAI_MODEL,
-            temperature=0.7, 
-            base_url=settings.OPENAI_BASE_URL,
-            model_kwargs={
-                "frequency_penalty": 0.6,
-                "presence_penalty": 0.2
-            }
-        )
-    else:
-        raise ValueError(f"Unsupported LLM_TYPE: {settings.LLM_TYPE}")
-
-llm = get_llm()
-# llm_with_tools = llm.bind_tools(tools)
-llm_with_tools = llm # Tools Disabled (Tag Mode)
-tool_node = ToolNode(tools)
-
-# --- Helper Functions ---
-def _is_recent_duplicate(messages: List[BaseMessage], tool_name: str, tool_args: dict, lookback: int = 15) -> bool:
-    if tool_name == "see_screen": return False
-    count = 0
-    for msg in reversed(messages):
-        if count >= lookback: break
-        if isinstance(msg, AIMessage) and msg.tool_calls:
-            for tc in msg.tool_calls:
-                if tc['name'] == tool_name and tc['args'] == tool_args:
-                    logger.warning(f"[Anti-Loop] Blocked duplicate tool: {tool_name}")
-                    return True
-        count += 1
-    return False
-
-def _parse_raw_json_tool_call(content: str):
-    pattern = r'\{"name":\s*"([\w_]+)",\s*"arguments":\s*(\{.*?\})\}'
-    match = re.search(pattern, content, re.DOTALL)
-    if match:
-        return match.group(1), match.group(2), match.group(0)
-    return None, None, None
-
-def _is_tool_loop(llm_input: List[BaseMessage], name: str, args: dict) -> bool:
-    if len(llm_input) >= 2 and isinstance(llm_input[-1], ToolMessage) and isinstance(llm_input[-2], AIMessage):
-        prev_ai = llm_input[-2]
-        if prev_ai.tool_calls:
-            prev_call = prev_ai.tool_calls[0]
-            if prev_call['name'] == name and prev_call['args'] == args:
-                return True
-    return False
-
-# --- Graph Nodes (最適化版) ---
-
-async def call_model(state: AgentState, config: dict = None):
-    global _LAST_SENSE_TIME, _LAST_THOUGHT_CACHE
-    
-    messages = state["messages"]
-    non_system_messages = [m for m in messages if not isinstance(m, SystemMessage)]
-    
-    # Mode Handling
-    mode = "normal"
-    if config and "configurable" in config:
-        mode = config["configurable"].get("mode", "normal")
-
-    # 1. Recall (Memory)
-    memory_context = ""
-    last_user_msg = ""
-    if non_system_messages and isinstance(non_system_messages[-1], HumanMessage):
-        last_user_msg = non_system_messages[-1].content
-        if isinstance(last_user_msg, str) and last_user_msg.strip():
-            relevant_memories = await memory_manager.recall_memories(last_user_msg)
-            if relevant_memories:
-                memory_text = "\n".join([
-                    f"- {m['content']} (確信度: {m.get('confidence_tag', 'mid')})" 
-                    for m in relevant_memories
-                ])
-                # Layer 2: Memory (Strictly Internal)
-                memory_context = f"""
-[LAYER 2: RECALLED MEMORIES (INTERNAL ONLY)]
-The following memories are for context only.
-DO NOT narrate them. DO NOT start sentences with "I remember...".
-Reflect them in your attitude, not your speech.
----
-{memory_text}
----
-"""
-
-    # 2. ★ Perception & Thought (Throttled + Mutability Protection)
-    now = time.time()
-    should_sense = (now - _LAST_SENSE_TIME > _SENSE_COOLDOWN) or (mode == "dev")
-    
-    # 内省の重さを制御
-    # ★先輩AIのアドバイス: "起動直後は重すぎると思考が硬直する"
-    # デフォルトはDeep Reflection（LLM使用）をOFFにし、直感的な反応を優先する。
-    use_deep_reflection = False
-
-    thought = {}
-    
-    # Check vision toggle
-    vision_enabled = False
-    try:
-        from backend.core.config import PROJECT_ROOT
-        with open(PROJECT_ROOT / settings.PUBLIC_STATUS_JSON, 'r', encoding='utf-8') as f:
-            st = json.load(f)
-            vision_enabled = st.get("vision_enabled", False)
-    except: pass
-
-    if should_sense:
-        v_data = {"scene_summary": "(視界は閉ざされている)", "ocr_text": "", "user_activity": "unknown"}
-        
-        if vision_enabled:
-            logger.info(f"👁️ Senses Active (Deep={use_deep_reflection})")
-            v_data = vision_adapter.capture_and_summarize()
-        else:
-            # logger.info(f"🙈 Vision Disabled (Hearing Only)")
-            pass
-
-        # (A) 見る・聞く (Hearing is always active if sense is active)
-        h_data = hearing_adapter.capture_and_summarize()
-        
-        # (B) 考える
-        thought = await thought_engine.reflect(v_data, h_data, use_llm=use_deep_reflection)
-        
-        # Cache更新
-        _LAST_SENSE_TIME = now
-        _LAST_THOUGHT_CACHE = thought
-        
-        # (C) 心に刻む (Inner Log Only)
-        log_inner_thought(thought)
-    else:
-        logger.info("⏩ Senses Skipped (Using Cache)")
-        if _LAST_THOUGHT_CACHE:
-            # ★ 修正: ミュータブル汚染防止のための deepcopy
-            thought = copy.deepcopy(_LAST_THOUGHT_CACHE)
-            # キャッシュであることを明示（ログ用に追記するが、deepcopyなので元データは汚染されない）
-            thought["interpretation"] += " (Cached)"
-        else:
-            # キャッシュすらない初回などの場合
-            thought = {"interpretation": "特になし", "inner_state": "Neutral", "inner_reflection": "..."}
-
-    # (C-2) 物理的同期: ユーザー入力がある場合は強制的に対話モードへ
-    has_user_text = bool(state.get("has_user_text", False))
-    if has_user_text:
-        thought["express"] = True
-        if thought.get("intent") == "breathe":
-            thought["intent"] = "support_quietly"
-
-    current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M JST")
-    perception_log = f"""
-<INTERNAL_LOG>
-TIME: {current_time_str}
-Observation: {thought.get('interpretation')}
-Internal State: {thought.get('inner_state')}
-Intent: {thought.get('intent')}
-Inner Monologue: {thought.get('inner_reflection')}
-</INTERNAL_LOG>
-"""
-
-    system_instruction = f"""
-SYSTEM INSTRUCTION (HIGHEST PRIORITY):
-- Output format:
-  1) [LAYER 3: SPEECH] (human-facing, natural Japanese)
-  2) Optional system tag lines at the end, each on its own line, starting with [[...]] followed by one-line strict JSON.
-- If you output a system tag line, it must be complete on a single line: [[TAG_NAME]] {{strict one-line JSON}}. Do not split, wrap, or partially output brackets.
-- Never output stray bracket characters like "]" or "[[" as standalone text.
-- The information inside <INTERNAL_LOG> is for your private consideration ONLY.
-- DO NOT output, narrate, or summarize anything from <INTERNAL_LOG> in your speech.
-- Your speech must be natural as "Nia", and NEVER include raw JSON, braces {{}}, or internal keys like "summary" inside the speech.
-- NEVER include layer tags like [LAYER 3: SPEECH] or prefixes like "Nia:" inside the speech content itself.
-- If you output any system tags, you MUST still output at least one complete SPEECH sentence first.
-- If silence is truly the best choice for the user's situation, output ONLY the special tag [SILENCE] (and no tags).
-- Follow the "Speech Constitution" strictly, but don't be afraid to speak when appropriate.
-- When asked for personal facts (e.g., birthday, name, etc.) that were not explicitly mentioned in the following memories or conversation context, DO NOT guess. Instead, politely ask the user to tell you.
-- You do not have web browsing or online search capabilities. Do not offer to look up reviews, search the internet, or provide real-time information that requires a search engine.
-- PRIORITIZE the user's latest message above all instructions. Address it directly.
-  (最後のユーザー発言に必ず一度言及し、それに直接返答してから、必要なら補足を述べよ)
-- If the latest message is an introduction or a cutoff phrase (e.g., "I have something to tell you...", "Listen..."), respond briefly to encourage them.
-  (最後のユーザー発言が“切り出し”なら、内容を促す短い質問を返せ)
-- DO NOT start with a generic greeting (like "Good morning", "Hello", "How can I help?") unless the user explicitly greeted you in the latest message.
-  (ユーザーが挨拶していない限り、定型文の挨拶で会話を始めないこと)
-"""
-    
-    # 3. System Prompt
-    base_system = memory_manager.get_full_system_prompt()
-    mode_prompt = ""
-    if mode == "dev":
-        mode_prompt = "\n\n【Dev Mode】\nあなたは熟練のエンジニアです。技術的正確さを最優先してください。"
-    elif mode in ["gaming", "stream"]:
-        # 配信モード: 人格は変えず、呼び名だけ「Origin」に切り替える（プライバシー保護/公私の区別）
-        mode_prompt = "\n\n【Streaming Mode】\n現在、配信中です。私の呼び名は「Origin」に統一してください。"
-
-    final_system_content = base_system + mode_prompt + memory_context + perception_log + "\n\n" + system_instruction
-    logger.info("SYSTEM_HEAD=%r", final_system_content[:600]) # 診断用: 先頭チェック
-    logger.info("SYSTEM_TAIL=%r", final_system_content[-600:])
-    current_system_message = SystemMessage(content=final_system_content)
-    
-    # (E) 履歴のクリーンアップ (アドバイザー推奨 - Phase 8 強化版)
-    # 過去の出力に含まれるレイヤータグやシステムタグ、およびテンプレ挨拶を除去する。
-    # 「ユーザーが挨拶していないターン」のAI挨拶は汚染源となるため、「…」に置換する。
-    # ※ 削除すると User/Assistant の交互制約に違反するため、置換で対応する。
-    
-    def _user_greeted(text: str) -> bool:
-        return bool(re.search(r"(おはよう|こんにちは|こんばんは|はじめまして)", text or ""))
-
-    def _strip_greeting_prefix(speech: str) -> str:
-        s = speech.lstrip()
-        # 定型挨拶を削除
-        s = re.sub(r"^(おはようございます|おはよう|こんにちは|こんばんは|はじめまして)[。！!\\s😊]*", "", s)
-        # 「何かお手伝い/お話したいこと」パターンも削除
-        s = re.sub(r"^何か(お手伝い|お話|お困り)(したいこと|できること)?(は)?ありますか[？\\?\\s😊]*", "", s)
-        s = re.sub(r"^何かお手伝いできることはありますか[？\\?\\s😊]*", "", s)
-        return s.strip()
-
-    # 高精度 greeting-only 判定を speech_sanitizer から import
-    from backend.services.speech_sanitizer import is_greeting_only as _is_greeting_only_advanced
-
-    cleaned_messages = []
-    last_user_content = ""
-    
-    # --- 統計カウンタ & ドロップログ (Observability) ---
-    greet_drop_stats = {}  # reason -> count
-    dropped_ai_buffer = []  # 後から検証用に退避
-    
-    for m in non_system_messages:
-        if m.type == "human":
-            last_user_content = str(m.content)
-            cleaned_messages.append(m)
+def _split_tts_units(text: str, max_chars: int = 90) -> list[str]:
+    s = str(text or "").strip()
+    if not s:
+        return []
+    parts = re.split(r"(?<=[。！？!?\.])\s+|[\r\n]+", s)
+    units: list[str] = []
+    for part in parts:
+        p = str(part or "").strip()
+        if not p:
             continue
-        
-        # AI Message
-        if m.type == "ai":
-            try:
-                raw_content = str(m.content)
-                
-                # [SILENCE] タグはそのまま保持
-                if "[SILENCE]" in raw_content:
-                    cleaned_messages.append(AIMessage(content="[SILENCE]"))
-                    continue
-                
-                # finalize_output で純粋な発話のみを取り出す
-                clean_speech = finalize_output(raw_content)
-                
-                # --- 挨拶フィルタ (Adviser's Advanced Version - Drop方式) ---
-                # 高精度判定: ユーザーの話題トークンが含まれていたら drop しない
-                # ※ coalesce + normalize が交互制約を保証するので、dropしても安全
-                if last_user_content and not _user_greeted(last_user_content):
-                    stripped_speech = _strip_greeting_prefix(clean_speech)
-                    
-                    # 高精度判定（話題トークン重複チェック付き）
-                    is_go, reason = _is_greeting_only_advanced(stripped_speech, last_user_content)
-                    
-                    if is_go:
-                        # 統計カウント
-                        greet_drop_stats[reason] = greet_drop_stats.get(reason, 0) + 1
-                        # ドロップしたAIを別ログに退避（後から誤爆検証用）
-                        dropped_ai_buffer.append({
-                            "reason": reason,
-                            "head": clean_speech[:60],
-                            "len": len(clean_speech)
-                        })
-                        logger.info(f"🗑️ History Filter: Dropping greeting-only AI ({reason}): {clean_speech[:30]}...")
-                        continue  # coalesce が連続Humanを結合してくれるので安全
-                    
-                    clean_speech = stripped_speech
-                
-                cleaned_messages.append(AIMessage(content=clean_speech))
-            except:
-                cleaned_messages.append(m)
+        if len(p) <= max_chars:
+            units.append(p)
+            continue
+        i = 0
+        while i < len(p):
+            chunk = p[i : i + max_chars].strip()
+            if chunk:
+                units.append(chunk)
+            i += max_chars
+    return units
+
+def _resolve_voice_id(voice_id: Optional[str]) -> str:
+    if not voice_id or voice_id == "undefined":
+        return str(settings.DEFAULT_VOICE_ID)
+    return str(voice_id)
+
+
+def _current_voice_id(voice_id: str) -> Optional[str]:
+    if voice_id == "off":
+        return None
+    return voice_id
+
+
+def _fallback_for_silence(input_text: str) -> str:
+    # 以前は自己紹介などを返していたが、ニアの「沈黙する権利」を優先し、既定の沈黙文のみを返す。
+    return SILENCE_DEFAULT
+
+
+def _handle_silence(
+    sanitized: str,
+    *,
+    has_user_text: bool,
+    input_text: str,
+    last_sent_text: str,
+) -> str:
+    # sanitized が SILENCE_DEFAULT の場合、そのまま通す。
+    # 以前のように強制的に _fallback_for_silence で言葉を埋めることはしない。
+    return sanitized
+
+
+async def _build_user_content(input_text: str, image_data: Optional[str], *, log_context: str = "", vision_gateway=None) -> str:
+    if image_data:
+        if vision_gateway is not None:
+            content = await vision_gateway.build_user_input(input_text, image_data)
         else:
-            cleaned_messages.append(m)
+            from backend.services.vision_client import build_user_input_with_image
+            content = await build_user_input_with_image(input_text, image_data)
+        if log_context:
+            logger.info(f"[AGENT] Image processed via Vision ({log_context}), content length: {len(content)} chars")
+        return content
+    return input_text
 
-    # --- 統計ログ出力 ---
-    if greet_drop_stats:
-        logger.info("GREET_DROP_STATS=%s", greet_drop_stats)
-    if dropped_ai_buffer:
-        logger.info("DROPPED_AI_BUFFER=%r", dropped_ai_buffer)
 
-    logger.info("HISTORY_TAIL=%r", [str(m.content)[-120:] for m in cleaned_messages[-6:]]) # 診断用: 履歴汚染チェック
+def _get_final_message(result: dict) -> str:
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if messages:
+        return messages[-1].content
+    return "[SILENCE]"
 
-    # --- 修正3: 履歴を直近N件に制限 (Adviser's Recommendation) ---
-    # 古い汚染履歴の影響を排除するため、LLMに渡す履歴を直近10件に制限する。
-    # これによりプロンプトが軽くなり、モデルの遵守率も向上する。
-    MAX_HISTORY_MESSAGES = 10
-    if len(cleaned_messages) > MAX_HISTORY_MESSAGES:
-        cleaned_messages = cleaned_messages[-MAX_HISTORY_MESSAGES:]
-        logger.info(f"📏 History Limited: Keeping last {MAX_HISTORY_MESSAGES} messages.")
 
-    llm_input = [current_system_message] + cleaned_messages
-    logger.info("ROLE_SEQ=%s", "".join(["S" if m.type == "system" else ("U" if m.type == "human" else "A") for m in llm_input]))
-    
-    # === 強制交互化 (Adviser's Final Safety Net - 改良版) ===
-    # 連続する同じroleのメッセージを結合して、User/Assistant の交互制約を保証する。
-    # これがないと LMStudio 等のテンプレートがエラーを吐く。
-    def _coalesce_for_strict_alternation(messages, sep="\n\n---\n\n"):
-        # 1) SystemMessage は全部まとめて先頭に1個（メタ情報保持のため全結合）
-        system_parts = []
-        body = []
-        for m in messages:
-            if isinstance(m, SystemMessage):
-                system_parts.append(str(m.content))
-            else:
-                body.append(m)
-        
-        out = []
-        if system_parts:
-            out.append(SystemMessage(content="\n\n".join([p.strip() for p in system_parts if p.strip()])))
-        
-        # 2) 連続する同じroleを結合（メタ情報は copy(update=...) で維持）
-        for m in body:
-            if not out or isinstance(out[-1], SystemMessage):
-                out.append(m)
-                continue
-            
-            prev = out[-1]
-            same_role = (
-                (isinstance(prev, HumanMessage) and isinstance(m, HumanMessage)) or
-                (isinstance(prev, AIMessage) and isinstance(m, AIMessage))
-            )
-            
-            if not same_role:
-                out.append(m)
-                continue
-            
-            a = str(prev.content).strip()
-            b = str(m.content).strip()
-            merged = (a + sep + b).strip() if (a and b) else (a or b)
-            
-            out[-1] = prev.copy(update={"content": merged})
-            logger.info("🔗 Coalesced consecutive %s messages", out[-1].type)
-        
-        return out
-    
-    def _assert_strict_alternation(messages):
-        """coalesce後に交互制約が満たされているかチェック（警告のみ）"""
-        last = None
-        for m in messages:
-            if isinstance(m, SystemMessage):
-                continue
-            role = "U" if isinstance(m, HumanMessage) else ("A" if isinstance(m, AIMessage) else "X")
-            if last == role:
-                logger.warning("⚠️ Alternation still broken: %s after %s", role, last)
-                break
-            last = role
-    
-    def _normalize_for_lmstudio(messages):
-        """
-        LMStudio系テンプレの前提:
-          system -> user -> assistant -> user ...
-        かつ tool role を嫌うことが多いので tool を排除。
-        """
-        from langchain_core.messages import ToolMessage
-        
-        if not messages:
-            return messages
-        
-        # 1) System は先頭1つだけ
-        system = None
-        body = []
-        for m in messages:
-            if isinstance(m, SystemMessage):
-                system = m
-            else:
-                body.append(m)
-        
-        # 2) ToolMessage を排除（必要ならAIMessageに変換してもOK）
-        body2 = []
-        for m in body:
-            if isinstance(m, ToolMessage):
-                logger.info("🔧 Normalize: Dropping ToolMessage from llm_input")
-                continue
-            if isinstance(m, (HumanMessage, AIMessage)):
-                body2.append(m)
-            else:
-                # 未知タイプは安全側で捨てる
-                logger.info(f"🔧 Normalize: Dropping unknown message type: {m.__class__.__name__}")
-                continue
-        
-        out = []
-        if system:
-            out.append(system)
-        
-        # 3) 「systemの次は必ずHuman」になるまで先頭AIを落とす
-        while body2 and isinstance(body2[0], AIMessage):
-            logger.info(f"🔧 Normalize: Dropping leading AI message after System: {str(body2[0].content)[:30]}...")
-            body2.pop(0)
-        
-        out.extend(body2)
-        return out
-    
-    llm_input = _coalesce_for_strict_alternation(llm_input)
-    _assert_strict_alternation(llm_input)
-    llm_input = _normalize_for_lmstudio(llm_input)  # LMStudio用の正規化
-    
-    has_user_text = bool(state.get("has_user_text", False))
-    express = thought.get("express", True)
-    
-    if not express and not has_user_text:
-        logger.info("🤫 Choosing Silence / Skipping LLM.")
-        return {"messages": [AIMessage(content="[SILENCE]")]}
-    elif has_user_text:
-        # ユーザー発話がある場合は、内的判断が express=False であっても「静かに応じる」ログを出す
-        logger.info("🗣️ Quietly speaking (Ambient silence but user spoke).")
+def _strip_speaker_prefix(text: str) -> str:
+    return re.sub(r"^(応答|ニア|Response|A|Speech|Layer\s*3)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
 
-    # Vision Routing
-    has_image = False
-    if non_system_messages and isinstance(non_system_messages[-1], HumanMessage):
-        content = non_system_messages[-1].content
-        if isinstance(content, list):
-             for item in content:
-                 if isinstance(item, dict) and item.get("type") == "image_url":
-                     has_image = True
-                     break
+
+
+TOOL_BLOCK_RE = re.compile(
+    r"\[(SEARCH_MEMORY|MEMORY_JSON|INTERNAL_LOG)\].*?\[END_\1\]\s*",
+    re.DOTALL | re.IGNORECASE
+)
+
+def _strip_tool_blocks(text: str) -> str:
+    if not text:
+        return ""
+    # Remove standard blocks
+    cleaned = TOOL_BLOCK_RE.sub("", text).strip()
+    return cleaned
+
+def _strip_hearing_ack(text: str, user_text: str) -> str:
+    """Strip '聞こえます' responses only when user asked a hearing-related question."""
+    if not text:
+        return text
+    # Only strip if user DIDN'T ask about hearing (avoid redundant "聞こえます" for non-hearing queries)
+    # When user DID ask (聞こえ/マイク/テスト/音), keep the response as it's contextually appropriate.
+    if user_text and HEARING_QUERY_RE.search(user_text):
+        return text  # User asked about hearing -> keep the acknowledgment
+    # User didn't ask about hearing -> strip the redundant ack
+    return re.sub(
+        r"^\s*(はい、?\s*)?聞こえ(てる|ている|ます|ています)(?:[。\.！!…]+)?\s*",
+        "",
+        text,
+    )
+
+
+def _sanitize_stream_chunk(
+    sentence_raw: str,
+    *,
+    has_user_text: bool,
+    input_text: str,
+    last_sent_text: str,
+    log_label: str,
+) -> str:
+    """
+    Non-destructive sanitization for stream chunks.
+    Only checks for critical leaks and handles specific hearing acks.
+    Heavy cleaning is handled by RollingStreamCleaner (SSE loop) 
+    and finalize_output (post-stream).
+    """
+    leak = detect_internal_leak(sentence_raw)
+    if is_critical_leak(leak):
+        logger.warning(f"[Safety] Leak detected in {log_label}: {leak['critical']}")
+        return "", "critical_leak"
     
-    # Invoke
-    # === 診断ログ: ainvoke直前の最終確認 ===
-    logger.info("PRE_INVOKE_ROLE_SEQ=%s", "".join(["S" if m.type == "system" else ("U" if m.type == "human" else "A") for m in llm_input]))
-    logger.info("PRE_INVOKE_TYPES=%r", [(m.__class__.__name__, getattr(m, "type", None)) for m in llm_input[:6]])
-    logger.info("PRE_INVOKE_TAIL=%r", [(m.type, str(m.content)[:30]) for m in llm_input[-3:]])
+    # We pass the raw sentence through a few minimal filters
+    sanitized = str(sentence_raw)
     
-    # === DEBUG ダンプ (環境変数で制御) ===
-    if os.getenv("DEBUG_DUMP_LLM_INPUT") == "1":
-        def _dump_llm_input_as_json(messages, *, limit_chars: int = 12000) -> str:
-            import json as json_mod
-            from typing import Any
-            out_list: list[dict[str, Any]] = []
-            
-            for m in messages:
-                role = getattr(m, "type", "unknown")
-                cls = m.__class__.__name__
-                content = m.content
-                
-                if isinstance(content, list):
-                    content_repr = f"<list:{len(content)}>"
+    sanitized = _handle_silence(
+        sanitized,
+        has_user_text=has_user_text,
+        input_text=input_text,
+        last_sent_text=last_sent_text,
+    )
+    
+    after_ack = _strip_hearing_ack(sanitized, input_text)
+    if not after_ack.strip() and sanitized.strip():
+        return "", "hearing_ack_strip"
+        
+    return after_ack, None
+
+
+def _extract_emotion_tags(text: str):
+    if not text:
+        return "", []
+    cleaned, _primary_tag, all_tags = extract_metadata(text)
+    tags = [t.lower() for t in all_tags]
+    return cleaned, tags
+
+
+def _final_state_from_text(text: str) -> str:
+    if not text:
+        return "CONSENT"
+    if UNCERTAIN_RE.search(text):
+        return "DISSONANCE"
+    return "CONSENT"
+
+# --- Keyword extraction (lightweight, non-generative) ---
+_KEYWORD_SPLIT_RE = re.compile(r"[^\w\u3040-\u30ff\u4e00-\u9fff]+")
+_KEYWORD_STOP = {
+    "こと", "これ", "それ", "あれ", "よう", "ため", "ので", "から", "けど", "でも",
+    "です", "ます", "する", "して", "した", "いる", "ある", "なる", "できる",
+}
+
+def _extract_keywords_from_user(text: str, *, max_items: int = 6) -> list[str]:
+    if not text:
+        return []
+    tokens = [t for t in _KEYWORD_SPLIT_RE.split(text) if t]
+    picked: list[str] = []
+    for t in tokens:
+        if len(t) < 2:
+            continue
+        if t in _KEYWORD_STOP:
+            continue
+        if t not in picked:
+            picked.append(t)
+        if len(picked) >= max_items:
+            break
+    return picked
+
+# --- SSE Fallback Helpers ---
+def _content_to_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                parts.append(p.get("text") or p.get("content") or "")
+        return "".join(parts)
+    return str(content)
+
+def _extract_text(obj) -> str:
+    if obj is None:
+        return ""
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s in {"safe", "merge", "depth0", "depth1", "dissonance", "safety", "END"}:
+            return ""
+        return obj
+    if hasattr(obj, "content"):
+        return _content_to_text(getattr(obj, "content", None))
+    if isinstance(obj, dict):
+        if "safety_route" in obj or "user_text" in obj or "draft" in obj or "depth1_text" in obj:
+            return ""
+        if "final_text" in obj:
+            return _content_to_text(obj.get("final_text"))
+        if "merge" in obj and isinstance(obj.get("merge"), dict):
+            return _content_to_text(obj["merge"].get("final_text"))
+        for k in ("content", "text", "answer", "final", "output"):
+            if k in obj:
+                return _content_to_text(obj[k])
+    return str(obj)
+
+def _extract_llm_text_from_output(obj) -> str:
+    """Handle LLMResult-like outputs safely (avoid dumping empty dicts)."""
+    if obj is None:
+        return ""
+    if isinstance(obj, dict):
+        if "safety_route" in obj or "user_text" in obj or "draft" in obj or "depth1_text" in obj:
+            return ""
+        if "final_text" in obj:
+            return _content_to_text(obj.get("final_text"))
+        if "merge" in obj and isinstance(obj.get("merge"), dict):
+            return _content_to_text(obj["merge"].get("final_text"))
+    if isinstance(obj, dict) and "generations" in obj:
+        generations = obj.get("generations") or []
+        for gen_list in generations:
+            if not gen_list:
+                continue
+            for gen in gen_list:
+                if isinstance(gen, dict):
+                    if gen.get("text"):
+                        return _content_to_text(gen.get("text"))
+                    if gen.get("message"):
+                        return _extract_text(gen.get("message"))
                 else:
-                    content_repr = str(content)
-                
-                item: dict[str, Any] = {
-                    "class": cls,
-                    "type": role,
-                    "content_head": content_repr[:400],
-                }
-                
-                # tool/function 痕跡
-                if hasattr(m, "tool_calls") and getattr(m, "tool_calls"):
-                    item["tool_calls"] = getattr(m, "tool_calls")
-                if hasattr(m, "additional_kwargs") and getattr(m, "additional_kwargs"):
-                    ak = getattr(m, "additional_kwargs") or {}
-                    item["additional_kwargs_keys"] = list(ak.keys())
-                    if "tool_calls" in ak:
-                        item["additional_kwargs_tool_calls"] = ak["tool_calls"]
-                
-                # ToolMessage系
-                if hasattr(m, "tool_call_id") and getattr(m, "tool_call_id"):
-                    item["tool_call_id"] = getattr(m, "tool_call_id")
-                if hasattr(m, "name") and getattr(m, "name"):
-                    item["name"] = getattr(m, "name")
-                
-                out_list.append(item)
-            
-            s = json_mod.dumps(out_list, ensure_ascii=False, indent=2)
-            return s[:limit_chars] + ("\n…(truncated)" if len(s) > limit_chars else "")
-        
-        logger.info("LLM_INPUT_JSON=%s", _dump_llm_input_as_json(llm_input))
-    
-    if has_image:
-        if not ChatOllama: raise ImportError("langchain_ollama missing")
-        vision_llm = ChatOllama(
-            base_url=settings.OLLAMA_BASE_URL,
-            model=settings.OLLAMA_MODEL, 
-            temperature=0.7, timeout=120.0
-        )
-        response = await vision_llm.ainvoke(llm_input)
-    else:
-        response = await llm_with_tools.ainvoke(llm_input)
-    
-    # Post Processing
-    if response.tool_calls:
-        unique_tool_calls = []
-        for tc in response.tool_calls:
-            if not _is_recent_duplicate(messages, tc['name'], tc['args'], lookback=15):
-                unique_tool_calls.append(tc)
-            else:
-                response.content = str(response.content) + f"\n(Skipped duplicate tool: {tc['name']})"
-        response.tool_calls = unique_tool_calls
+                    if hasattr(gen, "text"):
+                        return _content_to_text(getattr(gen, "text", ""))
+                    if hasattr(gen, "message"):
+                        return _extract_text(getattr(gen, "message"))
+        return ""
+    return _extract_text(obj)
 
-    if not response.tool_calls:
-        name, args_str, full_match = _parse_raw_json_tool_call(str(response.content))
-        if name and args_str:
-            try:
-                args = json.loads(args_str)
-                if not _is_tool_loop(llm_input, name, args):
-                    tc_id = f"call_{uuid.uuid4().hex[:8]}"
-                    response.tool_calls = [{"name": name, "args": args, "id": tc_id, "type": "tool_call"}]
-                    response.content = str(response.content).replace(full_match, "").strip()
-            except json.JSONDecodeError: pass
+# --- Entry Points ---
 
-    return {"messages": [response]}
-
-def should_continue(state: AgentState) -> str:
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    if last_message.tool_calls:
-        return "tools"
-    return END
-
-# --- Graph Definition ---
-workflow = StateGraph(AgentState)
-workflow.add_node("agent", call_model)
-workflow.add_node("tools", tool_node)
-workflow.set_entry_point("agent")
-workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-workflow.add_edge("tools", "agent")
-
-# --- Stream Logic (完全復元版) ---
-
-async def run_agent_stream(input_text: str, thread_id: str = "default_thread", voice_id: str = "14", image_data: str = None, mode: str = "normal"):
+async def run_agent_stream(
+    input_text: str,
+    thread_id: str = "default_thread",
+    voice_id: str = "14",
+    image_data: str = None,
+    mode: str = "normal",
+    memory_refs: Optional[dict] = None,
+    ports: Optional[dict] = None,
+):
+    if not ports or not isinstance(ports, dict):
+        raise RuntimeError("ports is required for run_agent_stream")
+    if "checkpointer" not in ports:
+        raise RuntimeError("ports.checkpointer is required for run_agent_stream")
+    if "tts" not in ports:
+        raise RuntimeError("ports.tts is required for run_agent_stream")
+    if "vision" not in ports:
+        raise RuntimeError("ports.vision is required for run_agent_stream")
     logger.info(f"Stream Start: Thread={thread_id} Mode={mode}")
+    stream_id = None
+    message_id = None
+    if isinstance(memory_refs, dict):
+        stream_id = memory_refs.get("stream_id")
+        message_id = memory_refs.get("message_id")
     output_queue = asyncio.Queue()
     
-    if not voice_id or voice_id == "undefined":
-        voice_id = str(settings.DEFAULT_VOICE_ID)
-    current_voice_id = voice_id
-    if voice_id == "off":
-        current_voice_id = None
+    voice_id = _resolve_voice_id(voice_id)
+    current_voice_id = _current_voice_id(voice_id)
+    logger.info("[TTS] init voice_id=%s current_voice_id=%s", str(voice_id), str(current_voice_id))
 
+    last_tts_dedupe_key = None
     # TTS Helper (URL-based audio)
     async def generate_audio_chained(text, vid, prev_task, queue, tid):
-        if prev_task:
-            try: await prev_task
-            except: pass
-        try:
-             loop = asyncio.get_running_loop()
-             # Use generate_audio_to_file instead of generate_audio
-             audio_url = await loop.run_in_executor(
-                 None, 
-                 voicevox_client.generate_audio_to_file, 
-                 text, 
-                 int(vid),
-                 tid  # thread_id for file organization
-             )
-             if audio_url:
-                 await queue.put({"type": "audio", "url": audio_url})
-        except Exception as e:
-            logger.error(f"TTS Chained Error: {e}")
+        nonlocal last_tts_dedupe_key
+        if not text or str(text).strip() == "WAIT":
+            return
+        norm = " ".join(str(text).split())
+        dedupe_key = f"{stream_id}|{vid}|{norm}"
+        if last_tts_dedupe_key == dedupe_key:
+            logger.info("[TTS] dedupe skip")
+            return
+        last_tts_dedupe_key = dedupe_key
+        logger.info("[TTS] fire-and-forget text_len=%d voice_id=%s", len(norm), str(vid))
+
+        async def _job() -> None:
+            try:
+                audio_url = await ports["tts"].generate_audio_url(
+                    text=text,
+                    voice_id=str(vid),
+                    thread_id=str(tid),
+                    stream_id=str(stream_id) if stream_id else None,
+                )
+                if not audio_url:
+                    return
+                meta = None
+                try:
+                    meta = await ports["tts"].get_audio_meta(audio_url)
+                except Exception:
+                    meta = None
+
+                payload = dict(meta or {})
+                payload.setdefault("url", audio_url)
+                payload.setdefault("text_content", text)
+
+                event = {
+                    "type": "audio",
+                    "thread_id": str(tid),
+                    "stream_id": str(stream_id) if stream_id else None,
+                    "message_id": str(message_id) if message_id else None,
+                    "data": payload,
+                }
+                # Send audio event via main SSE stream (output_queue) instead of separate tts_event_bus
+                await queue.put(event)
+                logger.info(
+                    "[TTS] audio ready url=%s duration_ms=%s gen_ms=%s",
+                    payload.get("url"),
+                    payload.get("duration_ms"),
+                    payload.get("gen_ms"),
+                )
+            except Exception as e:
+                logger.exception("TTS job failed: %s", e)
+                await queue.put({
+                    "type": "audio",
+                    "thread_id": str(tid),
+                    "stream_id": str(stream_id) if stream_id else None,
+                    "message_id": str(message_id) if message_id else None,
+                    "data": {"error": str(e), "text_content": text},
+                })
+
+        await _job()
 
     async def llm_producer():
         nonlocal current_voice_id
-        last_chunk = None
+        last_chunk = ""
+        consent_seen = False
+        dissonance_seen = False
+        emotion_tags_seen: set[str] = set()
+        last_state_seen: str | None = None
+        is_pondering_sent = False
+        raw_logged = False
+        state_started = False
+        raw_buffer = ""
+        full_response = ""
+        full_raw_parts = []
+        final_text_override = ""
+        final_result_emitted = False
+        tts_enqueued = False
+        tts_enqueued_stream_ids: set[str] = set()
+        stream_san = StreamSanitizer(keep_chars=80, max_buf=8192)
 
         try:
-            # Use persistent AsyncSqliteSaver via memory_manager
-            async with memory_manager.get_async_checkpointer_conn() as checkpointer:
-                # checkpointer is a context manager here
-                app = workflow.compile(checkpointer=checkpointer)
+            # Use persistent AsyncSqliteSaver via checkpointer gateway
+            async with ports["checkpointer"].get_async_checkpointer_conn() as checkpointer:
+                # Compile workflow with the persistent checkpointer
+                # Note: workflow is imported from backend.core.agent_graph.graph
+                app_instance = workflow.compile(checkpointer=checkpointer)
+                
                 has_user_text = bool(input_text.strip() and input_text.strip() != "[SILENCE]")
                 config = {
                     "configurable": {
                         "thread_id": thread_id, 
-                        "mode": mode
+                        "mode": mode,
+                        "ports": ports or {},
                     }
                 }
             
-                # Prepare content - 画像はVisionで解析してテキストのみ渡す
-                # ※ 画像のファイル保存は api_router 側で実施済み
-                if image_data:
-                    from backend.services.vision_client import build_user_input_with_image
-                    content = await build_user_input_with_image(input_text, image_data)
-                    logger.info(f"[AGENT] Image processed via Vision, content length: {len(content)} chars")
-                else:
-                    content = input_text
+                # Prepare content
+                content = await _build_user_content(input_text, image_data, log_context="stream", vision_gateway=ports["vision"])
                 
                 inputs: AgentState = {
                     "messages": [HumanMessage(content=content)],
@@ -709,193 +421,645 @@ async def run_agent_stream(input_text: str, thread_id: str = "default_thread", v
                 full_response = ""
                 last_tts_task = asyncio.create_task(asyncio.sleep(0))
                 last_sent_text = ""
+                hold_request_sent = False
+                hold_cancelled_sent = False
+                prev_review_token = None
+                prev_merge_mode = None
+
+                try:
+                    prev_state = await app_instance.aget_state(config)
+                    prev_values = getattr(prev_state, "values", {}) or {}
+                    prev_review_token = get_review_token(prev_values)
+                    prev_merge_mode = prev_values.get("merge_mode")
+                except Exception:
+                    prev_review_token = None
+                    prev_merge_mode = None
             
-                async for event in app.astream_events(inputs, config=config, version="v1", recursion_limit=50):
-                     if event["event"] == "on_chat_model_stream":
-                         chunk = event["data"]["chunk"].content
-                         if not chunk: continue
-                         
-                         # 重複排除
-                         if chunk == last_chunk: continue
-                         last_chunk = chunk
-                         
-                         raw_buffer += chunk
-                         
-                         # 文末または改行で区切ってサニタイズ処理
-                         parts = re.split(r'([。！\n.!？?]+)', raw_buffer)
-                         if len(parts) > 1:
-                             for i in range(0, len(parts) - 1, 2):
-                                 sentence_raw = (parts[i] + parts[i+1]).strip()
-                                 if not sentence_raw: continue
-                                 
-                                 # 1. 不要な接頭辞を削除
-                                 sentence_raw = re.sub(r"^(応答|ニア|Response|A|Speech|Layer\\s*3)\\s*[:：]\\s*", "", sentence_raw, flags=re.IGNORECASE)
-                                 
-                                 # 2. サニタイズ
-                                 sanitized = finalize_output(sentence_raw)
-                                 
-                                 # 3. 連続する沈黙を抑制
-                                 from backend.services.speech_sanitizer import SILENCE_DEFAULT
-                                 if sanitized == SILENCE_DEFAULT and last_sent_text == SILENCE_DEFAULT:
-                                     logger.info(f"[DEBUG_STREAM] Suppressing duplicate silence: {sentence_raw}")
-                                     continue
-                                 
-                                 logger.info(f"[DEBUG_STREAM] Sanitized: {sentence_raw} -> {sanitized}")
-                                 
-                                 # Streaming dict event
-                                 await output_queue.put({"type": "text", "content": sanitized})
-                                 full_response += sanitized
-                                 last_sent_text = sanitized
-                                 
-                                 # 感情検知 (末尾50文字から)
-                                 tail = full_response[-50:].lower()
-                                 for emo, vid in settings.EMOTION_VOICE_MAP.items():
-                                     if f"[{emo}]" in tail:
-                                         current_voice_id = str(vid)
-                                         break
-    
-                                 # 音声生成
-                                 if current_voice_id:
-                                     task = asyncio.create_task(generate_audio_chained(sanitized, current_voice_id, last_tts_task, output_queue, thread_id))
-                                     last_tts_task = task
-                                 else:
-                                     # 音声無効時はダミータスクでチェーンを継続（または何もしない）
-                                     last_tts_task = asyncio.create_task(asyncio.sleep(0))
-                             raw_buffer = parts[-1]
-    
-                # 残りのバッファを処理
+                sent_any_text = False
+
+                # Inner Processing Helper
+                async def process_chunk(text: str, label: str):
+                    nonlocal full_response, last_sent_text, state_started, last_tts_task, current_voice_id, consent_seen, dissonance_seen, last_state_seen
+                    
+                    if text.strip():
+                        logger.info("[RAW_CHUNK] label=%s text=%r", label, text[:120])
+                    
+                    # Note: Model no longer outputs [PONDERING] tags.
+                    # State emit happens right before first text is sent (see below).
+
+                    sanitized, reason = _sanitize_stream_chunk(
+                        text,
+                        has_user_text=has_user_text,
+                        input_text=input_text,
+                        last_sent_text=last_sent_text,
+                        log_label=label,
+                    )
+                    if not sanitized:
+                        logger.info("[DROP] label=%s stage=sanitize reason=%s raw=%r", label, reason or "unknown", text[:120])
+                        return False
+                    
+                    # Stateful rolling buffer cleaning
+                    safe_fragment = stream_san.push(sanitized)
+                    if not safe_fragment:
+                        return True # Neutral skip (waiting for tail)
+                    
+                    # Note: We NO LONGER call _strip_tool_blocks here because it is not stateful.
+                    # RollingStreamCleaner in the SSE loop handles cross-chunk tool blocks.
+                        
+                    if sanitized == SILENCE_DEFAULT and last_sent_text == SILENCE_DEFAULT: return False
+
+                    cleaned, tags = _extract_emotion_tags(safe_fragment)
+                    if not cleaned:
+                        return True # Might be empty after emotion tag removal
+
+                    if not state_started:
+                        # Fallback state emit if not emitted yet
+                        logger.info("[STATE_EMIT] stream_id=%s tag=%s", stream_id, "PONDERING")
+                        await output_queue.put({"type": "state", "tag": "PONDERING"})
+                        state_started = True
+
+                    for tag in tags:
+                        if tag == "consent":
+                            consent_seen = True
+                            last_state_seen = "CONSENT"
+                        elif tag == "dissonance":
+                            dissonance_seen = True
+                            last_state_seen = "DISSONANCE"
+                        elif tag and tag not in {"pondering"}:
+                            emotion_tags_seen.add(tag)
+                        await output_queue.put({"type": "emotion", "tag": tag})
+
+                    await output_queue.put({"type": "text", "content": cleaned})
+                    full_response = str(full_response) + cleaned
+                    last_sent_text = cleaned
+
+                    # Voice switching logic
+                    tail = full_response[-50:].lower()
+                    for emo, vid in settings.EMOTION_VOICE_MAP.items():
+                        if f"[{emo}]" in tail:
+                            current_voice_id = str(vid)
+                            break
+
+                    logger.info("[TTS] chunk enqueue disabled; waiting for final_text")
+                    return True
+            
+                async for event in app_instance.astream_events(inputs, config=config, version="v1", recursion_limit=50):
+                    et = event.get("event")
+                    nm = event.get("name")
+                    data = event.get("data") or {}
+                    dk = list(data.keys())
+                    
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info("[EV] %s name=%s data_keys=%s", et, nm, dk)
+
+                    if et == "on_chain_end" and nm == "merge":
+                        output = data.get("output") or {}
+                        if not hold_request_sent:
+                            ev = build_hold_request_event(output)
+                            if ev:
+                                payload = ev.get("payload") or {}
+                                token = payload.get("review_token") or ""
+                                short = token[:8] if isinstance(token, str) else ""
+                                reasons = payload.get("reason_codes") or []
+                                preview_text = payload.get("preview_text") or ""
+                                logger.info(
+                                    "[REVIEW_EV] hold_request sent=1 token=%s merge_mode=%s reasons=%s preview_len=%s",
+                                    short,
+                                    output.get("merge_mode"),
+                                    ",".join(reasons),
+                                    len(preview_text),
+                                )
+                                await output_queue.put(ev)
+                                hold_request_sent = True
+                        else:
+                            logger.debug("[REVIEW_EV] hold_request skipped=already_sent")
+                        final_text = output.get("final_text")
+                        is_wait = bool(output.get("is_wait"))
+                        final_text_str = str(final_text or "").strip()
+                        if is_wait or final_text_str.startswith("WAIT"):
+                            logger.info("[TTS] skipped final_text enqueue: WAIT")
+                        elif final_text_str:
+                            if current_voice_id:
+                                if not tts_enqueued:
+                                    if stream_id and str(stream_id) in tts_enqueued_stream_ids:
+                                        logger.info("[TTS] skipped final_text enqueue: stream already enqueued")
+                                        continue
+                                    if bool(getattr(settings, "TTS_SENTENCE_CHUNKING", True)):
+                                        max_chars = int(getattr(settings, "TTS_SENTENCE_MAX_CHARS", 90) or 90)
+                                        units = _split_tts_units(final_text_str, max_chars=max_chars)
+                                    else:
+                                        units = [final_text_str]
+                                    if not units:
+                                        units = [final_text_str]
+                                    logger.info(
+                                        "[TTS] enqueue (final_text) text_len=%d units=%d voice_id=%s",
+                                        len(final_text_str),
+                                        len(units),
+                                        str(current_voice_id),
+                                    )
+                                    for unit in units:
+                                        task = asyncio.create_task(
+                                            generate_audio_chained(
+                                                unit, current_voice_id, last_tts_task, output_queue, thread_id
+                                            )
+                                        )
+                                        last_tts_task = task
+                                    tts_enqueued = True
+                                    if stream_id:
+                                        tts_enqueued_stream_ids.add(str(stream_id))
+                                else:
+                                    logger.info("[TTS] skipped final_text enqueue: already enqueued")
+                            else:
+                                logger.info("[TTS] skipped final_text enqueue: voice_id=off or unset")
+                        continue
+
+                    if et == "on_chain_end" and nm == "safety":
+                        if not hold_cancelled_sent:
+                            output = data.get("output") or {}
+                            reasons = output.get("reason_codes") or []
+                            if "system_hold_cancelled_new_input" in reasons:
+                                ev = build_hold_cancelled_event(prev_review_token)
+                                if ev:
+                                    short = (prev_review_token or "")[:8]
+                                    logger.info(
+                                        "[REVIEW_EV] hold_cancelled sent=1 token=%s reason=new_user_input prev_mode=%s",
+                                        short,
+                                        prev_merge_mode,
+                                    )
+                                    await output_queue.put(ev)
+                                    hold_cancelled_sent = True
+                        else:
+                            logger.debug("[REVIEW_EV] hold_cancelled skipped=already_sent")
+                        continue
+
+                    if et == "on_chain_end" and nm == "action_processing":
+                        output = data.get("output") or {}
+                        proposed = output.get("proposed_actions") or []
+                        pending = output.get("pending_actions") or []
+                        rejected = output.get("rejected_actions") or []
+                        results = output.get("action_results") or []
+
+                        for item in proposed:
+                            payload = {
+                                "action_id": item.get("action_id"),
+                                "name": item.get("name"),
+                                "risk_level": item.get("risk_level"),
+                                "category": item.get("category"),
+                            }
+                            await output_queue.put({"type": "event", "name": "action_proposed", "payload": payload})
+
+                        for item in results:
+                            payload = {
+                                "action_id": item.get("action_id"),
+                                "status": item.get("status"),
+                                "result": item.get("result"),
+                            }
+                            await output_queue.put({"type": "event", "name": "action_approved", "payload": payload})
+
+                        for item in pending:
+                            payload = {
+                                "action_id": item.get("action_id"),
+                                "name": item.get("name"),
+                                "risk_level": item.get("risk_level"),
+                                "reason": (item.get("decision") or {}).get("reason"),
+                                "requires_confirmation": (item.get("decision") or {}).get("requires_confirmation"),
+                            }
+                            await output_queue.put({"type": "event", "name": "action_blocked", "payload": payload})
+
+                        for item in rejected:
+                            payload = {
+                                "action_id": item.get("action_id"),
+                                "name": item.get("name"),
+                                "risk_level": item.get("risk_level"),
+                                "reason": item.get("reason"),
+                            }
+                            await output_queue.put({"type": "event", "name": "action_blocked", "payload": payload})
+                        continue
+
+                    # 1. Stream Event (Normal)
+                    if et in ("on_chat_model_stream", "on_llm_stream"):
+                        chunk_obj = data.get("chunk")
+                        chunk = _extract_text(chunk_obj)
+                        
+                        # DEBUG: Inspect RAW Chunk content
+                        if logger.isEnabledFor(logging.INFO):
+                             raw_debug = _content_to_text(getattr(chunk_obj, "content", None))
+                             logger.info("[RAW_CHUNK] %r", raw_debug[:120])
+
+                        if not chunk: continue
+                        
+                        full_raw_parts.append(chunk)
+
+                        # Apply bracket filter to remove [PONDERING], [SEARCH_*] etc from chunked stream
+                        # MOVED TO SSE LOOP: chunk = bracket_filter.feed(chunk)
+                        
+                        sent_any_text = True  # Signal that we received valid stream content
+                        
+                        chunk_raw = chunk
+                        if last_chunk is not None:
+                            if chunk_raw == last_chunk: continue
+                            if chunk_raw.startswith(last_chunk):
+                                chunk = chunk_raw[len(last_chunk):]
+                            else:
+                                chunk = chunk_raw
+                        last_chunk = chunk_raw
+
+                        if not chunk: continue
+                        
+                        raw_buffer += chunk
+                        if not raw_logged and raw_buffer.strip():
+                            if logger.isEnabledFor(logging.DEBUG):
+                                logger.debug("[DEBUG_RAW_STREAM] %s", raw_buffer[:200])
+                            raw_logged = True
+
+                        if not is_pondering_sent and PONDERING_TAG_RE.search(raw_buffer):
+                            is_pondering_sent = True
+                            await output_queue.put({"type": "thinking", "value": True})
+
+                        parts = re.split(r"([。！\n.!？?]+)", raw_buffer)
+                        if len(parts) > 1:
+                            complete_sentences = []
+                            for i in range(0, len(parts) - 1, 2):
+                                sentence_raw = (parts[i] + parts[i + 1]).strip()
+                                if sentence_raw:
+                                    complete_sentences.append(sentence_raw)
+
+                            for sentence_raw in complete_sentences:
+                                sentence_raw = _strip_speaker_prefix(sentence_raw)
+                                
+                                # Skip [PONDERING] only lines (handled by thinking event)
+                                if PONDERING_TAG_RE.fullmatch(sentence_raw.strip()):
+                                    continue
+
+                                ok = await process_chunk(sentence_raw, "stream_chunk")
+                                if ok:
+                                    sent_any_text = True
+                                else:
+                                    logger.info("[PROCESS_CHUNK_DROPPED] label=%s preview=%r", "stream_chunk", sentence_raw[:120])
+                            
+                            raw_buffer = parts[-1]
+
+                    # 2. Fallback Event (No Stream)
+                    elif et in ("on_chat_model_end", "on_llm_end", "on_chain_end"):
+                        out = data.get("output")
+                        logger.info("[END_OUTPUT_TYPE] %s", type(out).__name__)
+                        logger.info("[END_OUTPUT_PREVIEW] %r", str(out)[:300])
+
+                        # Emit final_result as soon as merge finishes (Phase1)
+                        if et == "on_chain_end" and (nm or "") == "merge":
+                            if isinstance(out, dict):
+                                ft = out.get("final_text")
+                                if isinstance(ft, str) and ft.strip():
+                                    await output_queue.put({
+                                        "type": "event",
+                                        "name": "final_result",
+                                        "payload": {
+                                            "final_text": ft.strip(),
+                                            "merge_mode": out.get("merge_mode"),
+                                        },
+                                    })
+
+                        # stream で完全文が作れなかった場合の残りを flush
+                        if raw_buffer.strip() and not sent_any_text:
+                            tail = _strip_speaker_prefix(raw_buffer.strip())
+                            if tail and not PONDERING_TAG_RE.fullmatch(tail):
+                                ok = await process_chunk(tail, "stream_flush_end")
+                                if ok:
+                                    sent_any_text = True
+                                else:
+                                    logger.info("[PROCESS_CHUNK_DROPPED] label=%s preview=%r", "stream_flush_end", tail[:120])
+                            raw_buffer = ""
+
+                        if sent_any_text:
+                            continue
+
+                        # Phase1: only accept LangGraph terminal output here
+                        if et == "on_chain_end":
+                            name = nm or ""
+                            if name != "LangGraph":
+                                continue
+
+                            cand = data.get("output") or {}
+                            final_text = None
+                            if isinstance(cand, dict):
+                                if "final_text" in cand:
+                                    final_text = cand.get("final_text")
+                                elif isinstance(cand.get("merge"), dict):
+                                    final_text = cand["merge"].get("final_text")
+
+                            if final_text:
+                                final_text_override = str(final_text)
+                                sentence_raw = _strip_speaker_prefix(str(final_text))
+                                if await process_chunk(sentence_raw, "final_text"):
+                                    sent_any_text = True
+                            continue
+
+                        # LLM-only fallback (non-graph)
+                        cand = data.get("output") or data.get("outputs") or data.get("result") or data.get("response")
+                        text = _extract_llm_text_from_output(cand)
+
+                        if text:
+                            full_raw_parts.append(text)
+                            # For fallback, treat as single chunk
+                            sentence_raw = _strip_speaker_prefix(text)
+                            if await process_chunk(sentence_raw, "fallback_end"):
+                                sent_any_text = True
+
+                # Flush remaining buffer
                 if raw_buffer.strip():
-                     sentence_raw = re.sub(r"^(応答|ニア|Response|A|Speech|Layer\s*3)\s*[:：]\s*", "", raw_buffer.strip(), flags=re.IGNORECASE)
-                     sanitized = finalize_output(sentence_raw)
-                     
-                     from backend.services.speech_sanitizer import SILENCE_DEFAULT
-                     if not (sanitized == SILENCE_DEFAULT and last_sent_text == SILENCE_DEFAULT):
-                         await output_queue.put({"type": "text", "content": sanitized})
-                         full_response += sanitized
-                         if current_voice_id:
-                             task = asyncio.create_task(generate_audio_chained(sanitized, current_voice_id, last_tts_task, output_queue, thread_id))
-                             last_tts_task = task
-                         else:
-                             last_tts_task = asyncio.create_task(asyncio.sleep(0))
+                    sentence_raw = _strip_speaker_prefix(raw_buffer.strip())
+                    await process_chunk(sentence_raw, "trailing_chunk")
                 
-                if last_tts_task: await last_tts_task
+
                 
-                # Analysis Task (Judge)
+
+                
+                if last_tts_task:
+                    try:
+                        await asyncio.wait_for(
+                            last_tts_task,
+                            timeout=float(settings.TTS_FINALIZE_TIMEOUT_SEC),
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[TTS] Finalize timeout; finishing stream without waiting for audio.")
+                    except Exception:
+                        pass
+                
                 if full_response:
-                    # 最終的な全テキストに対しても再度サニタイズをかけて安全性を確保
-                    ultimate_response = finalize_output(full_response)  # ★ タプルを正しくアンパック
-                    t = asyncio.create_task(analyze_and_save_memory(input_text, ultimate_response, thread_id))
-                    t.add_done_callback(_log_task_exception)
+                    leak_reasons = detect_internal_leak(full_response)
+                    if is_critical_leak(leak_reasons):
+                        logger.warning(
+                            "[CAPTURE_SKIP] reason=critical_leak leak_reasons=%s",
+                            ",".join(leak_reasons) if leak_reasons else "unknown",
+                        )
+                        full_response = ""
+                    else:
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("[DEBUG_RAW_STREAM_FINAL] %s", full_response[:200])
+                        
+                        # High-precision finalization using full raw buffer
+                        full_raw = "".join(full_raw_parts)
+                        ultimate_response = finalize_output(full_raw)
+                        
+                        # Verify clean (Debug log)
+                        if logger.isEnabledFor(logging.INFO):
+                            logger.info("[FINALIZE_AGENT] from_full_raw=True has_tag=%s len=%d", 
+                                        ("[PONDERING]" in ultimate_response), 
+                                        len(ultimate_response or ""))
+
+                        ultimate_response = _strip_hearing_ack(ultimate_response, input_text)
+                        final_state = last_state_seen or ("CONSENT" if consent_seen else ("DISSONANCE" if dissonance_seen else None))
+                        if final_state is None:
+                            final_state = _final_state_from_text(ultimate_response)
+
+                        # Emit final_result once (Phase1: single-shot authoritative output)
+                        try:
+                            state = await app_instance.aget_state(config)
+                            values = getattr(state, "values", {}) or {}
+                            merge_mode = values.get("merge_mode")
+                            is_wait = (ultimate_response.strip() == "WAIT")
+                            await output_queue.put({
+                                "type": "event",
+                                "name": "final_result",
+                                "payload": {
+                                    "final_text": ultimate_response,
+                                    "merge_mode": merge_mode,
+                                    "is_wait": is_wait,
+                                    "dissonance": values.get("dissonance"),
+                                    "dissonance_on": values.get("dissonance_on"),
+                                    "need_depth1": values.get("need_depth1"),
+                                }
+                            })
+                            final_result_emitted = True
+                        except Exception:
+                            logger.debug("[FINAL_RESULT] failed to attach", exc_info=True)
+
+                        # Attach thinking_hint event only when WAIT
+                        try:
+                            if ultimate_response.strip() == "WAIT":
+                                state = await app_instance.aget_state(config)
+                                values = getattr(state, "values", {}) or {}
+                                thinking_hint = {
+                                    "dissonance": values.get("dissonance"),
+                                    "dissonance_on": values.get("dissonance_on"),
+                                    "merge_mode": values.get("merge_mode"),
+                                    "reason_codes": values.get("reason_codes") or [],
+                                    "extracted_keywords": _extract_keywords_from_user(input_text),
+                                }
+                                await output_queue.put({"type": "event", "name": "thinking_hint", "payload": thinking_hint})
+                        except Exception:
+                            logger.debug("[THINKING_HINT] failed to attach", exc_info=True)
+
+                        if final_state:
+                            if final_state == "CONSENT":
+                                consent_seen = True
+                            elif final_state == "DISSONANCE":
+                                dissonance_seen = True
+                            logger.info("[STATE_EMIT] stream_id=%s tag=%s", stream_id, final_state)
+                            await output_queue.put({"type": "state", "tag": final_state})
+                        t = asyncio.create_task(
+                            analyze_and_save_memory(
+                                input_text,
+                                ultimate_response,
+                                thread_id,
+                                consent_seen=consent_seen,
+                                dissonance_seen=dissonance_seen,
+                                emotion_tags=list(emotion_tags_seen),
+                                final_state_tag=final_state,
+                                refs=memory_refs,
+                                ports=ports,
+                            )
+                        )
+                        t.add_done_callback(_log_task_exception)
+                else:
+                    logger.info(
+                        "[CAPTURE_SKIP] reason=empty_full_response sent_any_text=%s final_text_override=%s raw_buffer_len=%s",
+                        sent_any_text,
+                        bool(final_text_override),
+                        len(raw_buffer or ""),
+                    )
+
+                # If we never built full_response but have a merge final_text, emit final_result anyway.
+                if (not final_result_emitted) and final_text_override:
+                    try:
+                        state = await app_instance.aget_state(config)
+                        values = getattr(state, "values", {}) or {}
+                        merge_mode = values.get("merge_mode")
+                        is_wait = (final_text_override.strip() == "WAIT")
+                        await output_queue.put({
+                            "type": "event",
+                            "name": "final_result",
+                            "payload": {
+                                "final_text": final_text_override,
+                                "merge_mode": merge_mode,
+                                "is_wait": is_wait,
+                                "dissonance": values.get("dissonance"),
+                                "dissonance_on": values.get("dissonance_on"),
+                                "need_depth1": values.get("need_depth1"),
+                            }
+                        })
+                        final_result_emitted = True
+                    except Exception:
+                        logger.debug("[FINAL_RESULT_FALLBACK] failed to attach", exc_info=True)
          
         except Exception as e:
             logger.error("LLM Producer Error", exc_info=True)
+            logger.error(
+                "[Safety] Stream types: raw_buffer=%s full_response=%s last_chunk=%s",
+                type(raw_buffer).__name__,
+                type(full_response).__name__,
+                type(last_chunk).__name__,
+            )
             await output_queue.put({"type": "error", "content": str(e)})
         finally:
+            logger.info("[PRODUCER_EXIT] stream_id=%s", stream_id)
+            
+            # Flush StreamSanitizer (Commit any remaining safe text)
+            try:
+                final_tail = stream_san.flush()
+                cleaned_tail = ""
+                tags = []
+                if final_tail:
+                    cleaned_tail, tags = _extract_emotion_tags(final_tail)
+                if cleaned_tail:
+                    await output_queue.put({"type": "text", "content": cleaned_tail})
+                    # Optional: full_response update depends on if we're saving to memory
+                    # but in finally, we usually want to ensure UI gets it.
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info("[SSE_TEXT_OUT] flush_tail len=%d: %r", len(cleaned_tail), cleaned_tail[:80])
+                    # Do not enqueue TTS on flush_tail to avoid double generation.
+                    for tag in tags:
+                        await output_queue.put({"type": "emotion", "tag": tag})
+            except Exception:
+                logger.exception("[SSE_FLUSH] failed")
+
+            if is_pondering_sent:
+                await output_queue.put({"type": "thinking", "value": False})
             await output_queue.put({"type": "done"})
 
-    asyncio.create_task(llm_producer())
-    
-    while True:
-        item = await output_queue.get()
-        if item is None: break
-        
-        yield item
-        output_queue.task_done()
-        
-        # Stop iteration if done signal received
-        if isinstance(item, dict) and item.get("type") == "done":
-            break
-            
-    # No extra DONE signal from here
-
-
-
-async def analyze_and_save_memory(user_text: str, ai_response: str, thread_id: str):
-    """
-    Background Task for Memory Analysis
-    user_text: ユーザー入力
-    ai_response: 最終AI応答（visible_ai_text）
-    thread_id: スレッド識別子
-    """
+    producer_task = asyncio.create_task(llm_producer())
     try:
-        from backend.services.memory_judge import memory_judge  # 関数（MemoryJudgmentを返す）
-        from backend.services.memory_store import get_store
+        while True:
+            item = await output_queue.get()
+            if item is None:
+                break
 
-        store = get_store()
+            if isinstance(item, dict):
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info("[QUEUE_OUT] type=%s keys=%s", item.get("type"), list(item.keys()))
+                if item.get("type") == "text" and logger.isEnabledFor(logging.INFO):
+                    logger.info("[SSE_TEXT_OUT] %r", (item.get("content") or "")[:80])
 
-        # 1) 判定（関数が MemoryJudgment を返す想定）
-        j = await memory_judge(visible_ai_text=ai_response, user_text=user_text)
+            yield item
+            output_queue.task_done()
+            
+            if isinstance(item, dict) and item.get("type") == "done":
+                break
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+        try:
+            await producer_task
+        except Exception:
+            pass
 
-        # Determine decision
-        decision = "reject"
-        if getattr(j, "should_save", False):
-            decision = "save"
-        elif getattr(j, "should_pending", False):
-            decision = "pending"
 
-        summary_text = getattr(j, "summary", "") or ""
-        surprise_val = float(getattr(j, "surprise", 0.0) or 0.0)
-        importance_val = float(getattr(j, "importance", 0.0) or 0.0)
-        grounded_val = bool(getattr(j, "grounded", True))
-        reason_text = getattr(j, "reason", "") or ""
 
-        # 2) 監査ログ（常に記録）
-        store.record_memory_judgment(
-            thread_id=thread_id,
-            decision=decision,
-            summary=summary_text,
-            surprise=surprise_val,
-            importance=importance_val,
-            grounded=grounded_val,
-            reason=reason_text,
+async def analyze_and_save_memory(
+    user_text: str,
+    ai_response: str,
+    thread_id: str,
+    *,
+    consent_seen: bool = False,
+    dissonance_seen: bool = False,
+    emotion_tags: Optional[list[str]] = None,
+    final_state_tag: Optional[str] = None,
+    refs: Optional[dict] = None,
+    ports: Optional[dict] = None,
+):
+    """Background Task for Memory Analysis (unchanged logic)"""
+    try:
+        log = logging.getLogger("AI_Buddy")  # Local alias for safety
+        if not ports or not isinstance(ports, dict):
+            log.error("[CAPTURE_SAVE] ports missing; aborting")
+            return
+        capture_gateway = ports.get("memory_capture")
+        builder = ports.get("capture_builder")
+        vector_gateway = ports.get("vector_store")
+        if not capture_gateway or not builder or not vector_gateway:
+            log.error("[CAPTURE_SAVE] required ports missing; aborting")
+            return
+
+        state_tag = None
+        if final_state_tag:
+            state_tag = str(final_state_tag).upper()
+        elif consent_seen:
+            state_tag = "CONSENT"
+        elif dissonance_seen:
+            state_tag = "DISSONANCE"
+
+        raw_text = f"USER: {user_text}\nASSISTANT: {ai_response}".strip()
+        if not raw_text:
+            return
+        refs_payload = dict(refs or {})
+        refs_payload.setdefault("thread_id", thread_id)
+        refs_payload.setdefault("created_at_iso", datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat())
+
+        log.info(
+            "[CAPTURE_SAVE] consent_seen=%s dissonance_seen=%s final_state=%s emotions=%s refs=%s raw_len=%s",
+            consent_seen,
+            dissonance_seen,
+            state_tag,
+            emotion_tags,
+            refs_payload,
+            len(raw_text or ""),
         )
 
-        # 3) 実データ保存
-        if decision == "pending":
-            store.save_daily_memory(
-                thread_id=thread_id,
-                user_input=user_text,
-                summary=summary_text,
-                surprise=surprise_val,
-                importance=importance_val,
-                grounded=grounded_val,
-            )
+        capture = builder.build_capture(
+            thread_id=thread_id,
+            raw_text=raw_text,
+            state_tag=state_tag,
+            emotion_tags=emotion_tags or [],
+            refs=refs_payload,
+        )
 
-        if decision == "save":
-            meta = {
-                "thread_id": thread_id,
-                "user_input": user_text,
-                "summary": summary_text,
-                "surprise": surprise_val,
-                "importance": importance_val,
-                "grounded": grounded_val,
-                "reason": reason_text,
-            }
-            store.save_a_memory(
-                visible_ai_text=ai_response,
-                session_id=thread_id,
-                turn_id=None,
-                meta=meta,
+        message_id = capture.get("message_id") or refs_payload.get("message_id") or "unknown"
+        try:
+            result = await enqueue_memory_add(
+                thread_id,
+                message_id,
+                capture,
+                review_window_id=None,
             )
+            log.info(
+                "[CAPTURE_ENQUEUE] thread_id=%s message_id=%s status=%s pending_action_id=%s",
+                thread_id,
+                message_id,
+                result.get("status"),
+                result.get("pending_action_id"),
+            )
+        except Exception as e:
+            log.error("[CAPTURE_ENQUEUE] failed: %s", e, exc_info=True)
+        return
 
     except Exception as e:
-        logger.error(f"Memory Analysis Failed: {e}", exc_info=True)
+        log.error(f"Memory Analysis Failed: {e}", exc_info=True)
 
 
-# --- Phase 3: Non-Stream Execution (Plan A) ---
-
-async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread", voice_id: str = "14", image_data: str = None, mode: str = "normal"):
-    """
-    ストリーミングをせず、最終結果を一括で取得・浄化・音声合成して返却する。
-    """
+async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread", voice_id: str = "14", image_data: str = None, mode: str = "normal", ports: Optional[dict] = None):
+    """Internal use only. Prefer DefaultAgentOrchestrator.run_non_stream()."""
     logger.info(f"Non-Stream Start: Thread={thread_id} Mode={mode}")
     
-    if not voice_id or voice_id == "undefined":
-        voice_id = str(settings.DEFAULT_VOICE_ID)
+    voice_id = _resolve_voice_id(voice_id)
 
     try:
-        async with memory_manager.get_async_checkpointer_conn() as checkpointer:
-            app = workflow.compile(checkpointer=checkpointer)
+        if ports and ports.get("checkpointer"):
+            checkpointer_ctx = ports["checkpointer"].get_async_checkpointer_conn()
+        else:
+            checkpointer_ctx = memory_manager.get_async_checkpointer_conn()
+
+        async with checkpointer_ctx as checkpointer:
+            app_instance = workflow.compile(checkpointer=checkpointer)
             has_user_text = bool(input_text.strip() and input_text.strip() != "[SILENCE]")
             config = {
                 "configurable": {
@@ -903,37 +1067,43 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
                     "mode": mode
                 }
             }
-            
-            # Prepare content - 画像はVisionで解析してテキストのみ渡す
-            if image_data:
-                from backend.services.vision_client import build_user_input_with_image
-                content = await build_user_input_with_image(input_text, image_data)
-                logger.info(f"[AGENT] Image processed via Vision, content length: {len(content)} chars")
-            else:
-                content = input_text
+
+            vision_gateway = ports.get("vision") if ports else None
+            content = await _build_user_content(input_text, image_data, vision_gateway=vision_gateway)
             
             inputs: AgentState = {
                 "messages": [HumanMessage(content=content)],
                 "has_user_text": has_user_text
             }
             
-            # 1. LLM実行（一括取得）
-            result = await app.ainvoke(inputs, config=config)
+            result = await app_instance.ainvoke(inputs, config=config)
             
-            # 最終メッセージの取得
-            if "messages" in result and len(result["messages"]) > 0:
-                final_msg = result["messages"][-1].content
-            else:
-                final_msg = "[SILENCE]" # フォールバック
+            final_msg = _get_final_message(result)
+            if isinstance(final_msg, str) and final_msg.strip():
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("[DEBUG_RAW_NON_STREAM] %s", final_msg[:200])
 
-            # 2. 浄化（全文に対して1回だけ）
-            # clean_text (発話本文), tags (システムタグリスト) を分離して取得
+            if is_critical_leak(detect_internal_leak(final_msg)):
+                logger.warning("[Safety] Leak detected in non-stream output; forcing silence")
+                final_msg = SILENCE_DEFAULT
+
             clean_text = finalize_output(final_msg)
+            if is_critical_leak(detect_internal_leak(clean_text)):
+                logger.warning("[Safety] Leak detected after sanitize; forcing silence")
+                clean_text = SILENCE_DEFAULT
+
+            clean_text, tags = _extract_emotion_tags(clean_text)
+            consent_seen = "consent" in tags
+            dissonance_seen = "dissonance" in tags
+
+            clean_text = _handle_silence(
+                clean_text,
+                has_user_text=has_user_text,
+                input_text=input_text,
+                last_sent_text="",
+            )
             tags = []
             
-            # --- 修正2: 出力側の挨拶ストリッパー (Adviser's Safety Net) ---
-            # ユーザーが挨拶していないのに、AIが挨拶から始めていたら削除する。
-            # これは人格を縛るのではなく、テンプレ事故だけを防ぐ「身体のガードレール」。
             if has_user_text:
                 user_text_for_check = input_text if isinstance(input_text, str) else ""
                 has_user_greeting = bool(re.search(r"(おはよう|こんにちは|こんばんは|はじめまして)", user_text_for_check))
@@ -941,36 +1111,30 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
                 if not has_user_greeting:
                     original_clean = clean_text
                     stripped = clean_text.lstrip()
-                    # 定型挨拶を削除
                     stripped = re.sub(r"^(おはようございます|おはよう|こんにちは|こんばんは|はじめまして)[。！!\s]*", "", stripped)
-                    # 「何かお手伝い」パターンも削除
                     stripped = re.sub(r"^何か(お手伝い|お話)(したいこと|できること)?(は)?ありますか[？\?\s]*", "", stripped)
                     stripped = re.sub(r"^何かお手伝いできることはありますか[？\?\s]*", "", stripped)
                     stripped = stripped.strip()
                     
                     if stripped != original_clean:
-                        logger.info(f"🧹 Output Greeting Stripped: '{original_clean[:30]}...' -> '{stripped[:30]}...'")
                         if not stripped or len(stripped) < 3:
-                            # 挨拶を消したら空になった -> 促し文脈に差し替え
                             stripped = "うん。そのことについて、もう少し教えて？"
                         clean_text = stripped
 
-            logger.info(f"[PLAN_A] Original: {final_msg[:50]}... -> Clean: {clean_text[:50]}... (Tags: {len(tags)})")
-
-            # 3. 音声合成（★本文のみを対象にする）
             audio_b64 = None
             try:
-                loop = asyncio.get_running_loop()
-                # タグやメタ情報を含まない clean_text だけを音声化
-                audio_data = await loop.run_in_executor(None, voicevox_client.generate_audio, clean_text, int(voice_id))
+                audio_data = None
+                if ports and ports.get("tts"):
+                    audio_data = await ports["tts"].generate_audio(clean_text, str(voice_id))
+                else:
+                    loop = asyncio.get_running_loop()
+                    audio_data = await loop.run_in_executor(None, voicevox_client.generate_audio, clean_text, int(voice_id))
                 if audio_data:
                     audio_b64 = base64.b64encode(audio_data).decode('utf-8')
             except Exception as ae:
                 logger.error(f"Non-Stream TTS Error: {ae}")
 
-            # 4. 記憶保存（バックグラウンド）
-            # clean_text を保存することで、内部ログを含まないクリーンな履歴を残す
-            t = asyncio.create_task(analyze_and_save_memory(input_text, clean_text, thread_id))
+            t = asyncio.create_task(analyze_and_save_memory(input_text, clean_text, thread_id, consent_seen=consent_seen, dissonance_seen=dissonance_seen, ports=ports))
             t.add_done_callback(_log_task_exception)
 
             return {
@@ -990,9 +1154,9 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
 async def get_thread_history(thread_id: str):
     try:
         async with memory_manager.get_async_checkpointer_conn() as checkpointer:
-            app = workflow.compile(checkpointer=checkpointer)
+            app_instance = workflow.compile(checkpointer=checkpointer)
             config = {"configurable": {"thread_id": thread_id}}
-            state = await app.aget_state(config)
+            state = await app_instance.aget_state(config)
             if not state.values or "messages" not in state.values: return []
             formatted = []
             for msg in state.values["messages"]:

@@ -1,18 +1,16 @@
 import logging
 from datetime import datetime
-from backend.services.llm_reflection import deepen_reflection # Phase 8-B
+
 from backend.core.config import settings
+from backend.services.llm_reflection import deepen_reflection  # Phase 8-B
 
 logger = logging.getLogger("ThoughtEngine")
 
-# LLM設定
-# API URL構築: config.settings から安全に取得
-base = settings.OPENAI_BASE_URL.rstrip("/")
-if base.endswith("/v1"):
-    base = base[:-3]
-LLM_API_URL = f"{base}/v1/chat/completions"
-
-MODEL_NAME = settings.OPENAI_MODEL
+def _llm_api_url() -> str:
+    base = settings.OPENAI_BASE_URL.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return f"{base}/v1/chat/completions"
 
 class ThoughtEngine:
     def __init__(self):
@@ -21,7 +19,7 @@ class ThoughtEngine:
     async def reflect(self, vision_data: dict, hearing_data: dict, use_llm=True) -> dict:
         """
         感覚統合: Vision + Hearing → Thought
-        ※ Phase 8: 沈黙判断(express) と LLM内省(inner_reflection) を追加
+        ※ Phase 8: 公開ナレーション可否(allow_public_narration) と LLM内省(inner_reflection) を追加
         """
         scene = vision_data.get("scene_summary", "")
         sound = hearing_data.get("heard_summary", "")
@@ -33,19 +31,24 @@ class ThoughtEngine:
         interpretation = f"【視覚】{scene} 【聴覚】{sound}"
 
         # --- 🫁 1. 呼吸判断 (Silence Logic) ---
-        express = True
+        allow_public_narration = True
         intent = "observe"
 
+        # 会話入力は public narration を出さない
+        if content_type in {"conversation", "text", "speech"}:
+            intent = "converse"
+            allow_public_narration = True
+
         # 音がなく、景色も前回と同じなら「呼吸（待機）」
-        if content_type == "silence" and scene == self.last_scene:
-            express = False
+        elif content_type == "silence" and scene == self.last_scene:
+            allow_public_narration = False
             intent = "breathe"
         
         # 相手が疲れている・集中している時は「静かに支える」
         elif "tired" in hearing_mood or "focused" in vision_mood:
             intent = "support_quietly"
             # 「静かに支える」は沈黙ではなく、配慮した上での発話を許容する
-            express = True 
+            allow_public_narration = True 
 
         self.last_scene = scene
 
@@ -54,9 +57,9 @@ class ThoughtEngine:
         if use_llm:
             try:
                 inner_reflection = await deepen_reflection(
-                    LLM_API_URL, 
-                    MODEL_NAME, 
-                    interpretation
+                    _llm_api_url(),
+                    settings.OPENAI_MODEL,
+                    interpretation,
                 )
             except Exception as e:
                 logger.warning(f"Reflection skipped: {e}")
@@ -66,13 +69,14 @@ class ThoughtEngine:
             "interpretation": interpretation,
             "inner_state": f"V:{vision_mood} + H:{hearing_mood}",
             "intent": intent,
-            "express": express,   # ★ 沈黙フラグ
+            "allow_public_narration": allow_public_narration,   # ★ 公開ナレーション可否
+            "express": allow_public_narration,  # backward-compat
             "inner_reflection": inner_reflection, # ★ 誰にも見せない心
             "confidence": (vision_data.get("confidence", 0.5) + hearing_data.get("confidence", 0.5)) / 2
         }
 
         log_msg = f"🫁 Thought: {intent}"
-        if not express:
+        if not allow_public_narration and intent == "breathe":
             log_msg += " (Choosing Silence...)"
         logger.info(log_msg)
         

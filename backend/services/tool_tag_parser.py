@@ -30,7 +30,7 @@ def parse_tool_tags(text: str) -> Tuple[str, List[Dict[str, Any]]]:
             payload = json.loads(payload_str)
             if isinstance(payload, dict):
                 actions.append({"type": name, "payload": payload})
-        except Exception:
+        except json.JSONDecodeError:
             # 壊れた命令行は本文として残さず捨てる（A層を汚さない）
             # 代わりにB層で検出エラーを記録するのが望ましい（実行側で）
             actions.append({"type": "TAG_PARSE_ERROR", "payload": {"raw": line}})

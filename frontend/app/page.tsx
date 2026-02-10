@@ -3,16 +3,21 @@ import React, { useState, useEffect } from 'react';
 import Sidebar from '@/components/Sidebar';
 import ChatInterface from '@/components/ChatInterface';
 import AvatarView from '@/components/AvatarView';
+import ActionPanel from '@/components/ActionPanel';
+import ActionIssuesPanel from '@/components/ActionIssuesPanel';
 import MemoryExplorer from '@/components/MemoryExplorer';
-import ProfileEditor from '@/components/ProfileEditor';
+import LivestreamDashboard from '@/components/LivestreamDashboard';
 import SettingsPanel from '@/components/SettingsPanel';
 import StatsPanel from '@/components/StatsPanel';
+import DrawLab from '@/components/DrawLab';
 import { Menu, X } from 'lucide-react';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('chat'); // 'chat' | 'memories' | 'profile' | 'settings'
   const [isTalking, setIsTalking] = useState(false);
   const [emotion, setEmotion] = useState("neutral");
+  const [agentState, setAgentState] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
   const [agentMode, setAgentMode] = useState('normal'); // 'normal' | 'stream' | 'dev'
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -74,17 +79,30 @@ export default function Home() {
                 {/* Background Effect */}
                 <div className="absolute top-0 w-full h-32 bg-gradient-to-b from-blue-900/20 to-transparent pointer-events-none" />
                 <ChatInterface
-                  onStateChange={(talking, emo) => {
+                  onStateChange={(talking, emo, thinking) => {
                     setIsTalking(talking);
                     setEmotion(emo);
+                    if (typeof thinking === "boolean") {
+                      setIsThinking(thinking);
+                    }
                   }}
+                  onAgentStateChange={(state) => setAgentState(state)}
                   agentMode={agentMode} // Pass mode to chat
                 />
               </div>
 
               {/* Avatar Panel (Right, Grows to fill space) */}
-              <div className="hidden xl:block flex-1 h-full rounded-3xl overflow-hidden glass-panel">
-                <AvatarView isTalking={isTalking} emotion={emotion} />
+              <div className="hidden xl:flex flex-1 h-full flex-col gap-2">
+                <div className="flex-1 rounded-3xl overflow-hidden glass-panel">
+                  <AvatarView isTalking={isTalking} emotion={emotion} isThinking={isThinking} stateTag={agentState} />
+                </div>
+                <div className="h-[40%] min-h-[240px] rounded-3xl overflow-hidden glass-panel">
+                  {agentMode === 'stream' ? (
+                    <LivestreamDashboard />
+                  ) : (
+                    <ActionPanel threadId="default_thread" />
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -95,11 +113,7 @@ export default function Home() {
             </div>
           )}
 
-          {activeTab === 'profile' && (
-            <div className="flex-1 glass rounded-2xl md:rounded-3xl p-4 md:p-8 overflow-y-auto">
-              <ProfileEditor />
-            </div>
-          )}
+          {/* profile tab disabled */}
 
           {activeTab === 'settings' && (
             <div className="flex-1 glass rounded-2xl md:rounded-3xl p-4 md:p-8 overflow-y-auto">
@@ -113,7 +127,19 @@ export default function Home() {
             </div>
           )}
 
-          {activeTab !== 'chat' && activeTab !== 'memories' && activeTab !== 'settings' && activeTab !== 'profile' && activeTab !== 'stats' && (
+          {activeTab === 'action_issues' && (
+            <div className="flex-1 glass rounded-3xl overflow-hidden">
+              <ActionIssuesPanel threadId="default_thread" />
+            </div>
+          )}
+
+          {activeTab === 'draw_lab' && (
+            <div className="flex-1 glass rounded-3xl overflow-hidden">
+              <DrawLab />
+            </div>
+          )}
+
+          {activeTab !== 'chat' && activeTab !== 'memories' && activeTab !== 'settings' && activeTab !== 'stats' && activeTab !== 'action_issues' && activeTab !== 'draw_lab' && (
             <div className="flex-1 glass rounded-2xl md:rounded-3xl p-4 md:p-8 flex items-center justify-center">
               <div className="text-center">
                 <h2 className="text-3xl font-bold mb-2">準備中</h2>

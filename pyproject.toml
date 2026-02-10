@@ -8,11 +8,37 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "python-dotenv",
+    "requests",
+    "aiosqlite",
+    "langchain",
+    "langchain-openai",
+    "langchain-community",
+    "langchain-ollama",
+    "langgraph",
     "chromadb (>=1.4.0,<2.0.0)",
-    "sentence-transformers (>=5.2.0,<6.0.0)"
+    "sentence-transformers (>=5.2.0,<6.0.0)",
+    "pyautogui",
+    "pillow",
+    "mss",
+    "numpy",
+    "watchdog",
+    "dspy-ai>=2.5.0",
 ]
 
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "agent: agent integration tests (requires local LLM services)",
+    "server: server connectivity tests (requires running backend/LLM)",
+    "e2e: end-to-end tests",
+]

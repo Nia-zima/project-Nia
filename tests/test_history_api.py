@@ -1,20 +1,27 @@
+import os
 import requests
 import time
-import sys
+import pytest
 
 BASE_URL = "http://localhost:8000"
 THREAD_ID = f"test_thread_{int(time.time())}"
 
+if not os.getenv("RUN_SERVER_TESTS"):
+    pytest.skip("Set RUN_SERVER_TESTS=1 to run history API tests.", allow_module_level=True)
+
+@pytest.mark.server
 def test_history():
     print(f"Testing with Thread ID: {THREAD_ID}")
     
     # 1. Send Message
     print("Sending message...")
     try:
-        response = requests.post(f"{BASE_URL}/chat", json={"text": "Hello History Check", "thread_id": THREAD_ID}, stream=True)
-        if response.status_code != 200:
-            print(f"Failed to send message: {response.status_code} {response.text}")
-            return False
+        response = requests.post(
+            f"{BASE_URL}/api/stream_chat",
+            json={"text": "Hello History Check", "thread_id": THREAD_ID},
+            stream=True,
+        )
+        assert response.status_code == 200, f"Failed to send message: {response.status_code} {response.text}"
             
         # Consume stream
         text = ""
@@ -23,8 +30,7 @@ def test_history():
                 text += chunk.decode("utf-8")
         print(f"Received response: {text[:50]}...")
     except Exception as e:
-        print(f"Error sending message: {e}")
-        return False
+        pytest.fail(f"Error sending message: {e}")
         
     # Wait for DB to settle
     time.sleep(1)
@@ -32,10 +38,8 @@ def test_history():
     # 2. Get History
     print("Fetching history...")
     try:
-        response = requests.get(f"{BASE_URL}/history/{THREAD_ID}")
-        if response.status_code != 200:
-            print(f"Failed to get history: {response.status_code} {response.text}")
-            return False
+        response = requests.get(f"{BASE_URL}/api/history/{THREAD_ID}")
+        assert response.status_code == 200, f"Failed to get history: {response.status_code} {response.text}"
             
         data = response.json()
         history = data.get("history", [])
@@ -47,19 +51,7 @@ def test_history():
         # Verify content
         # Check for the message we just sent
         user_msgs = [m for m in history if m['role'] == 'user' and 'Hello History Check' in m['content']]
-        if user_msgs:
-            print("SUCCESS: Found user message in history.")
-            return True
-        else:
-            print("FAILURE: User message not found in history.")
-            return False
+        assert user_msgs, "User message not found in history."
             
     except Exception as e:
-        print(f"Error fetching history: {e}")
-        return False
-
-if __name__ == "__main__":
-    if test_history():
-        sys.exit(0)
-    else:
-        sys.exit(1)
+        pytest.fail(f"Error fetching history: {e}")

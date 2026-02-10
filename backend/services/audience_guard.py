@@ -1,5 +1,9 @@
 from typing import Dict, Tuple
 
+_HIGH_VIEWER_THRESHOLD = 50
+_MASS_VIEWER_THRESHOLD = 200
+_AGGRESSIVE_TONES = {"煽り", "攻撃的", "炎上", "aggressive"}
+
 def build_audience_meta(
     viewer_count: int,
     interaction_type: str,
@@ -30,8 +34,10 @@ def compute_audience_bias(meta: Dict) -> float:
     tone = meta.get("tone", "neutral")
 
     # 1. 規模バイアス
-    if viewer_count >= 50: score += 0.2
-    if viewer_count >= 200: score += 0.2
+    if viewer_count >= _HIGH_VIEWER_THRESHOLD:
+        score += 0.2
+    if viewer_count >= _MASS_VIEWER_THRESHOLD:
+        score += 0.2
 
     # 2. 種類バイアス
     if interaction == "mass_reaction": score += 0.3
@@ -39,7 +45,7 @@ def compute_audience_bias(meta: Dict) -> float:
     elif interaction == "emotional_dump": score -= 0.1
 
     # 3. トーンバイアス
-    if tone in ["煽り", "攻撃的", "炎上", "aggressive"]:
+    if tone in _AGGRESSIVE_TONES:
         score += 0.3
 
     return max(0.0, min(1.0, score))

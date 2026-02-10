@@ -1,6 +1,6 @@
 "use client";
 import React from 'react';
-import { Settings, MessageSquare, Database, User, Mic, Moon, Sparkles, Eye, EyeOff, BarChart3 } from 'lucide-react';
+import { Settings, MessageSquare, Database, User, Mic, Moon, Sparkles, Eye, EyeOff, BarChart3, AlertTriangle, Brush } from 'lucide-react';
 import { API_URL } from '@/lib/api';
 import { clsx } from 'clsx';
 
@@ -14,12 +14,15 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
         { id: 'chat', icon: MessageSquare, label: 'チャット' },
         { id: 'memories', icon: Database, label: '記憶データベース' },
         { id: 'stats', icon: BarChart3, label: '統計' },
-        { id: 'profile', icon: User, label: 'プロフィール' },
+        { id: 'action_issues', icon: AlertTriangle, label: '失敗/却下' },
+        { id: 'draw_lab', icon: Brush, label: 'お絵描きPoC' },
+        // { id: 'profile', icon: User, label: 'プロフィール' },
         { id: 'settings', icon: Settings, label: '設定' },
     ];
 
 
     const [visionEnabled, setVisionEnabled] = React.useState(false);
+    const [actionIssues, setActionIssues] = React.useState<any[]>([]);
 
     React.useEffect(() => {
         fetch(`${API_URL}/status`)
@@ -30,6 +33,44 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                 }
             })
             .catch(console.error);
+    }, []);
+
+    React.useEffect(() => {
+        let cancelled = false;
+        const fetchIssues = async () => {
+            try {
+                const res = await fetch(
+                    `${API_URL}/actions/pending?thread_id=default_thread&status=ERROR,REJECTED&limit=5`,
+                    { cache: "no-store" }
+                );
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!cancelled) {
+                    setActionIssues(Array.isArray(data?.items) ? data.items : []);
+                }
+            } catch (e) {
+                if (!cancelled) {
+                    setActionIssues([]);
+                }
+            }
+        };
+        fetchIssues();
+
+        const handler = (ev: Event) => {
+            const detail = (ev as CustomEvent).detail || {};
+            if (!detail?.name) return;
+            fetchIssues();
+        };
+        if (typeof window !== "undefined") {
+            window.addEventListener("phase5-action-event", handler as EventListener);
+        }
+
+        return () => {
+            cancelled = true;
+            if (typeof window !== "undefined") {
+                window.removeEventListener("phase5-action-event", handler as EventListener);
+            }
+        };
     }, []);
 
     const toggleVision = async () => {
@@ -63,22 +104,28 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                     const Icon = tab.icon;
                     const isActive = activeTab === tab.id;
                     return (
-                        <button
-                            key={tab.id}
-                            onClick={() => setActiveTab(tab.id)}
-                            className={clsx(
-                                "w-full flex items-center gap-3 p-3 rounded-xl transition-all duration-200 group active:scale-95",
-                                isActive
-                                    ? "bg-primary/20 text-primary border border-primary/20 shadow-[0_0_15px_rgba(59,130,246,0.2)]"
-                                    : "text-gray-400 hover:bg-white/5 hover:text-gray-200"
+                        <React.Fragment key={tab.id}>
+                            <button
+                                onClick={() => setActiveTab(tab.id)}
+                                className={clsx(
+                                    "w-full flex items-center gap-3 p-3 rounded-xl transition-all duration-200 group active:scale-95",
+                                    isActive
+                                        ? "bg-primary/20 text-primary border border-primary/20 shadow-[0_0_15px_rgba(59,130,246,0.2)]"
+                                        : "text-gray-400 hover:bg-white/5 hover:text-gray-200"
+                                )}
+                            >
+                                <Icon className={clsx("w-6 h-6", isActive && "text-blue-400")} />
+                                <span className="hidden lg:block font-medium">{tab.label}</span>
+                                {isActive && (
+                                    <div className="lg:hidden absolute left-1 w-1 h-8 bg-blue-500 rounded-r-full" />
+                                )}
+                            </button>
+                            {tab.id === "stats" && actionIssues.length > 0 && (
+                                <div className="mx-1 my-1 rounded-xl border border-rose-500/20 bg-rose-900/10 px-2 py-1 text-[10px] text-rose-200/80">
+                                    失敗/却下: {actionIssues.length}件
+                                </div>
                             )}
-                        >
-                            <Icon className={clsx("w-6 h-6", isActive && "text-blue-400")} />
-                            <span className="hidden lg:block font-medium">{tab.label}</span>
-                            {isActive && (
-                                <div className="lg:hidden absolute left-1 w-1 h-8 bg-blue-500 rounded-r-full" />
-                            )}
-                        </button>
+                        </React.Fragment>
                     );
                 })}
             </nav>

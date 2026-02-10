@@ -1,5 +1,6 @@
 import logging
 import random
+from typing import Dict
 
 logger = logging.getLogger("VoiceAdapter")
 
@@ -7,7 +8,7 @@ class VoiceAdapter:
     def __init__(self):
         pass
 
-    def narrate_to_public(self, thought: dict) -> str:
+    def narrate_to_public(self, thought: Dict) -> str:
         """
         思考(Thought) → 外部表現(Public Narration)
         OBSや配信画面に出すための「ニアの声」を生成する
@@ -27,13 +28,8 @@ class VoiceAdapter:
             ]
             narration = random.choice(options)
         
-        elif "observe" in intent:
-            options = [
-                "平和な時間だね。",
-                "世界は今日も動いてる。",
-                "ふむふむ、なるほどね。"
-            ]
-            narration = random.choice(options)
+        elif "observe" in intent or "converse" in intent:
+            narration = ""
         
         else:
             narration = f"今は {inner_state} な空気を感じてるよ。"

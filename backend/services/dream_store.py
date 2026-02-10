@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import time
 import uuid
-import sqlite3
-from typing import Optional, List
 from dataclasses import dataclass
+from typing import Optional, List
 
 from backend.core.logger import logger
 from backend.core.db import get_conn  # Centralized DB Access
@@ -42,12 +41,12 @@ class DreamStore:
         
         dream_id = str(uuid.uuid4())
         now = int(time.time())
-        conn = get_conn()
         try:
-            conn.execute(
-                "INSERT INTO dreams (id, created_at, mood, dream_text, presented) VALUES (?, ?, ?, ?, 0)",
-                (dream_id, now, mood, dream_text[:900]),  # 上限900文字
-            )
+            with get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO dreams (id, created_at, mood, dream_text, presented) VALUES (?, ?, ?, ?, 0)",
+                    (dream_id, now, mood, dream_text[:900]),  # 上限900文字
+                )
             # get_conn uses isolation_level=None (autocommit) usually, but explicit safety is good
             # conn.commit() is not needed if auto-commit
             logger.info(f"[DREAM] Saved dream: {dream_id} (mood={mood})")
@@ -55,8 +54,6 @@ class DreamStore:
         except Exception as e:
             logger.error(f"[DREAM] Failed to save dream: {e}")
             return None
-        finally:
-            conn.close()
 
     def claim_unread_dream(self) -> Optional[Dream]:
         """
@@ -101,12 +98,12 @@ class DreamStore:
 
     def list_recent_dreams(self, limit: int = 10) -> List[Dream]:
         """最近の夢を取得（将来の「見返す」機能用）"""
-        conn = get_conn()
         try:
-            rows = conn.execute(
-                "SELECT id, created_at, mood, dream_text FROM dreams ORDER BY created_at DESC LIMIT ?",
-                (limit,)
-            ).fetchall()
+            with get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT id, created_at, mood, dream_text FROM dreams ORDER BY created_at DESC LIMIT ?",
+                    (limit,)
+                ).fetchall()
             return [
                 Dream(
                     id=row["id"],
@@ -116,8 +113,9 @@ class DreamStore:
                 )
                 for row in rows
             ]
-        finally:
-            conn.close()
+        except Exception as e:
+            logger.error(f"[DREAM] Failed to list dreams: {e}")
+            return []
 
 # Singleton
 dream_store = DreamStore()

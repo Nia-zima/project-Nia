@@ -5,23 +5,79 @@ Refactored in Phase 1 to unify configuration and paths.
 """
 from __future__ import annotations
 
-import json
-import os
-import time
-import glob
-from datetime import datetime
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+from fastapi.responses import PlainTextResponse
+from contextlib import asynccontextmanager
 
-from backend.core.config import PROJECT_ROOT, STATIC_DIR, ensure_dirs, boot_banner
+from backend.core.config import ensure_dirs, boot_banner, settings
+from backend.core.logger import logger
+from backend.services.startup_tasks import ensure_public_status, cleanup_old_audio_files
 
 # Initialize directories
 ensure_dirs()
 
+# --- Startup Event ---
+_retention_task: asyncio.Task | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1. Boot Banner (Path Debugging)
+    logger.info(boot_banner())
+    
+    # 2. DB Init (Phase 2)
+    init_schema()
+    
+    # Health Check Log
+    hc = health_check()
+    logger.info("[BOOT] DB Health: %s", hc)
+    
+    # 3. Legacy Init
+    ensure_public_status()
+    
+    # 4. Service Init
+    from backend.services.telemetry_logger import telemetry
+    from backend.services.chat_history_store import chat_history_store
+    from backend.services.memory_manager import memory_manager
+    await telemetry.init_db()
+    await chat_history_store.init_db()
+    await memory_manager.init_checkpointer()
+    
+    # 5. GC
+    deleted_count = cleanup_old_audio_files(settings.STATIC_DIR, max_age_hours=24)
+    if deleted_count > 0:
+        logger.info("[GC] Cleaned up %s old audio files from %s", deleted_count, settings.STATIC_DIR / "audio")
+
+    # 6. Retention Full Sweeper (Background)
+    global _retention_task
+    try:
+        if getattr(settings, "RETENTION_FULL_SWEEPER_ENABLED", True):
+            _retention_task = asyncio.create_task(retention_full_sweeper_loop(), name="retention_full_sweeper")
+    except Exception:
+        logger.exception("[RETENTION_FULL] failed to start background sweeper")
+
+    # 起動時フルスイープ（ON時のみ）
+    asyncio.create_task(_boot_retention_full())
+
+    try:
+        yield
+    finally:
+        if _retention_task:
+            _retention_task.cancel()
+            try:
+                await _retention_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            from backend.services.memory_manager import memory_manager
+            await memory_manager.close_checkpointer()
+        except Exception:
+            logger.exception("[CHECKPOINTER] close failed")
+
 # Defines the single FastAPI application instance
-app = FastAPI(title="Nia API")
+app = FastAPI(title="Nia API", lifespan=lifespan)
 
 # Middleware
 app.add_middleware(
@@ -32,94 +88,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Legacy Helper Functions (to be refactored later) ---
-# Phase 1 ではロジックを変えずにパスだけ config に寄せる
-
-def ensure_public_status():
-    """public_status.json が存在しない場合、初期値で作成する"""
-    public_json_path = PROJECT_ROOT / "public_status.json"
-    if not public_json_path.exists():
-        initial_data = {
-            "chapter_title": "Initializing...",
-            "vibe": "Awaking",
-            "note": "System is starting up.",
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M")
-        }
-        try:
-            with open(public_json_path, "w", encoding="utf-8") as f:
-                json.dump(initial_data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Failed to create initial public_status: {e}")
-
-def cleanup_old_audio_files(max_age_hours: int = 24):
-    """起動時に古い音声ファイルを削除（ディスク増殖防止）"""
-    audio_dir = STATIC_DIR / "audio"
-    if not audio_dir.exists():
-        return
-    
-    now = time.time()
-    max_age_seconds = max_age_hours * 3600
-    deleted_count = 0
-    
-    try:
-        # glob works with strings
-        for filepath in glob.glob(str(audio_dir / "**" / "*.wav"), recursive=True):
-            try:
-                file_age = now - os.path.getmtime(filepath)
-                if file_age > max_age_seconds:
-                    os.remove(filepath)
-                    deleted_count += 1
-            except Exception:
-                pass
-        
-        if deleted_count > 0:
-            print(f"[GC] Cleaned up {deleted_count} old audio files from {audio_dir}")
-    except Exception as e:
-        print(f"[GC] Audio cleanup failed: {e}")
+# Block invalid static paths to avoid OS path errors (e.g., "<wav>")
+@app.middleware("http")
+async def block_bad_static_path(request: Request, call_next):
+    p = request.url.path
+    if p.startswith("/static/") and ("<" in p or ">" in p):
+        return PlainTextResponse("Bad static path", status_code=400)
+    return await call_next(request)
 
 # --- Initializers (Phase 2: Centralized DB) ---
-from backend.core.db import init_schema, health_check
 
-# --- Startup Event ---
-@app.on_event("startup")
-async def startup_event():
-    # 1. Boot Banner (Path Debugging)
-    print(boot_banner())
-    
-    # 2. DB Init (Phase 2)
-    init_schema()
-    
-    # Health Check Log
-    hc = health_check()
-    print(f"[BOOT] DB Health: {hc}")
-    
-    # 3. Legacy Init
-    ensure_public_status()
-    
-    # 4. Service Init
-    from backend.services.telemetry_logger import telemetry
-    from backend.services.chat_history_store import chat_history_store
-    await telemetry.init_db()
-    await chat_history_store.init_db()
-    
-    # 5. GC
-    cleanup_old_audio_files(max_age_hours=24)
+from backend.core.db import init_schema, health_check
+import asyncio
+
+from backend.services.retention_sweeper import retention_full_sweeper_loop
+from backend.services.chat_history_store import chat_history_store
+
+async def _boot_retention_full():
+    if not getattr(settings, "RETENTION_BOOT_FULL", False):
+        logger.info("[RETENTION_FULL] skipped (RETENTION_BOOT_FULL=0)")
+        return
+    since_h = getattr(settings, "RETENTION_BOOT_SINCE_H", 24)
+    await chat_history_store.sweep_and_promote_all_threads(since_h=since_h)
 
 # --- Routers ---
-from backend.controllers.api_router import router as api_router
+
+from backend.controllers.api.stream_router import router as stream_router
+from backend.controllers.api.system_router import router as system_router
+from backend.controllers.api.review_router import router as review_router
+from backend.controllers.api.tts_router import router as tts_router
+from backend.controllers.api.tts_events_router import router as tts_events_router
+from backend.controllers.api.actions_router import router as actions_router
+from backend.controllers.api.draw_router import router as draw_router
+from backend.controllers.api.profile_router import router as profile_router
+from backend.controllers.api.livestream_router import router as livestream_router
+from backend.controllers.api.voice_router import router as voice_router
 from backend.controllers.pending_memory_router import router as pending_router
 from backend.controllers.stats_router import router as stats_router
+from backend.api.memory_router import router as memory_router
 
-app.include_router(api_router)
+app.include_router(stream_router, prefix="/api", tags=["api"])
+app.include_router(system_router, prefix="/api", tags=["api"])
+app.include_router(profile_router, prefix="/api", tags=["api"])
+app.include_router(review_router, prefix="/api", tags=["api"])
+app.include_router(actions_router, prefix="/api", tags=["api"])
+app.include_router(draw_router, prefix="/api", tags=["api"])
+app.include_router(tts_router, prefix="/api", tags=["api"])
+app.include_router(tts_events_router, prefix="/api", tags=["api"])
+app.include_router(livestream_router, prefix="/api", tags=["livestream"])
+app.include_router(voice_router, prefix="/api", tags=["voice"])
 app.include_router(pending_router)
 app.include_router(stats_router)
+app.include_router(memory_router, prefix="/api")
 
 # --- Static Mounts ---
-(STATIC_DIR / "audio").mkdir(parents=True, exist_ok=True)
-(STATIC_DIR / "images").mkdir(parents=True, exist_ok=True)
+(settings.STATIC_DIR / "audio").mkdir(parents=True, exist_ok=True)
+(settings.STATIC_DIR / "images").mkdir(parents=True, exist_ok=True)
 
-app.mount("/static/audio", StaticFiles(directory=str(STATIC_DIR / "audio")), name="static_audio")
-app.mount("/static/images", StaticFiles(directory=str(STATIC_DIR / "images")), name="static_images")
+app.mount("/static/audio", StaticFiles(directory=str(settings.STATIC_DIR / "audio")), name="static_audio")
+app.mount("/static/images", StaticFiles(directory=str(settings.STATIC_DIR / "images")), name="static_images")
 
 # --- Endpoints ---
 
@@ -129,18 +156,7 @@ def health():
     return health_check()
 
 
-@app.get("/api/status")
-async def get_status():
-    public_json_path = PROJECT_ROOT / "public_status.json"
-    if not public_json_path.exists():
-        return JSONResponse({"status": "offline", "chapter_title": "Sleeping...", "vibe": "...", "note": ""})
-    try:
-        with open(public_json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {"status": "error"}
-
 # --- Frontend Mount (Last Priority) ---
-frontend_dir = PROJECT_ROOT / "frontend"
+frontend_dir = settings.PROJECT_ROOT / "frontend"
 if frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="static")
