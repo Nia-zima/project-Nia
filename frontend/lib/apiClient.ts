@@ -3,6 +3,8 @@
  * Centralizes all fetch() calls with typed responses.
  */
 
+import type { PendingAction } from './types';
+
 export const API_URL = "/api";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -15,7 +17,7 @@ export interface ChatMessage {
     type?: 'text' | 'audio' | 'image';
     image?: string;
     kind?: 'dream';
-    meta?: Record<string, any>;
+    meta?: { mood?: string; created_at?: string; [key: string]: unknown };
 }
 
 export interface TTSGenerateResult {
@@ -35,7 +37,7 @@ export interface VoiceSessionStartResult {
 }
 
 export interface PendingActionsResult {
-    items: any[];
+    items: PendingAction[];
     meta?: { pending_count: number; dissonance_delta: number };
 }
 
@@ -44,7 +46,7 @@ export interface CommitLogResult {
 }
 
 export interface HistoryResult {
-    history: any[];
+    history: ChatMessage[];
 }
 
 // ─── Client ──────────────────────────────────────────────────────
@@ -94,8 +96,8 @@ class APIClient {
 
     // ── Config ──
 
-    async fetchConfig(): Promise<Record<string, any>> {
-        return this.request<Record<string, any>>("/config");
+    async fetchConfig(): Promise<Record<string, unknown>> {
+        return this.request<Record<string, unknown>>("/config");
     }
 
     // ── Stream Chat ──
@@ -260,7 +262,7 @@ class APIClient {
 
     // ── Game (Minecraft) ──
 
-    async fetchGameState(): Promise<Record<string, any>> {
+    async fetchGameState(): Promise<Record<string, unknown>> {
         return this.request("/game/state");
     }
 
@@ -268,14 +270,14 @@ class APIClient {
         return this.request("/game/status");
     }
 
-    async executeGameAction(action: string, params: Record<string, any> = {}): Promise<any> {
+    async executeGameAction(action: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
         return this.request("/game/action", {
             method: "POST",
             body: JSON.stringify({ action, params }),
         });
     }
 
-    async connectGame(host: string = "localhost", port: number = 25565): Promise<any> {
+    async connectGame(host: string = "localhost", port: number = 25565): Promise<Record<string, unknown>> {
         return this.request("/game/connect", {
             method: "POST",
             body: JSON.stringify({ host, port }),

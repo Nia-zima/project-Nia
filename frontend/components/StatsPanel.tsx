@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { API_URL } from '@/lib/api';
 import {
     MessageSquare,
@@ -18,6 +18,7 @@ import {
 import MemoryGraph from './MemoryGraph';
 import MemoryTimeline from './MemoryTimeline';
 import InnerMonologue from './InnerMonologue';
+import ObservationReport from './ObservationReport';
 
 interface Stats {
     total_events: number;
@@ -41,7 +42,7 @@ export default function StatsPanel() {
     const [stats, setStats] = useState<Stats | null>(null);
     const [internalState, setInternalState] = useState<InternalState | null>(null);
     const [loading, setLoading] = useState(true);
-    const [view, setView] = useState<'stats' | 'graph' | 'timeline' | 'monologue'>('stats');
+    const [view, setView] = useState<'stats' | 'graph' | 'timeline' | 'monologue' | 'observation'>('stats');
 
     useEffect(() => {
         const fetchData = async () => {
@@ -64,7 +65,7 @@ export default function StatsPanel() {
         return () => clearInterval(interval);
     }, []);
 
-    const toneStyles: Record<string, { icon: string; value: string; border: string; bg: string; glow: string; text: string }> = {
+    const toneStyles = useMemo<Record<string, { icon: string; value: string; border: string; bg: string; glow: string; text: string }>>(() => ({
         cyan: {
             icon: 'text-cyan-200',
             value: 'text-cyan-100',
@@ -145,7 +146,7 @@ export default function StatsPanel() {
             glow: 'shadow-[0_0_30px_rgba(99,102,241,0.12)]',
             text: 'text-indigo-100/80'
         }
-    };
+    }), []);
 
     const StatCard = ({
         icon: Icon,
@@ -222,6 +223,16 @@ export default function StatsPanel() {
                     <Brain className="w-4 h-4" />
                     内部思考
                 </button>
+                <button
+                    onClick={() => setView('observation')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all ${view === 'observation'
+                        ? 'border-amber-400/40 bg-amber-500/10 text-amber-100'
+                        : 'border-transparent text-slate-400 hover:text-slate-100'
+                        }`}
+                >
+                    <TrendingUp className="w-4 h-4" />
+                    観測
+                </button>
             </div>
 
             {/* Content */}
@@ -297,6 +308,12 @@ export default function StatsPanel() {
             {view === 'monologue' && (
                 <div className="flex-1 min-h-0 overflow-hidden">
                     <InnerMonologue />
+                </div>
+            )}
+
+            {view === 'observation' && (
+                <div className="flex-1 min-h-0 overflow-hidden">
+                    <ObservationReport />
                 </div>
             )}
         </div>
