@@ -1,13 +1,27 @@
 "use client";
 import React from 'react';
-import { Settings, MessageSquare, Database, User, Mic, Moon, Sparkles, Eye, EyeOff, BarChart3, AlertTriangle, Brush } from 'lucide-react';
+import { Settings, MessageSquare, Database, User, Mic, Moon, Sparkles, Eye, EyeOff, BarChart3, AlertTriangle, Brush, Gamepad2, Video } from 'lucide-react';
 import { API_URL } from '@/lib/api';
 import { clsx } from 'clsx';
+import type { ActionIssue } from '@/lib/types';
 
 interface SidebarProps {
     activeTab: string;
     setActiveTab: (tab: string) => void;
 }
+
+const SYSTEM_TOKEN = process.env.NEXT_PUBLIC_SYSTEM_TOKEN || "";
+
+const buildSystemHeaders = (withJson: boolean): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    if (withJson) {
+        headers["Content-Type"] = "application/json";
+    }
+    if (SYSTEM_TOKEN) {
+        headers["x-system-token"] = SYSTEM_TOKEN;
+    }
+    return headers;
+};
 
 export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
     const tabs = [
@@ -16,17 +30,19 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
         { id: 'stats', icon: BarChart3, label: '統計' },
         { id: 'action_issues', icon: AlertTriangle, label: '失敗/却下' },
         { id: 'draw_lab', icon: Brush, label: 'お絵描きPoC' },
+        { id: 'game', icon: Gamepad2, label: 'ゲーム' },
+        { id: 'video', icon: Video, label: '動画' },
         // { id: 'profile', icon: User, label: 'プロフィール' },
         { id: 'settings', icon: Settings, label: '設定' },
     ];
 
 
     const [visionEnabled, setVisionEnabled] = React.useState(false);
-    const [actionIssues, setActionIssues] = React.useState<any[]>([]);
+    const [actionIssues, setActionIssues] = React.useState<ActionIssue[]>([]);
 
     React.useEffect(() => {
         fetch(`${API_URL}/status`)
-            .then(res => res.json())
+            .then(res => { if (!res.ok) throw new Error(`status: ${res.status}`); return res.json(); })
             .then(data => {
                 if (typeof data.vision_enabled === 'boolean') {
                     setVisionEnabled(data.vision_enabled);
@@ -77,11 +93,14 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
         const newState = !visionEnabled;
         setVisionEnabled(newState);
         try {
-            await fetch(`${API_URL}/system/vision`, {
+            const res = await fetch(`${API_URL}/system/vision`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: buildSystemHeaders(true),
                 body: JSON.stringify({ enabled: newState })
             });
+            if (!res.ok) {
+                throw new Error(`vision toggle failed: ${res.status}`);
+            }
         } catch (e) {
             console.error(e);
             setVisionEnabled(!newState);
@@ -136,7 +155,14 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                 <button
                     onClick={async () => {
                         if (!confirm("睡眠サイクル（記憶の整理）を開始しますか？\nしばらく応答できなくなります。")) return;
-                        try { await fetch(`${API_URL}/system/sleep`, { method: 'POST' }); alert("おやすみなさい。睡眠サイクルを開始しました。"); }
+                        try {
+                            const res = await fetch(`${API_URL}/system/sleep`, {
+                                method: 'POST',
+                                headers: buildSystemHeaders(false),
+                            });
+                            if (!res.ok) throw new Error(`sleep failed: ${res.status}`);
+                            alert("おやすみなさい。睡眠サイクルを開始しました。");
+                        }
                         catch (e) { console.error(e); alert("失敗しました。"); }
                     }}
                     className="w-full flex items-center gap-3 p-3 rounded-xl text-gray-400 hover:bg-purple-500/10 hover:text-purple-300 transition-all active:scale-95"
@@ -163,7 +189,14 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                 <button
                     onClick={async () => {
                         if (!confirm("週次定例（進化プロセス）を開始しますか？\n直近1週間のログを分析します。")) return;
-                        try { await fetch(`${API_URL}/system/reflect`, { method: 'POST' }); alert("振り返りを開始しました。ログを確認してください。"); }
+                        try {
+                            const res = await fetch(`${API_URL}/system/reflect`, {
+                                method: 'POST',
+                                headers: buildSystemHeaders(false),
+                            });
+                            if (!res.ok) throw new Error(`reflect failed: ${res.status}`);
+                            alert("振り返りを開始しました。ログを確認してください。");
+                        }
                         catch (e) { console.error(e); alert("失敗しました。"); }
                     }}
                     className="w-full flex items-center gap-3 p-3 rounded-xl text-gray-400 hover:bg-yellow-500/10 hover:text-yellow-300 transition-all active:scale-95"

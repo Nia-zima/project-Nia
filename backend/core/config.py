@@ -50,8 +50,11 @@ def ensure_dirs():
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     (STATIC_DIR / "audio").mkdir(parents=True, exist_ok=True)
 
-def boot_banner():
-    pass
+def boot_banner() -> str:
+    return (
+        f"=== Nia Boot === model={settings.OPENAI_MODEL} "
+        f"vision={settings.VISION_PROVIDER} db={settings.DB_PATH}"
+    )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -62,11 +65,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 LOG_DIR = PROJECT_ROOT / "logs"
 STATIC_DIR = PROJECT_ROOT / "backend" / "static"  # Phase 1: Match current structure
 DB_PATH = DATA_DIR / "nia.sqlite3"  # 将来的に統合されるメインDB
-
-class LegacySettings:
-    BASE_DIR = str(PROJECT_ROOT / "backend" / "core")
-    USER_PROFILE_JSON = "user_profile.json"
-    PUBLIC_STATUS_JSON = "public_status.json"
 
 class Settings:
     PROJECT_ROOT: Path = PROJECT_ROOT
@@ -214,6 +212,9 @@ class Settings:
         self.USER_PROFILE_JSON = _env_str("USER_PROFILE_JSON", "data/user_profile.json")
         self.PUBLIC_STATUS_JSON = _env_str("PUBLIC_STATUS_JSON", "public_status.json")
 
+        # Identity Manager secret key
+        self.IDENTITY_SECRET_KEY = _env_str("IDENTITY_SECRET_KEY", "INTERNAL_SLEEP_PROCESS_ONLY")
+
         # Post-Phase5: Policy and DSPy modes
         # Phase 3 (Gymnasium) と Phase 4 (DSPy) は無効化
         # 理由: 固定化・収束を引き起こすため（Body Constitution B.9「揺らぎの源泉」）
@@ -249,61 +250,50 @@ class Settings:
         self.EXTERNAL_MIN_CONFIDENCE = max(0.0, min(1.0, _env_float("EXTERNAL_MIN_CONFIDENCE", 0.65)))
         self.GOOGLE_API_KEY = _env_str("GOOGLE_API_KEY", "")
         self.GOOGLE_CSE_ID = _env_str("GOOGLE_CSE_ID", "")
+        # Translation guardrails for memory UI
+        self.MAX_TRANSLATE_ITEMS = _env_int("MAX_TRANSLATE_ITEMS", 10)
+        self.MAX_TRANSLATE_CHARS = _env_int("MAX_TRANSLATE_CHARS", 2000)
 
-# OLLAMA/ビジョン/音声などの追加設定（グローバルスコープで定義）
-OLLAMA_BASE_URL = getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = getenv("OLLAMA_MODEL", "qwen3-vl") # As per summary
-VISION_MODEL = getenv("VISION_MODEL", "qwen3-vl:4b")
+        # Phase D: Context Builder settings
+        self.CONTEXT_MAX_PINNED = _env_int("CONTEXT_MAX_PINNED", 5)
+        self.CONTEXT_MAX_WORKING = _env_int("CONTEXT_MAX_WORKING", 5)
+        self.CONTEXT_MAX_SEMANTIC = _env_int("CONTEXT_MAX_SEMANTIC", 8)
 
-# Voice Config
-DEFAULT_VOICE_ID = getenv("DEFAULT_VOICE_ID", "14")
-EMOTION_VOICE_MAP = {
-    "happy": "14",
-    "sad": "14",
-    "angry": "14",
-    "relaxed": "14",
-    "surprised": "14",
-    "neutral": "14",
-}
-# TTS finalize timeout (seconds). Prevents streaming from hanging while waiting for audio.
-TTS_FINALIZE_TIMEOUT_SEC = float(getenv("TTS_FINALIZE_TIMEOUT_SEC", "30.0"))
-# Tool-call loop guard (per user turn)
-MAX_TOOL_CALLS_PER_TURN = int(getenv("MAX_TOOL_CALLS_PER_TURN", "3"))
-# History window size for prompt context
-MAX_HISTORY_MESSAGES = int(getenv("MAX_HISTORY_MESSAGES", "60"))
-# SSE throttling (ms)
-SSE_MIN_INTERVAL_MS = int(getenv("SSE_MIN_INTERVAL_MS", "120"))
-# Inner monologue logging (chars)
-INNER_MONOLOGUE_MAX_CHARS = int(getenv("INNER_MONOLOGUE_MAX_CHARS", "240"))
-INNER_MONOLOGUE_FULL = getenv("INNER_MONOLOGUE_FULL", "").strip().lower() in ("1", "true", "yes", "y", "on")
-# Translation guardrails for memory UI
-MAX_TRANSLATE_ITEMS = int(getenv("MAX_TRANSLATE_ITEMS", "10"))
-MAX_TRANSLATE_CHARS = int(getenv("MAX_TRANSLATE_CHARS", "2000"))
+        # Phase E: Guardrail v2 settings
+        self.GUARDRAIL_V2_ENABLED = _env_bool("GUARDRAIL_V2_ENABLED", True)
+        self.GUARDRAIL_STAGNATION_TURNS = _env_int("GUARDRAIL_STAGNATION_TURNS", 3)
+        self.GUARDRAIL_THIN_COVERAGE_TH = _env_float("GUARDRAIL_THIN_COVERAGE_TH", 0.4)
 
-# Legacy compatibility (keep until refactor complete)
-legacy = LegacySettings()
-BASE_DIR = legacy.BASE_DIR
+        # Phase F: Orchestrator S5
+        self.ORCHESTRATOR_S5_ENABLED = _env_bool("ORCHESTRATOR_S5_ENABLED", False)
+        self.DEPTH2_MIN_TURNS = _env_int("DEPTH2_MIN_TURNS", 100)
+
+        # Minecraft Bot Integration
+        self.MINECRAFT_ENABLED = _env_bool("MINECRAFT_ENABLED", False)
+        self.MINECRAFT_BOT_URL = _env_str("MINECRAFT_BOT_URL", "http://localhost:3100")
+        self.MINECRAFT_BOT_WS_URL = _env_str("MINECRAFT_BOT_WS_URL", "ws://localhost:3101")
+        self.MINECRAFT_STATE_POLL_SEC = _env_float("MINECRAFT_STATE_POLL_SEC", 2.0)
+        self.MINECRAFT_CONTEXT_DEPTH0_CHARS = _env_int("MINECRAFT_CONTEXT_DEPTH0_CHARS", 200)
+        self.MINECRAFT_CONTEXT_FULL_CHARS = _env_int("MINECRAFT_CONTEXT_FULL_CHARS", 800)
+
+        # Minecraft Voyager Skill System
+        self.MINECRAFT_SKILL_ENABLED = _env_bool("MINECRAFT_SKILL_ENABLED", True)
+        self.MINECRAFT_CODE_TIMEOUT = _env_int("MINECRAFT_CODE_TIMEOUT", 30000)
+
+        # Minecraft Autonomous Game Loop (Phase C)
+        self.GAME_LOOP_ENABLED = _env_bool("GAME_LOOP_ENABLED", False)
+        self.GAME_LOOP_INTERVAL_SEC = _env_int("GAME_LOOP_INTERVAL_SEC", 15)
+        self.GAME_LOOP_IDLE_MULTIPLIER = _env_int("GAME_LOOP_IDLE_MULTIPLIER", 4)
+        self.GAME_LOOP_MAX_CONSECUTIVE_FAILS = _env_int("GAME_LOOP_MAX_CONSECUTIVE_FAILS", 3)
+
+        # Video Learning (Phase F)
+        self.VIDEO_LEARNING_ENABLED = _env_bool("VIDEO_LEARNING_ENABLED", True)
+        self.VIDEO_FRAME_INTERVAL_SEC = _env_int("VIDEO_FRAME_INTERVAL_SEC", 5)
+        self.VIDEO_MAX_FRAMES = _env_int("VIDEO_MAX_FRAMES", 20)
+        self.VIDEO_VISION_CONCURRENCY = _env_int("VIDEO_VISION_CONCURRENCY", 4)
 
 from backend.core.config_patch import _apply_retention_profile
 
 settings = Settings()
 _apply_retention_profile(settings)
-
-# Legacy compatibility (aliases)
-USER_PROFILE_JSON = settings.USER_PROFILE_JSON
-PUBLIC_STATUS_JSON = settings.PUBLIC_STATUS_JSON
-RETENTION_BOOT_FULL = settings.RETENTION_BOOT_FULL
-RETENTION_BOOT_SINCE_H = settings.RETENTION_BOOT_SINCE_H
-RETENTION_LIGHT_LIMIT = max(1, min(500, settings.RETENTION_LIGHT_LIMIT))
-RETENTION_LIGHT_EVERY_N = max(1, settings.RETENTION_LIGHT_EVERY_N)
-RETENTION_PROMOTE_TH = settings.RETENTION_PROMOTE_TH
-RETENTION_BACKGROUND_TH = settings.RETENTION_BACKGROUND_TH
-RETENTION_GRACE_DAYS = settings.RETENTION_GRACE_DAYS
-RETENTION_HALF_LIFE_CONSENT = settings.RETENTION_HALF_LIFE_CONSENT
-RETENTION_HALF_LIFE_PONDERING = settings.RETENTION_HALF_LIFE_PONDERING
-RETENTION_HALF_LIFE_DISSONANCE = settings.RETENTION_HALF_LIFE_DISSONANCE
-RETENTION_HALF_LIFE_DEFAULT = settings.RETENTION_HALF_LIFE_DEFAULT
-SSE_MIN_INTERVAL_MS = settings.SSE_MIN_INTERVAL_MS
-INNER_MONOLOGUE_MAX_CHARS = settings.INNER_MONOLOGUE_MAX_CHARS
-INNER_MONOLOGUE_FULL = settings.INNER_MONOLOGUE_FULL
 

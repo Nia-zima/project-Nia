@@ -14,8 +14,9 @@ from backend.services.lint_output import (
     rewrite_output_if_needed,
     build_output_lint_log,
 )
-from backend.core.constants.nia_spine_v09 import NIA_SPINE_V09_VERSION
+from backend.core.constants.nia_spine_v10 import NIA_SPINE_V10_VERSION
 from backend.core.config import settings
+from backend.services.speech_sanitizer import finalize_output
 
 SSE_DEBUG_EVERY = int(__import__("os").getenv("SSE_DEBUG_EVERY", "50"))
 
@@ -228,7 +229,7 @@ class DefaultAgentOrchestrator:
                 thread_id=thread_id,
                 turn_id=current_turn_id,
             )
-            payload["spine_version"] = NIA_SPINE_V09_VERSION
+            payload["spine_version"] = NIA_SPINE_V10_VERSION
             payload["spine_anchor_used"] = {
                 "depth0": True,
                 "rewrite": rewrite_applied,
@@ -450,6 +451,11 @@ class DefaultAgentOrchestrator:
                         last_state_tag = tag
                     yield emit(ev)
 
+                elif msg_type == "gesture":
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("[DEBUG_SSE_EVENT] type=gesture stream_id=%s payload=%s", stream_id, ev)
+                    yield emit(ev)
+
                 elif msg_type == "audio":
                     if not debug_logged_other:
                         if logger.isEnabledFor(logging.DEBUG):
@@ -555,9 +561,10 @@ class DefaultAgentOrchestrator:
                         return True
                     return False
 
-                text_to_save = (final_text or visible_ai_text or "").strip()
+                _raw_save = (final_text or visible_ai_text or "").strip()
+                text_to_save = finalize_output(_raw_save) if _raw_save else ""
                 done_for_log = done_sent or done_pending
-                if current_turn_id is not None and text_to_save and not stream_error and not _looks_like_broken_output(text_to_save):
+                if current_turn_id is not None and text_to_save and not _looks_like_broken_output(text_to_save):
                     await chat_history_store.append_message(
                         thread_id=thread_id,
                         turn_id=current_turn_id,

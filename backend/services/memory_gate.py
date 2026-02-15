@@ -9,7 +9,7 @@ import os
 from typing import Dict
 
 from backend.services.gate_codes import validate_code
-from backend.core.constants.nia_spine_v09 import NIA_SPINE_ANCHOR_V09
+from backend.core.constants.nia_spine_v10 import NIA_SPINE_ANCHOR_V10
 
 
 def run_gate(user_text: str, candidate_raw_text: str, candidate_tags: str) -> Dict[str, object]:
@@ -34,7 +34,7 @@ def run_gate(user_text: str, candidate_raw_text: str, candidate_tags: str) -> Di
         }
 
     # Default heuristic: propose only if candidate has content.
-    _ = NIA_SPINE_ANCHOR_V09  # anchor reserved for v1.1 prompt usage
+    _ = NIA_SPINE_ANCHOR_V10  # anchor reserved for v1.1 prompt usage
     should = bool((candidate_raw_text or "").strip())
     code = "origin_preference" if should else "low_signal"
     code, _ = validate_code(code)

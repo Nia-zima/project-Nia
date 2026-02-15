@@ -11,7 +11,7 @@ import re
 import json
 
 from backend.services.llm_client import call_llm
-from backend.core.constants.nia_spine_v09 import NIA_SPINE_ANCHOR_V09
+from backend.core.constants.nia_spine_v10 import NIA_SPINE_ANCHOR_V10
 
 Severity = Literal["hard", "soft"]
 
@@ -199,7 +199,7 @@ async def rewrite_output_if_needed(
 
     codes = ", ".join([v.code for v in violations]) or "none"
     system_prompt = (
-        f"{NIA_SPINE_ANCHOR_V09}\n\n"
+        f"{NIA_SPINE_ANCHOR_V10}\n\n"
         "次の返答を、日本語で1〜3文に書き換えてください。\n"
         "- 自分の好み・過去・経験を捏造しない。\n"
         "- 根拠なく「覚えている」「前に話した」と言わない。\n"
@@ -212,7 +212,7 @@ async def rewrite_output_if_needed(
         f"Violations: {codes}\n\n"
         "元の返答:\n"
         f"{original_text}\n\n"
-        f"{NIA_SPINE_ANCHOR_V09}"
+        f"{NIA_SPINE_ANCHOR_V10}"
     )
     rewritten = await call_llm(
         [

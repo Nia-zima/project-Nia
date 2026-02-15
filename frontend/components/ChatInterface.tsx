@@ -1,12 +1,16 @@
 "use client";
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Mic, Image as ImageIcon, StopCircle } from 'lucide-react';
 import { API_URL, ChatMessage, getStaticUrl } from '@/lib/api';
-import { motion, AnimatePresence } from 'framer-motion';
+import { ChatMessages } from '@/components/chat';
+import { ChatInput } from '@/components/chat';
+import type { PendingAction, DiagnosticsData } from '@/lib/types';
+import { safeJsonParse } from '@/lib/types';
 
 interface ChatInterfaceProps {
     onStateChange: (isTalking: boolean, emotion: string, isThinking?: boolean) => void;
     onAgentStateChange?: (state: string) => void;
+    onGestureChange?: (gesture: string) => void;
+    onVolumeChange?: (volume: number) => void;
     agentMode: string;
 }
 
@@ -17,7 +21,7 @@ interface ReviewRequestPayload {
     reason_codes?: string[];
 }
 
-export default function ChatInterface({ onStateChange, onAgentStateChange, agentMode }: ChatInterfaceProps) {
+export default function ChatInterface({ onStateChange, onAgentStateChange, onGestureChange, onVolumeChange, agentMode }: ChatInterfaceProps) {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState("");
     const [isLoading, setIsLoading] = useState(false);
@@ -25,21 +29,29 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
     const [currentEmotion, setCurrentEmotion] = useState("neutral");
     const [isThinking, setIsThinking] = useState(false);
     const [connectionState, setConnectionState] = useState<"ok" | "stale">("ok");
-    const [thinkingHint, setThinkingHint] = useState<any | null>(null);
+    const [thinkingHint, setThinkingHint] = useState<DiagnosticsData | null>(null);
     const [reviewRequest, setReviewRequest] = useState<ReviewRequestPayload | null>(null);
-    const [pendingActions, setPendingActions] = useState<any[]>([]);
+    const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
     const [pendingMeta, setPendingMeta] = useState<{ pending_count: number; dissonance_delta: number } | null>(null);
     const [pendingLoading, setPendingLoading] = useState(false);
     const [pendingError, setPendingError] = useState<string | null>(null);
     const [pendingReasonById, setPendingReasonById] = useState<Record<string, string>>({});
-    const [latestCommitLog, setLatestCommitLog] = useState<any | null>(null);
+    const [latestCommitLog, setLatestCommitLog] = useState<{ line?: string; [k: string]: unknown } | null>(null);
 
     // Vision State
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
-    const fileInputRef = useRef<HTMLInputElement>(null);
+    // fileInputRef is now inside ChatInput component
 
     const AFFECT_REGEX = /\[(happy|sad|angry|relaxed|surprised|shy|sigh|neutral|consent|dissonance)\]/g;
-    const scrollRef = useRef<HTMLDivElement>(null);
+    // scrollRef is now inside ChatMessages component
+
+    // Refs to avoid stale closures in handleMessage callback
+    const currentEmotionRef = useRef(currentEmotion);
+    currentEmotionRef.current = currentEmotion;
+    const thinkingHintRef = useRef(thinkingHint);
+    thinkingHintRef.current = thinkingHint;
+    const reviewRequestRef = useRef(reviewRequest);
+    reviewRequestRef.current = reviewRequest;
 
     // Audio Playback Queue
     const audioQueueRef = useRef<string[]>([]);
@@ -54,6 +66,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
     const lastEventAtRef = useRef<number>(0);
     const activeStreamIdRef = useRef<number>(0);
     const sseStreamIdRef = useRef<string | null>(null);
+    const finalTextLockedRef = useRef<boolean>(false);
     const abortControllerRef = useRef<AbortController | null>(null);
     const currentStateRef = useRef<string>("");
     const ttsEsRef = useRef<EventSource | null>(null);
@@ -75,9 +88,9 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
     const pendingVoiceSendRef = useRef<string | null>(null);
     const lastAutoSentTextRef = useRef<string>("");
     const lastAutoSentAtRef = useRef<number>(0);
-    const tryAutoSendRef = useRef<(text: string) => void>(() => {});
-    const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => {});
-    const restartRecorderRef = useRef<() => void>(() => {});
+    const tryAutoSendRef = useRef<(text: string) => void>(() => { });
+    const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => { });
+    const restartRecorderRef = useRef<() => void>(() => { });
 
     const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
     const [voiceWsState, setVoiceWsState] = useState<"idle" | "connecting" | "connected" | "error">("idle");
@@ -103,12 +116,16 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         });
 
     const buildVoiceWsUrl = (sessionId: string, clientId: string) => {
-        const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
-        const wsBase = API_URL.startsWith("http")
-            ? API_URL.replace(/^http/i, "ws")
-            : `${wsScheme}://${window.location.host}${API_URL}`;
         const qs = `session_id=${encodeURIComponent(sessionId)}&client_id=${encodeURIComponent(clientId)}`;
-        return `${wsBase}/voice/ws?${qs}`;
+        // 環境変数で直接バックエンドの WS URL を指定できる（Next.js proxy 回避）
+        const explicitBase = process.env.NEXT_PUBLIC_VOICE_WS_BASE || "";
+        if (explicitBase) {
+            return `${explicitBase.replace(/\/+$/, "")}/voice/ws?${qs}`;
+        }
+        // デフォルト: バックエンド直結（Next.js proxy は WS フレーム転送が不安定）
+        const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
+        const backendPort = process.env.NEXT_PUBLIC_BACKEND_PORT || "8000";
+        return `${wsScheme}://${window.location.hostname}:${backendPort}/api/voice/ws?${qs}`;
     };
 
     const cleanupVoiceRuntime = () => {
@@ -165,7 +182,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         isPlayingRef.current = false;
         onStateChange(false, currentEmotion, isThinkingRef.current);
         // barge-in: TTS停止後にVADを再開
-        micVadRef.current?.start().catch(() => {});
+        micVadRef.current?.start().catch(() => { });
     };
 
     const toNum = (v: string | undefined, fallback: number) => {
@@ -205,7 +222,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 })
             );
             vadAwaitingFinalRef.current = true;
-        } catch { }
+        } catch (e) { console.warn("[VOICE][DBG] turnEnd send error", e); }
     };
 
     const nextUtteranceId = () => {
@@ -297,7 +314,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                         speechSendingRef.current = false;
                         vadSpeechActiveRef.current = false;
                         vadAwaitingFinalRef.current = true;
-                        console.log("[VOICE][VAD] max_turn", { chunks: voiceChunkSeqRef.current });
                         sendVoiceTurnEnd(ws, mimeType, {
                             source: "vad_max_turn",
                             utteranceId: voiceCurrentUtteranceIdRef.current || undefined,
@@ -305,7 +321,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                         });
                     }, VAD_MAX_TURN_MS);
 
-                    console.log("[VOICE][VAD] speech_start (silero)");
                 },
 
                 onSpeechEnd: (_audio: Float32Array) => {
@@ -317,7 +332,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                     }
 
                     if (voiceChunkSeqRef.current < VAD_MIN_CHUNKS) {
-                        console.log("[VOICE][VAD] speech too short, ignoring", { chunks: voiceChunkSeqRef.current });
                         vadSpeechActiveRef.current = false;
                         speechSendingRef.current = false;
                         voiceCurrentUtteranceIdRef.current = "";
@@ -330,7 +344,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                     speechSendingRef.current = false;
                     vadSpeechActiveRef.current = false;
                     vadAwaitingFinalRef.current = true;
-                    console.log("[VOICE][VAD] speech_end (silero)", { chunks: voiceChunkSeqRef.current });
                     sendVoiceTurnEnd(ws, mimeType, {
                         source: "vad_silence",
                         utteranceId: voiceCurrentUtteranceIdRef.current || undefined,
@@ -339,7 +352,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 },
 
                 onVADMisfire: () => {
-                    console.log("[VOICE][VAD] misfire (speech too short)");
                     if (vadMaxTurnTimerRef.current != null) {
                         window.clearTimeout(vadMaxTurnTimerRef.current);
                         vadMaxTurnTimerRef.current = null;
@@ -352,7 +364,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
 
             micVad.start();
             micVadRef.current = micVad;
-            console.log("[VOICE][VAD] Silero VAD initialized");
         } catch (e) {
             console.warn("[VOICE] VAD setup failed", e);
         }
@@ -365,18 +376,12 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         const now = Date.now();
         const prev = lastAutoSentTextRef.current;
         const dt = now - lastAutoSentAtRef.current;
-        if (text === prev && dt < 4000) {
-            console.log("[VOICE] auto-send dedupe skip", { text, dt });
-            return;
-        }
+        if (text === prev && dt < 4000) return;
 
         if (isLoading) {
             pendingVoiceSendRef.current = text;
-            console.log("[VOICE] auto-send queued", { text, isLoading });
             return;
         }
-
-        console.log("[VOICE] auto-send now", { text });
         lastAutoSentTextRef.current = text;
         lastAutoSentAtRef.current = now;
         sendMessage(text);
@@ -453,7 +458,8 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 }
             }) || "";
 
-            const ws = new WebSocket(buildVoiceWsUrl(sid, clientId));
+            const wsUrl = buildVoiceWsUrl(sid, clientId);
+            const ws = new WebSocket(wsUrl);
             voiceWsRef.current = ws;
             voiceChunkSeqRef.current = 0;
             voiceCurrentUtteranceIdRef.current = "";
@@ -463,10 +469,46 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
             ws.onopen = () => {
                 setVoiceWsState("connected");
             };
-            ws.onclose = () => {
-                cleanupVoiceRuntime();
-                setVoiceWsState("idle");
-                setVoiceModeEnabled(false);
+            // Auto-reconnect state
+            let wsReconnectAttempt = 0;
+            const WS_MAX_RECONNECT = 3;
+            // 1008 = policy violation — do not reconnect
+            const WS_NO_RECONNECT_CODES = new Set([1000, 1008]);
+
+            ws.onclose = (ev) => {
+                if (
+                    !WS_NO_RECONNECT_CODES.has(ev.code) &&
+                    wsReconnectAttempt < WS_MAX_RECONNECT &&
+                    voiceModeEnabled
+                ) {
+                    wsReconnectAttempt++;
+                    const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempt - 1), 4000);
+                    setVoiceWsState("connecting");
+                    setTimeout(() => {
+                        if (!voiceModeEnabled) return;
+                        try {
+                            const newWs = new WebSocket(wsUrl);
+                            voiceWsRef.current = newWs;
+                            newWs.onopen = ws.onopen;
+                            newWs.onclose = ws.onclose;
+                            newWs.onerror = ws.onerror;
+                            newWs.onmessage = ws.onmessage;
+                        } catch (e) {
+                            console.error("[VOICE][WS] reconnect failed", e);
+                            cleanupVoiceRuntime();
+                            setVoiceWsState("error");
+                            setVoiceModeEnabled(false);
+                            setVoiceError("WebSocket 再接続に失敗しました");
+                        }
+                    }, delay);
+                } else {
+                    cleanupVoiceRuntime();
+                    setVoiceWsState("idle");
+                    setVoiceModeEnabled(false);
+                    if (wsReconnectAttempt >= WS_MAX_RECONNECT) {
+                        setVoiceError("WebSocket 接続が不安定です。再度お試しください。");
+                    }
+                }
             };
             ws.onerror = () => {
                 setVoiceWsState("error");
@@ -485,7 +527,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                         const finUtt = String(data?.utterance_id || "");
                         const activeUtt = voiceCurrentUtteranceIdRef.current;
                         if (finUtt && activeUtt && finUtt !== activeUtt) {
-                            console.log("[VOICE] stale stt_final ignored", { finUtt, activeUtt });
                             return;
                         }
                         vadAwaitingFinalRef.current = false;
@@ -570,7 +611,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 const newRec = createRecorder();
                 mediaRecorderRef.current = newRec;
                 newRec.start(VOICE_CHUNK_MS);
-                console.log("[VOICE] recorder restarted for fresh webm container");
             };
 
             recorder.start(VOICE_CHUNK_MS);
@@ -592,7 +632,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         const now = Date.now();
         lastAutoSentTextRef.current = queued;
         lastAutoSentAtRef.current = now;
-        console.log("[VOICE] auto-send flush queued", { text: queued });
         sendMessageRef.current(queued);
     }, [isLoading]);
 
@@ -691,7 +730,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
 
     // Initialize Thread & Load History
     useEffect(() => {
-        console.log("[ChatInterface] MOUNT", Date.now());
         const savedThreadId = "default_thread";
         setThreadId(savedThreadId);
 
@@ -724,70 +762,54 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         const loadHistory = async () => {
             if (isStreamingRef.current) return;
 
-            console.log("[loadHistory] start");
-            const t0 = performance.now();
-
             try {
-                console.log("[loadHistory] fetching...");
                 const res = await fetch(`${API_URL}/history/${savedThreadId}`, { cache: "no-store" });
-                console.log("[loadHistory] fetched", res.status, "ms", (performance.now() - t0).toFixed(0));
-
-                console.log("[loadHistory] parsing json...");
+                if (!res.ok) throw new Error(`history fetch failed: ${res.status}`);
                 const data = await res.json();
-                console.log("[loadHistory] json parsed", "ms", (performance.now() - t0).toFixed(0));
 
                 const hist = data?.history;
-                console.log("[loadHistory] history type", Array.isArray(hist) ? "array" : typeof hist, "len", hist?.length);
-
                 if (Array.isArray(hist)) {
-                    // 非string検出とログ
-                    let nonString = 0;
-                    for (let i = 0; i < hist.length; i++) {
-                        if (typeof hist[i]?.content !== "string") {
-                            nonString++;
-                            console.warn("[history] non-string content", {
-                                index: i,
-                                role: hist[i]?.role,
-                                contentType: typeof hist[i]?.content,
-                                keys: hist[i]?.content ? Object.keys(hist[i].content) : []
-                            });
-                        }
-                    }
-                    console.log("[loadHistory] non-string count", nonString);
-
                     const cleaned = hist.map((m: any) => normalizeHistoryMessage(m));
 
                     // パフォーマンス: 表示件数を制限（UIだけ軽く、データはDBに全部ある）
                     const MAX_RENDER = 120;
-                    console.log("[loadHistory] setting messages...", `(showing last ${Math.min(cleaned.length, MAX_RENDER)} of ${cleaned.length})`);
                     setMessages(ensureIds(cleaned.slice(-MAX_RENDER)));
-                    console.log("[loadHistory] done");
                 }
             } catch (e) {
-                console.error("[loadHistory] FAILED", e);
-            } finally {
-                console.log("[loadHistory] finally", "ms", (performance.now() - t0).toFixed(0));
+                console.error("[loadHistory] failed", e);
             }
         };
         loadHistory();
 
         return () => {
             cleanupVoiceRuntime();
-            console.log("[ChatInterface] UNMOUNT", Date.now());
         };
     }, []);
 
-    useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-    }, [messages]);
+    // Scroll is handled inside ChatMessages component
 
     const resumeVadAfterPlayback = () => {
         // キューに残りがなければ VAD を再開
         if (audioQueueRef.current.length === 0) {
-            micVadRef.current?.start().catch(() => {});
+            micVadRef.current?.start().catch(() => { });
         }
+    };
+
+    const audioCtxRef = useRef<AudioContext | null>(null);
+    const volumeLoopRef = useRef<number>(0);
+    const lastVolumeEmitMsRef = useRef<number>(0);
+    const lastVolumeSentRef = useRef<number>(0);
+
+    const emitVolume = (value: number, force = false) => {
+        const now = Date.now();
+        const clamped = Math.max(0, Math.min(1, value));
+        const quantized = Math.round(clamped * 100) / 100;
+        const elapsed = now - lastVolumeEmitMsRef.current;
+        const delta = Math.abs(quantized - lastVolumeSentRef.current);
+        if (!force && elapsed < 66 && delta < 0.02) return;
+        onVolumeChange?.(quantized);
+        lastVolumeEmitMsRef.current = now;
+        lastVolumeSentRef.current = quantized;
     };
 
     const processAudioQueue = async () => {
@@ -798,36 +820,69 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         if (!audioUrl) {
             isPlayingRef.current = false;
             onStateChange(false, "neutral", isThinkingRef.current);
+            emitVolume(0, true);
             resumeVadAfterPlayback();
             return;
         }
 
         // TTS 再生中は VAD を停止（エコーループ防止）
-        micVadRef.current?.pause().catch(() => {});
+        micVadRef.current?.pause().catch(() => { });
 
         onStateChange(true, "happy", isThinkingRef.current);
 
-        console.log("[AUDIO PLAY]", audioUrl);
         const audio = new Audio(audioUrl);
+        audio.crossOrigin = "anonymous";
         audioRef.current = audio;
 
-        audio.onended = () => {
+        // Audio-driven lip sync: connect AnalyserNode
+        let analyser: AnalyserNode | null = null;
+        try {
+            if (!audioCtxRef.current) {
+                audioCtxRef.current = new AudioContext();
+            }
+            const ctx = audioCtxRef.current;
+            if (ctx.state === "suspended") await ctx.resume();
+            const source = ctx.createMediaElementSource(audio);
+            analyser = ctx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            analyser.connect(ctx.destination);
+        } catch (e) {
+            console.warn("[AUDIO_ANALYSER] Failed to create analyser, using fallback lip sync", e);
+        }
+
+        // Volume polling loop
+        const dataArray = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
+        const pollVolume = () => {
+            if (!isPlayingRef.current || !analyser || !dataArray) return;
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+            const avg = sum / dataArray.length / 255;
+            emitVolume(avg);
+            volumeLoopRef.current = requestAnimationFrame(pollVolume);
+        };
+
+        const cleanup = () => {
+            cancelAnimationFrame(volumeLoopRef.current);
+            emitVolume(0, true);
             isPlayingRef.current = false;
             resumeVadAfterPlayback();
             setTimeout(processAudioQueue, 100);
         };
 
+        audio.onended = cleanup;
+
         audio.addEventListener("error", () => {
             console.error("[AUDIO ERROR]", audio.error, audioUrl);
-            isPlayingRef.current = false;
-            resumeVadAfterPlayback();
-            setTimeout(processAudioQueue, 100);
+            cleanup();
         });
-        await audio.play().catch((e) => {
+
+        await audio.play().then(() => {
+            if (analyser) pollVolume();
+        }).catch((e) => {
             console.error("[PLAY REJECTED]", e, audioUrl);
-            isPlayingRef.current = false;
-            resumeVadAfterPlayback();
-            setTimeout(processAudioQueue, 100);
+            cleanup();
         });
     };
 
@@ -964,9 +1019,13 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
 
     // OpenAI multipart 形式対応の normalizeHistoryMessage
     function normalizeHistoryMessage(m: any): ChatMessage {
+        // role 正規化（backend は "assistant" で保存するが、frontend は "ai" を期待）
+        const normalizeRole = (r: string | undefined) =>
+            r === "assistant" ? "ai" : (r === "user" || r === "ai" || r === "system" ? r : "system");
+
         // 1) すでに文字列ならそのまま
         if (typeof m?.content === "string") {
-            return { ...m, content: extractSpeech(m.content) };
+            return { ...m, role: normalizeRole(m?.role), content: extractSpeech(m.content) };
         }
 
         // 2) OpenAI互換の multipart 形式（今回の原因）
@@ -1107,7 +1166,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
     }
 
     const handleMessage = React.useCallback((msg: any) => {
-        console.log("HANDLE:", msg.type);
         try {
             if (msg?.stream_id != null) {
                 const got = String(msg.stream_id);
@@ -1126,6 +1184,11 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
             setConnectionState("ok");
 
             if (msg.type === "text") {
+                if (finalTextLockedRef.current) {
+                    // Authoritative final_result already arrived for this turn.
+                    // Ignore trailing text chunks to keep UI aligned with committed final_text.
+                    return;
+                }
                 const text = String(msg.content ?? "");
                 if (text.trim() === "WAIT") {
                     // WAIT is handled as a UI hint; don't render as chat text
@@ -1135,7 +1198,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                     syncThinking(false);
                 }
                 appendAiChunk(text);
-                if (thinkingHint) {
+                if (thinkingHintRef.current) {
                     setThinkingHint(null);
                 }
 
@@ -1162,7 +1225,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 if (tag) {
                     currentStateRef.current = tag;
                     onAgentStateChange?.(tag);
-                    onStateChange(true, currentEmotion, isThinkingRef.current);
+                    onStateChange(true, currentEmotionRef.current, isThinkingRef.current);
                 }
             } else if (msg.type === "emotion") {
                 const tag = String(msg.tag || "").toLowerCase();
@@ -1170,30 +1233,54 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                     setCurrentEmotion(tag);
                     onStateChange(true, tag, isThinkingRef.current);
                 }
+            } else if (msg.type === "gesture") {
+                const tag = String(msg.tag || "").toLowerCase();
+                if (tag) {
+                    onGestureChange?.(tag);
+                }
             } else if (msg.type === "thinking") {
                 const nextThinking = Boolean(msg.value ?? msg.thinking ?? true);
                 syncThinking(nextThinking);
             } else if (msg.type === "audio") {
-                // URL-based audio (Phase B)
-                console.log("[AUDIO EVT]", msg);
+                // Accept audio only from the active main stream.
+                // Legacy /tts_events payloads can arrive without stream_id and replay stale audio.
+                if (msg?.stream_id == null) {
+                    console.warn("[AUDIO EVT] dropped: missing stream_id", msg);
+                    return;
+                }
                 // Support both msg.url and msg.data?.url
                 const url = msg.url || msg.data?.url;
-                console.log("[AUDIO URL]", url);
+                const audioText = String(msg?.data?.text_content ?? "").trim();
+                if (!finalTextLockedRef.current && audioText) {
+                    if (!aiMsgIdRef.current) {
+                        beginAiMessage();
+                    }
+                    const id = aiMsgIdRef.current;
+                    aiTextRef.current = audioText;
+                    setMessages((prev) =>
+                        prev.map((m) => (m.id === id ? { ...m, content: audioText } : m))
+                    );
+                    // Lock to prevent trailing non-authoritative text from overriding
+                    // what is actually being played.
+                    finalTextLockedRef.current = true;
+                }
                 if (url) {
                     if (String(url).includes("<") || String(url).includes(">")) {
                         console.warn("[AUDIO EVT] invalid url:", url);
                         return;
                     }
                     // getStaticUrlで統一的にURL組み立て
-                    const audioUrl = getStaticUrl(url);
+                    let audioUrl = getStaticUrl(url);
+                    // Cache buster
+                    audioUrl = audioUrl.includes("?")
+                        ? `${audioUrl}&t=${Date.now()}`
+                        : `${audioUrl}?t=${Date.now()}`;
                     audioQueueRef.current.push(audioUrl);
                     processAudioQueue();
                 } else {
                     console.warn("[AUDIO EVT] missing url:", msg);
                 }
             } else if (msg.type === "dream") {
-                // 夢イベント（SSE開始直後に1回だけ配信される）
-                console.log("[DREAM EVT]", msg);
                 const dreamMsg: ChatMessage = {
                     id: msg.dream_id || `dream_${Date.now()}`,
                     role: 'system',
@@ -1209,12 +1296,15 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 const payload = msg.payload || {};
                 const ft = String(payload.final_text ?? "");
                 if (ft.trim() && ft.trim() !== "WAIT") {
-                    if (!aiTextRef.current.trim()) {
-                        if (!aiMsgIdRef.current) {
-                            beginAiMessage();
-                        }
-                        appendAiChunk(ft);
+                    if (!aiMsgIdRef.current) {
+                        beginAiMessage();
                     }
+                    const id = aiMsgIdRef.current;
+                    aiTextRef.current = ft;
+                    setMessages((prev) =>
+                        prev.map((m) => (m.id === id ? { ...m, content: ft } : m))
+                    );
+                    finalTextLockedRef.current = true;
                 }
             } else if (msg.type === "event" && msg.name === "thinking_hint") {
                 setThinkingHint(msg.payload || {});
@@ -1225,7 +1315,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 fetchLatestCommitLog();
             } else if (msg.type === "event" && msg.name === "hold_cancelled") {
                 const payload = msg.payload || {};
-                if (!reviewRequest || payload.review_token === reviewRequest.review_token) {
+                if (!reviewRequestRef.current || payload.review_token === reviewRequestRef.current.review_token) {
                     setReviewRequest(null);
                     setPendingActions([]);
                     setPendingMeta(null);
@@ -1255,19 +1345,21 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         } catch (e) {
             console.error("handleMessage crashed:", e, msg);
         }
-    }, [
-        currentEmotion,
-        thinkingHint,
-        reviewRequest,
-        onAgentStateChange,
-        onStateChange,
-    ]);
+    }, [onAgentStateChange, onStateChange]);
 
     useEffect(() => {
         const tid = threadId || "default_thread";
         if (typeof EventSource === "undefined") return;
-
-        console.log("[TTS_ES] effect", tid, typeof EventSource);
+        // Audio now arrives on the main /stream_chat SSE.
+        // Keep legacy /tts_events disabled by default to avoid stale backlog playback.
+        const enableLegacyTtsEvents = String(process.env.NEXT_PUBLIC_ENABLE_TTS_EVENTS ?? "0") === "1";
+        if (!enableLegacyTtsEvents) {
+            if (ttsEsRef.current) {
+                ttsEsRef.current.close();
+                ttsEsRef.current = null;
+            }
+            return;
+        }
 
         if (ttsEsRef.current) {
             ttsEsRef.current.close();
@@ -1275,14 +1367,12 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         }
 
         const sseUrl = `${API_URL}/tts_events/${tid}`;
-        console.log("[TTS_ES] open", sseUrl);
         const es = new EventSource(sseUrl);
         ttsEsRef.current = es;
 
         es.onmessage = (e) => {
             try {
                 const msg = JSON.parse(e.data);
-                console.log("[TTS_ES] msg", msg?.type, msg?.data?.url);
                 handleMessage(msg);
             } catch (err) {
                 console.warn("[TTS_ES] bad json", e.data);
@@ -1293,13 +1383,11 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
             console.warn("[TTS_ES] error", e);
             // EventSource should auto-reconnect, but add manual reconnect as fallback
             if (es.readyState === EventSource.CLOSED) {
-                console.log("[TTS_ES] connection closed, scheduling reconnect...");
                 es.close();
                 if (ttsEsRef.current === es) ttsEsRef.current = null;
                 // Reconnect after 2 seconds
                 setTimeout(() => {
                     if (!ttsEsRef.current) {
-                        console.log("[TTS_ES] reconnecting...");
                         const newEs = new EventSource(sseUrl);
                         ttsEsRef.current = newEs;
                         newEs.onmessage = es.onmessage;
@@ -1325,9 +1413,19 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
         onAgentStateChange?.("");
         syncThinking(false);
         setThinkingHint(null);
+        finalTextLockedRef.current = false;
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
         }
+
+        // Stop current audio and clear queue
+        if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current = null;
+        }
+        isPlayingRef.current = false;
+        audioQueueRef.current = [];
+
         activeStreamIdRef.current += 1;
         sseStreamIdRef.current = null;
 
@@ -1392,27 +1490,16 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
 
                     const jsonStr = dataLines.join("\n");
                     try {
-                        let msg: any;
-                        try {
-                            msg = JSON.parse(jsonStr);
-
-                            if (typeof msg === "string") {
-                                msg = { type: "text", content: msg };
-                            }
-
-                            if (msg && typeof msg === "object" && !msg.type && typeof msg.text === "string") {
+                        let msg: Record<string, unknown>;
+                        const parsed = safeJsonParse<unknown>(jsonStr, null);
+                        if (parsed === null || typeof parsed !== "object") {
+                            msg = { type: "text", content: typeof parsed === "string" ? parsed : jsonStr };
+                        } else {
+                            msg = parsed as Record<string, unknown>;
+                            if (!msg.type && typeof msg.text === "string") {
                                 msg = { type: "text", content: msg.text, stream_id: msg.stream_id };
                             }
-                        } catch {
-                            msg = { type: "text", content: jsonStr };
                         }
-                        console.log("SSE MSG:", msg?.type, msg);
-
-                        if (msg.type === "text") {
-                            console.log("TEXT MSG:", msg);
-                            console.log("TEXT jsonStr:", jsonStr);
-                        }
-
                         // Pass ALL events to handleMessage (including audio)
                         handleMessage(msg);
 
@@ -1435,19 +1522,14 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                 if (isThinkingRef.current) {
                     syncThinking(false);
                 }
-                onStateChange(false, currentEmotion, isThinkingRef.current);
+                onStateChange(false, currentEmotionRef.current, isThinkingRef.current);
             }
         }
     };
     sendMessageRef.current = sendMessage;
 
-    const parsePayload = (payloadJson: string) => {
-        try {
-            return JSON.parse(payloadJson || "{}");
-        } catch {
-            return {};
-        }
-    };
+    const parsePayload = (payloadJson?: string): Record<string, unknown> =>
+        safeJsonParse<Record<string, unknown>>(payloadJson || "{}", {});
 
     const formatDelta = (v: number) => {
         if (typeof v !== "number" || Number.isNaN(v)) return "+0.00";
@@ -1507,7 +1589,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
 
     return (
         <div className="flex flex-col h-full w-full max-w-4xl mx-auto p-2 sm:p-4 relative overflow-hidden box-border">
-            {/* Messages Area */}
+            {/* Header */}
             <div className="flex items-center justify-between mb-2 px-1">
                 <div className="flex items-center gap-2">
                     <div className="text-xs text-gray-500">Chat</div>
@@ -1532,9 +1614,9 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                     通信が不安定なため、思考状態を解除しました。再同期中…
                 </div>
             )}
-            {/* Review Window (一時的に無効化) */}
-            {false && reviewRequest && (
-                <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-900/20 px-3 py-3 text-amber-100/90">
+            {/* Review Window (mobile/tablet) */}
+            {reviewRequest && (
+                <div className="mb-3 rounded-2xl border border-amber-500/30 bg-amber-900/20 px-3 py-3 text-amber-100/90 xl:hidden">
                     <div className="flex items-center justify-between gap-2">
                         <div className="text-sm font-medium">Review Window</div>
                         <div className="text-[11px] px-2 py-0.5 rounded-full border border-amber-400/30 bg-amber-900/30 text-amber-100">
@@ -1572,21 +1654,21 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                         )}
                         {latestCommitLog?.line && (
                             <div className="mt-2 text-[11px] text-amber-200/70">
-                                最新commit_log: {latestCommitLog.line}
+                                最新commit_log: {latestCommitLog!.line}
                             </div>
                         )}
                         <div className="mt-2 space-y-3">
-                            {pendingActions.map((item: any) => {
+                            {pendingActions.map((item: PendingAction) => {
                                 const kind = item.kind || "unknown";
                                 const payload = parsePayload(item.payload_json);
-                                const rawText = payload.raw_text || payload.text || payload.summary || "";
-                                const subTags = [
-                                    payload.state_tag && `state:${payload.state_tag}`,
-                                    payload.emotion_tags && `emotion:${payload.emotion_tags}`,
-                                    payload.keywords && `kw:${payload.keywords}`,
-                                    payload.entities && `ent:${payload.entities}`,
-                                    payload.retention != null && `ret:${payload.retention}`,
-                                    payload.refs && `refs:${payload.refs}`,
+                                const rawText = String(payload.raw_text || payload.text || payload.summary || "");
+                                const subTags: string[] = [
+                                    payload.state_tag ? `state:${payload.state_tag}` : "",
+                                    payload.emotion_tags ? `emotion:${payload.emotion_tags}` : "",
+                                    payload.keywords ? `kw:${payload.keywords}` : "",
+                                    payload.entities ? `ent:${payload.entities}` : "",
+                                    payload.retention != null ? `ret:${payload.retention}` : "",
+                                    payload.refs ? `refs:${payload.refs}` : "",
                                 ].filter(Boolean);
                                 const ageSeconds = item.created_at ? Math.max(0, Date.now() - item.created_at * 1000) / 1000 : 0;
                                 const ageLevel =
@@ -1637,8 +1719,8 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                                         <div className="mt-2 flex items-center gap-2">
                                             <input
                                                 type="text"
-                                                value={pendingReasonById[item.id] || ""}
-                                                onChange={(e) => updateActionReason(item.id, e.target.value)}
+                                                value={pendingReasonById[item.id ?? ""] || ""}
+                                                onChange={(e) => updateActionReason(item.id ?? "", e.target.value)}
                                                 placeholder="理由（任意）"
                                                 className="flex-1 rounded-lg bg-black/30 px-2 py-1 text-xs text-amber-100 placeholder:text-amber-200/40"
                                             />
@@ -1647,7 +1729,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                                                     <button
                                                         key={hint}
                                                         type="button"
-                                                        onClick={() => updateActionReason(item.id, hint)}
+                                                        onClick={() => updateActionReason(item.id ?? "", hint)}
                                                         className="rounded-full border border-amber-400/20 px-2 py-0.5 hover:bg-amber-500/10"
                                                     >
                                                         {hint}
@@ -1655,19 +1737,19 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                                                 ))}
                                             </div>
                                             <button
-                                                onClick={() => postAction(item.id, "approve")}
+                                                onClick={() => postAction(item.id ?? "", "approve")}
                                                 className="rounded-lg border border-emerald-500/40 bg-emerald-500/20 px-2 py-1 text-xs text-emerald-100"
                                             >
                                                 Approve
                                             </button>
                                             <button
-                                                onClick={() => postAction(item.id, "reject")}
+                                                onClick={() => postAction(item.id ?? "", "reject")}
                                                 className="rounded-lg border border-red-500/40 bg-red-500/20 px-2 py-1 text-xs text-red-100"
                                             >
                                                 Reject
                                             </button>
                                             <button
-                                                onClick={() => postAction(item.id, "hold")}
+                                                onClick={() => postAction(item.id ?? "", "hold")}
                                                 className="rounded-lg border border-amber-500/40 bg-amber-500/20 px-2 py-1 text-xs text-amber-100"
                                             >
                                                 Hold
@@ -1683,139 +1765,26 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, agent
                     </div>
                 </div>
             )}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden mb-4 space-y-4 pr-2" ref={scrollRef}>
-                <AnimatePresence>
-                    {messages.map((msg) => {
-                        // 夢メッセージは特別なUIで表示
-                        if (msg.kind === 'dream') {
-                            return (
-                                <motion.div
-                                    key={msg.id}
-                                    initial={{ opacity: 0, y: 10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="flex justify-center my-4"
-                                >
-                                    <div className="max-w-[90%] w-full rounded-2xl border border-indigo-500/30 px-4 py-3 bg-indigo-950/50 backdrop-blur-sm">
-                                        <div className="flex items-center gap-2 text-sm text-indigo-300 mb-2">
-                                            <span aria-hidden>🌙</span>
-                                            <span className="font-medium">Niaの夢</span>
-                                            {msg.meta?.mood && (
-                                                <span className="text-indigo-400/60 text-xs">({msg.meta.mood})</span>
-                                            )}
-                                        </div>
-                                        <div className="whitespace-pre-wrap text-indigo-100/90 leading-relaxed text-sm">
-                                            {msg.content}
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            );
-                        }
+            {/* Messages */}
+            <ChatMessages messages={messages} isLoading={isLoading} />
 
-                        // 通常メッセージ
-                        return (
-                            <div
-                                key={msg.id}
-                                className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                            >
-                                <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                                    {msg.image && (
-                                        <img src={msg.image} alt="User Upload" className="max-w-full sm:max-w-xs rounded-xl mb-2 border border-white/10" />
-                                    )}
-                                    <div className={`p-3 sm:p-4 rounded-2xl whitespace-pre-wrap leading-relaxed shadow-lg backdrop-blur-sm break-all
-                                        ${msg.role === 'user'
-                                            ? 'bg-blue-600/80 text-white rounded-br-none'
-                                            : 'bg-gray-800/80 text-gray-100 rounded-bl-none border border-white/5'
-                                        }
-                                        ${msg.role === 'system' && 'bg-red-900/50 text-red-200 text-sm border-red-500/30'}
-                                    `}>
-                                        {msg.content}
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </AnimatePresence>
-                {isLoading && <div className="text-gray-500 text-sm animate-pulse ml-2">思考中...</div>}
-            </div>
-
-            {/* Input Area */}
-            <div className="relative w-full glass p-2 rounded-2xl flex flex-col gap-2">
-                {selectedImage && (
-                    <div className="relative w-32 h-32 bg-black/50 rounded-xl overflow-hidden group">
-                        <img src={selectedImage} alt="Preview" className="w-full h-full object-cover" />
-                        <button
-                            onClick={() => setSelectedImage(null)}
-                            className="absolute top-1 right-1 bg-red-500/80 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                            <StopCircle size={14} />
-                        </button>
-                    </div>
-                )}
-
-                <div className="flex items-center gap-2 w-full">
-                    <input
-                        type="file"
-                        ref={fileInputRef}
-                        hidden
-                        accept="image/*"
-                        onChange={handleImageSelect}
-                    />
-                    <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className={`p-3 rounded-xl transition-colors ${selectedImage ? 'text-blue-400 bg-blue-500/20' : 'hover:bg-white/10 text-gray-400'}`}
-                    >
-                        <ImageIcon size={20} />
-                    </button>
-                    <input
-                        type="text"
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any).isComposing && !isLoading) {
-                                e.preventDefault();
-                                sendMessage();
-                            }
-                        }}
-                        placeholder="メッセージを入力..."
-                        className="flex-1 bg-transparent border-none outline-none text-white px-2 placeholder-gray-500"
-                        disabled={isLoading}
-                    />
-                    <button
-                        onClick={toggleVoiceMode}
-                        className={`px-3 py-2 rounded-xl text-xs font-medium transition-all ${voiceModeEnabled
-                            ? 'bg-emerald-500 text-white shadow-[0_0_12px_rgba(16,185,129,0.45)]'
-                            : 'border border-white/20 text-gray-300 hover:bg-white/10'
-                            }`}
-                        title={voiceModeEnabled ? "Voice Mode 停止" : "Voice Mode 開始"}
-                    >
-                        {voiceModeEnabled ? "Voice ON" : "Voice"}
-                    </button>
-                    <button
-                        onClick={toggleListening}
-                        className={`p-3 rounded-xl transition-all ${isListening
-                            ? 'bg-red-500 text-white animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.5)]'
-                            : 'hover:bg-white/10 text-gray-400'
-                            }`}
-                        title={isListening ? "音声認識停止" : "音声認識開始"}
-                    >
-                        <Mic size={20} />
-                    </button>
-                    <button
-                        onClick={() => sendMessage()}
-                        disabled={isLoading || (!input.trim() && !selectedImage)}
-                        className="p-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20 disabled:opacity-50 transition-all active:scale-95"
-                    >
-                        <Send size={20} />
-                    </button>
-                </div>
-                {(voiceModeEnabled || voiceWsState !== "idle" || voiceError) && (
-                    <div className="px-2 text-[11px] text-gray-400">
-                        <span>voice_ws: {voiceWsState}</span>
-                        {sttPreview && <span className="ml-2 text-emerald-300">stt: {sttPreview}</span>}
-                        {voiceError && <span className="ml-2 text-red-300">{voiceError}</span>}
-                    </div>
-                )}
-            </div>
+            {/* Input */}
+            <ChatInput
+                input={input}
+                setInput={setInput}
+                isLoading={isLoading}
+                selectedImage={selectedImage}
+                setSelectedImage={setSelectedImage}
+                isListening={isListening}
+                onToggleListening={toggleListening}
+                onSendMessage={() => sendMessage()}
+                onImageSelect={handleImageSelect}
+                voiceModeEnabled={voiceModeEnabled}
+                voiceWsState={voiceWsState}
+                voiceError={voiceError}
+                sttPreview={sttPreview}
+                onToggleVoiceMode={toggleVoiceMode}
+            />
         </div>
     );
 }

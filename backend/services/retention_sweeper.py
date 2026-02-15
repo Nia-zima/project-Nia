@@ -12,7 +12,7 @@ def _get_int(name: str, default: int) -> int:
 
 async def retention_full_sweeper_loop():
 
-    interval_sec = getattr(settings, "RETENTION_FULL_SWEEPER_EVERY_SEC", 900)
+    interval_sec = getattr(settings, "RETENTION_FULL_SWEEPER_INTERVAL_SEC", 1800)
     since_hours  = getattr(settings, "RETENTION_FULL_SWEEPER_SINCE_H", 24)
     cfg = get_retention_config()
 
@@ -33,6 +33,20 @@ async def retention_full_sweeper_loop():
                     logger.info("[VECTOR_SYNC] processed=%s", n)
             except Exception:
                 logger.exception("[VECTOR_SYNC] failed")
+            try:
+                from backend.services.memory.vector_sync import process_semantic_vector_sync
+                ns = await asyncio.to_thread(process_semantic_vector_sync, limit=100)
+                if ns:
+                    logger.info("[SEMANTIC_VECTOR_SYNC] processed=%s", ns)
+            except Exception:
+                logger.exception("[SEMANTIC_VECTOR_SYNC] failed")
+            try:
+                from backend.services.memory.semantic_store import decay_by_status
+                revoked = await asyncio.to_thread(decay_by_status)
+                if revoked:
+                    logger.info("[SEMANTIC_DECAY] revoked=%s", revoked)
+            except Exception:
+                logger.exception("[SEMANTIC_DECAY] failed")
         except Exception:
             logger.exception("[RETENTION_FULL] loop error")
 

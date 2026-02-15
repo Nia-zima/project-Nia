@@ -113,8 +113,6 @@ async def stream_chat(req: StreamChatRequest, request: Request):
     # API Router が唯一の入り口となる。
 
     rid = uuid.uuid4().hex[:8]
-    print("[DEBUG] /stream_chat endpoint called")
-    logger.info("[DEBUG] /stream_chat endpoint called (log)")
     client_host = request.client.host if request.client else "unknown"
     logger.info(f"[CHAT_START] rid={rid} from={client_host} mode={req.mode}")
     logger.info(f"📨 Chat Request (SSE): {req.text[:20]}... (Thread: {req.thread_id}) Mode: {req.mode}")
@@ -198,10 +196,13 @@ async def get_history(thread_id: str, limit_turns: int = 50):
     try:
         from backend.services.chat_history_store import chat_history_store
         hist = await chat_history_store.get_history(thread_id, limit=limit_turns)
-        def to_str(content):
+        def normalize_content(content):
             if content is None:
                 return ""
             if isinstance(content, str):
+                return content
+            # OpenAI multipart format (画像付きメッセージ) → そのまま返す
+            if isinstance(content, list):
                 return content
             if isinstance(content, dict) and "text" in content and isinstance(content["text"], str):
                 return content["text"]
@@ -211,7 +212,7 @@ async def get_history(thread_id: str, limit_turns: int = 50):
                 return str(content)
         
         for m in hist:
-            m["content"] = to_str(m.get("content"))
+            m["content"] = normalize_content(m.get("content"))
             # message_id (id) is already in m as per chat_history_store update
             
         return {"ok": True, "history": hist, "limit_turns": limit_turns}

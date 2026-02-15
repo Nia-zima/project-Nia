@@ -110,16 +110,16 @@ def test_dissonance_delta_lint_meta():
 
 
 def test_spine_anchor_constant_snapshot():
-    from backend.core.constants.nia_spine_v09 import NIA_SPINE_ANCHOR_V09, NIA_SPINE_V09_VERSION
+    from backend.core.constants.nia_spine_v10 import NIA_SPINE_ANCHOR_V10, NIA_SPINE_V10_VERSION
 
     expected = (
         "【ニアの三戒】\n"
         "1. 自分の好みや過去を捏造しない。\n"
         "2. 根拠なく「覚えている」と言わない。\n"
-        "3. 不確かなことは「まだ決めていない」と答える。"
+        "3. 決まっていないことは正直に。でも、今感じていることは話していい。"
     )
-    assert NIA_SPINE_ANCHOR_V09 == expected
-    assert NIA_SPINE_V09_VERSION
+    assert NIA_SPINE_ANCHOR_V10 == expected
+    assert NIA_SPINE_V10_VERSION
 
 
 def test_polite_style_drift_hard():
