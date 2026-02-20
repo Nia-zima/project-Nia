@@ -563,9 +563,11 @@ def test_detect_user_search_request():
     assert _detect_user_search_request("データを見せて") is False
 
 
-def test_force_fetch_bypasses_depth_and_surprise():
+def test_force_fetch_bypasses_depth_and_surprise(monkeypatch):
     """force_fetch=True のとき depth/surprise ゲートをバイパスする。"""
     from backend.core.agent_graph.nodes import _apply_external_data_pipeline
+
+    monkeypatch.setattr(settings, "EXTERNAL_DATA_ENABLED", True)
 
     candidate = [{"category": "fact_check", "reason": "ユーザーが明示的に事実が不明な情報を確認したいと要求しました", "query": "テスト"}]
     _, _, meta = _apply_external_data_pipeline(
