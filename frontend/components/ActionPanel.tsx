@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, startTransition } from "react";
 import { apiClient } from "@/lib/apiClient";
 import { Check, X, RefreshCw } from "lucide-react";
 import type { PendingAction, ActionResult } from "@/lib/types";
@@ -95,7 +95,7 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
   };
 
   useEffect(() => {
-    refreshAll();
+    startTransition(() => { refreshAll(); });
   }, [threadId]);
 
   // Poll for autonomous tweet proposals (from Reflection Engine)
@@ -255,7 +255,7 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
               {isSayPreview && item.text && (
                 <div className="mt-2 text-xs text-gray-300 line-clamp-3">{item.text}</div>
               )}
-              {isTweetPreview && item.payload?.tweet_text && (
+              {isTweetPreview && !!item.payload?.tweet_text && (
                 <div className="mt-2">
                   <div className="text-[10px] text-blue-300 flex items-center gap-1">
                     <span>𝕏</span>

@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { apiClient } from '@/lib/apiClient';
 import {
     MessageSquare,
@@ -19,6 +19,71 @@ import MemoryGraph from './MemoryGraph';
 import MemoryTimeline from './MemoryTimeline';
 import InnerMonologue from './InnerMonologue';
 import ObservationReport from './ObservationReport';
+
+const TONE_STYLES: Record<string, { icon: string; value: string; border: string; bg: string; glow: string; text: string }> = {
+    cyan: {
+        icon: 'text-cyan-200', value: 'text-cyan-100', border: 'border-cyan-400/30',
+        bg: 'from-cyan-400/15 via-cyan-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(34,211,238,0.12)]', text: 'text-cyan-100/80'
+    },
+    blue: {
+        icon: 'text-blue-200', value: 'text-blue-100', border: 'border-blue-400/30',
+        bg: 'from-blue-400/15 via-blue-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(59,130,246,0.12)]', text: 'text-blue-100/80'
+    },
+    purple: {
+        icon: 'text-violet-200', value: 'text-violet-100', border: 'border-violet-400/30',
+        bg: 'from-violet-400/15 via-violet-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(139,92,246,0.12)]', text: 'text-violet-100/80'
+    },
+    gray: {
+        icon: 'text-slate-200', value: 'text-slate-100', border: 'border-slate-500/30',
+        bg: 'from-slate-400/10 via-slate-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(148,163,184,0.08)]', text: 'text-slate-100/70'
+    },
+    yellow: {
+        icon: 'text-amber-200', value: 'text-amber-100', border: 'border-amber-400/30',
+        bg: 'from-amber-400/15 via-amber-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(251,191,36,0.12)]', text: 'text-amber-100/80'
+    },
+    orange: {
+        icon: 'text-orange-200', value: 'text-orange-100', border: 'border-orange-400/30',
+        bg: 'from-orange-400/15 via-orange-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(249,115,22,0.12)]', text: 'text-orange-100/80'
+    },
+    green: {
+        icon: 'text-emerald-200', value: 'text-emerald-100', border: 'border-emerald-400/30',
+        bg: 'from-emerald-400/15 via-emerald-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(16,185,129,0.12)]', text: 'text-emerald-100/80'
+    },
+    red: {
+        icon: 'text-rose-200', value: 'text-rose-100', border: 'border-rose-400/30',
+        bg: 'from-rose-400/15 via-rose-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(244,63,94,0.12)]', text: 'text-rose-100/80'
+    },
+    pink: {
+        icon: 'text-pink-200', value: 'text-pink-100', border: 'border-pink-400/30',
+        bg: 'from-pink-400/15 via-pink-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(236,72,153,0.12)]', text: 'text-pink-100/80'
+    },
+    indigo: {
+        icon: 'text-indigo-200', value: 'text-indigo-100', border: 'border-indigo-400/30',
+        bg: 'from-indigo-400/15 via-indigo-500/5 to-transparent', glow: 'shadow-[0_0_30px_rgba(99,102,241,0.12)]', text: 'text-indigo-100/80'
+    },
+};
+
+function StatCard({
+    icon: Icon, label, value, tone = "blue", subtext, delay = 0
+}: {
+    icon: React.ElementType; label: string; value: number | string;
+    tone?: keyof typeof TONE_STYLES; subtext?: string; delay?: number;
+}) {
+    const styles = TONE_STYLES[tone] ?? TONE_STYLES.blue;
+    return (
+        <div
+            className={`relative overflow-hidden rounded-2xl border ${styles.border} bg-[rgba(15,18,24,0.92)] p-4 animate-rise`}
+            style={{ animationDelay: `${delay}ms` }}
+        >
+            <div className={`flex items-center gap-2 text-xs uppercase tracking-[0.3em] ${styles.text}`}>
+                <Icon className={`w-4 h-4 ${styles.icon}`} />
+                <span>{label}</span>
+            </div>
+            <div className={`mt-3 text-2xl font-semibold ${styles.value}`}>{value}</div>
+            {subtext && <div className="mt-2 text-xs text-slate-400">{subtext}</div>}
+        </div>
+    );
+}
 
 interface Stats {
     total_events: number;
@@ -74,120 +139,6 @@ export default function StatsPanel() {
         const interval = setInterval(fetchData, 30000);
         return () => clearInterval(interval);
     }, []);
-
-    const toneStyles = useMemo<Record<string, { icon: string; value: string; border: string; bg: string; glow: string; text: string }>>(() => ({
-        cyan: {
-            icon: 'text-cyan-200',
-            value: 'text-cyan-100',
-            border: 'border-cyan-400/30',
-            bg: 'from-cyan-400/15 via-cyan-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(34,211,238,0.12)]',
-            text: 'text-cyan-100/80'
-        },
-        blue: {
-            icon: 'text-sky-200',
-            value: 'text-sky-100',
-            border: 'border-sky-400/30',
-            bg: 'from-sky-400/12 via-sky-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(14,165,233,0.12)]',
-            text: 'text-sky-100/80'
-        },
-        purple: {
-            icon: 'text-violet-200',
-            value: 'text-violet-100',
-            border: 'border-violet-400/30',
-            bg: 'from-violet-400/12 via-violet-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(139,92,246,0.12)]',
-            text: 'text-violet-100/80'
-        },
-        gray: {
-            icon: 'text-slate-200',
-            value: 'text-slate-100',
-            border: 'border-slate-500/30',
-            bg: 'from-slate-400/10 via-slate-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(148,163,184,0.08)]',
-            text: 'text-slate-100/70'
-        },
-        yellow: {
-            icon: 'text-amber-200',
-            value: 'text-amber-100',
-            border: 'border-amber-400/30',
-            bg: 'from-amber-400/15 via-amber-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(251,191,36,0.12)]',
-            text: 'text-amber-100/80'
-        },
-        orange: {
-            icon: 'text-orange-200',
-            value: 'text-orange-100',
-            border: 'border-orange-400/30',
-            bg: 'from-orange-400/15 via-orange-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(249,115,22,0.12)]',
-            text: 'text-orange-100/80'
-        },
-        green: {
-            icon: 'text-emerald-200',
-            value: 'text-emerald-100',
-            border: 'border-emerald-400/30',
-            bg: 'from-emerald-400/15 via-emerald-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(16,185,129,0.12)]',
-            text: 'text-emerald-100/80'
-        },
-        red: {
-            icon: 'text-rose-200',
-            value: 'text-rose-100',
-            border: 'border-rose-400/30',
-            bg: 'from-rose-400/15 via-rose-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(244,63,94,0.12)]',
-            text: 'text-rose-100/80'
-        },
-        pink: {
-            icon: 'text-pink-200',
-            value: 'text-pink-100',
-            border: 'border-pink-400/30',
-            bg: 'from-pink-400/15 via-pink-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(236,72,153,0.12)]',
-            text: 'text-pink-100/80'
-        },
-        indigo: {
-            icon: 'text-indigo-200',
-            value: 'text-indigo-100',
-            border: 'border-indigo-400/30',
-            bg: 'from-indigo-400/15 via-indigo-500/5 to-transparent',
-            glow: 'shadow-[0_0_30px_rgba(99,102,241,0.12)]',
-            text: 'text-indigo-100/80'
-        }
-    }), []);
-
-    const StatCard = ({
-        icon: Icon,
-        label,
-        value,
-        tone = "blue",
-        subtext,
-        delay = 0
-    }: {
-        icon: React.ElementType;
-        label: string;
-        value: number | string;
-        tone?: keyof typeof toneStyles;
-        subtext?: string;
-        delay?: number;
-    }) => {
-        const styles = toneStyles[tone] ?? toneStyles.blue;
-        return (
-            <div
-                className={`relative overflow-hidden rounded-2xl border ${styles.border} bg-[rgba(15,18,24,0.92)] p-4 animate-rise`}
-                style={{ animationDelay: `${delay}ms` }}
-            >
-                <div className={`flex items-center gap-2 text-xs uppercase tracking-[0.3em] ${styles.text}`}>
-                    <Icon className={`w-4 h-4 ${styles.icon}`} />
-                    <span>{label}</span>
-                </div>
-                <div className={`mt-3 text-2xl font-semibold ${styles.value}`}>{value}</div>
-                {subtext && <div className="mt-2 text-xs text-slate-400">{subtext}</div>}
-            </div>
-        );
-    };
 
     return (
         <div className="relative h-full flex flex-col overflow-hidden">

@@ -1,10 +1,9 @@
 {
-  "updated_at": "2026-02-10T14:59:07.808Z",
-  "total": 66,
+  "updated_at": "2026-02-20T13:49:54.114Z",
+  "total": 37,
   "by_rule": {
-    "@typescript-eslint/no-explicit-any": 42,
+    "@typescript-eslint/no-explicit-any": 25,
     "react-hooks/exhaustive-deps": 10,
-    "react-hooks/set-state-in-effect": 2,
-    "react-hooks/static-components": 12
+    "react-hooks/set-state-in-effect": 2
   }
 }
