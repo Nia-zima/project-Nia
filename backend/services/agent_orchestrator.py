@@ -17,8 +17,10 @@ from backend.services.lint_output import (
 from backend.core.constants.nia_spine_v10 import NIA_SPINE_V10_VERSION
 from backend.core.config import settings
 from backend.services.speech_sanitizer import finalize_output
+import re as _re
 
 SSE_DEBUG_EVERY = int(__import__("os").getenv("SSE_DEBUG_EVERY", "50"))
+_THINK_RE = _re.compile(r"<think>.*?</think>\s*", _re.DOTALL)
 
 def _ms() -> int:
     return int(time.time() * 1000)
@@ -184,7 +186,6 @@ class DefaultAgentOrchestrator:
         last_event: dict | None = None
         last_event_type: str | None = None
         last_raw_content_type: str | None = None
-        debug_logged_other = False
         last_state_tag: str | None = None
         text_seq = 0
         output_lint_logged = False
@@ -349,6 +350,9 @@ class DefaultAgentOrchestrator:
                     if isinstance(payload, dict):
                         ft = payload.get("final_text")
                         if isinstance(ft, str) and ft.strip():
+                            # Safety net: strip <think> blocks from final_text
+                            ft = _THINK_RE.sub("", ft).strip()
+                            payload["final_text"] = ft
                             final_text = ft
                     yield emit(ev)
                     continue
@@ -358,6 +362,11 @@ class DefaultAgentOrchestrator:
                         continue
                     raw_content = ev.get("content", "")
                     chunk_content = "" if raw_content is None else str(raw_content)
+                    # Safety net: strip residual <think>...</think> blocks
+                    if "<think>" in chunk_content:
+                        chunk_content = _THINK_RE.sub("", chunk_content).strip()
+                        if not chunk_content:
+                            continue
                     last_raw_content_type = type(raw_content).__name__
 
                     if chunk_content:
@@ -385,10 +394,6 @@ class DefaultAgentOrchestrator:
                         stripped = line.strip()
 
                         if stripped and TAG_LINE_RE.fullmatch(stripped):
-                            if not debug_logged_other:
-                                if logger.isEnabledFor(logging.DEBUG):
-                                    logger.debug("[DEBUG_SSE_EVENT] type=internal stream_id=%s", stream_id)
-                                debug_logged_other = True
                             yield emit({"type": "internal", "content": stripped})
                             continue
                         if stripped and _looks_like_plan_line(stripped):
@@ -437,60 +442,38 @@ class DefaultAgentOrchestrator:
                         stream_buffer = ""
 
                 elif msg_type == "emotion":
-                    if not debug_logged_other:
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("[DEBUG_SSE_EVENT] type=emotion stream_id=%s payload=%s", stream_id, ev)
-                        debug_logged_other = True
                     yield emit(ev)
 
                 elif msg_type == "state":
                     tag = ev.get("tag") if isinstance(ev, dict) else None
                     if tag != last_state_tag:
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("[DEBUG_SSE_EVENT] type=state stream_id=%s payload=%s", stream_id, ev)
                         last_state_tag = tag
                     yield emit(ev)
 
                 elif msg_type == "gesture":
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug("[DEBUG_SSE_EVENT] type=gesture stream_id=%s payload=%s", stream_id, ev)
                     yield emit(ev)
 
                 elif msg_type == "audio":
-                    if not debug_logged_other:
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("[DEBUG_SSE_EVENT] type=audio stream_id=%s", stream_id)
-                        debug_logged_other = True
-                    try:
-                        payload = ev.get("data") or ev
-                        logger.info("[SSE_AUDIO] stream_id=%s keys=%s", stream_id, list(payload.keys()) if isinstance(payload, dict) else type(payload))
-                    except Exception:
-                        logger.info("[SSE_AUDIO] stream_id=%s", stream_id)
                     yield emit(ev)
 
                 elif msg_type == "error":
                     stream_error = str(ev.get("content") or "stream_error")
-                    if not debug_logged_other:
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("[DEBUG_SSE_EVENT] type=error stream_id=%s", stream_id)
-                        debug_logged_other = True
                     yield emit(ev)
 
                 elif msg_type == "done":
                     done_pending = True
+                    # --- Emit remaining text immediately (no LLM lint) ---
+                    # Use fast regex-only lint; defer semantic LLM lint to background.
+                    _lint_target: str | None = None
                     if final_text:
-                        linted, violations, post_violations, semantic_violations, rewrite_applied = await _apply_output_lint(final_text)
-                        await _emit_output_lint_log(
-                            violations=violations,
-                            post_violations=post_violations,
-                            semantic_violations=semantic_violations,
-                            rewrite_applied=rewrite_applied,
-                            text_len_before=len(final_text),
-                            text_len_after=len(linted),
-                        )
-                        res = await _emit_text_append(linted)
+                        _fast_violations = lint_output(final_text, evidence=None)
+                        _fast_linted = final_text
+                        if any(v.severity == "hard" for v in _fast_violations):
+                            _fast_linted = await rewrite_output_if_needed(final_text, _fast_violations)
+                        res = await _emit_text_append(_fast_linted)
                         if res:
                             yield res
+                        _lint_target = _fast_linted
                     if stream_buffer:
                         tail = stream_buffer
                         stream_buffer = ""
@@ -508,27 +491,33 @@ class DefaultAgentOrchestrator:
                                     "reasons": leak_reasons,
                                 })
                             else:
-                                linted, violations, post_violations, semantic_violations, rewrite_applied = await _apply_output_lint(tail)
-                                await _emit_output_lint_log(
-                                    violations=violations,
-                                    post_violations=post_violations,
-                                    semantic_violations=semantic_violations,
-                                    rewrite_applied=rewrite_applied,
-                                    text_len_before=len(tail),
-                                    text_len_after=len(linted),
-                                )
-                                res = await _emit_text_append(linted)
+                                res = await _emit_text_append(tail)
                                 if res:
                                     yield res
-                    if not debug_logged_other:
-                        logger.info("[DEBUG_SSE_EVENT] type=done stream_id=%s", stream_id)
-                        debug_logged_other = True
+                                if not _lint_target:
+                                    _lint_target = tail
+                    # Yield done immediately so frontend can clear loading state
+                    yield emit(ev)
+                    done_sent = True
+                    # Fire-and-forget: semantic lint in background (non-blocking)
+                    if _lint_target:
+                        async def _bg_lint(text: str) -> None:
+                            try:
+                                _linted, _v, _pv, _sv, _rw = await _apply_output_lint(text)
+                                await _emit_output_lint_log(
+                                    violations=_v,
+                                    post_violations=_pv,
+                                    semantic_violations=_sv,
+                                    rewrite_applied=_rw,
+                                    text_len_before=len(text),
+                                    text_len_after=len(_linted),
+                                )
+                            except Exception:
+                                logger.debug("[BG_LINT] failed", exc_info=True)
+                        asyncio.create_task(_bg_lint(_lint_target))
                     continue
 
                 else:
-                    if not debug_logged_other:
-                        logger.info("[DEBUG_SSE_EVENT] type=%s stream_id=%s", msg_type, stream_id)
-                        debug_logged_other = True
                     yield emit(ev)
 
         except Exception as e:
@@ -584,6 +573,19 @@ class DefaultAgentOrchestrator:
                             "len": len(text_to_save),
                             "ms": _ms() - t0
                         })
+                        # Phase R.1: Update last_message_at for idle detection
+                        try:
+                            from backend.core.db import get_conn as _get_conn
+                            _rconn = _get_conn()
+                            try:
+                                _rconn.execute(
+                                    "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES ('last_message_at', ?, ?)",
+                                    (str(time.time()), int(time.time())),
+                                )
+                            finally:
+                                _rconn.close()
+                        except Exception:
+                            pass
             except Exception as log_err:
                 logger.warning(f"A-layer assistant log failed: {log_err}")
 

@@ -110,12 +110,12 @@ class BodyConstitutionChecker:
         """パターンをコンパイル"""
         self._patterns = []
 
-        # CRITICAL: 記憶の明示
+        # INFO: 記憶の明示（ニアは実際に記憶システムを持つため、sanitize不要）
         for pattern, message in self.MEMORY_CLAIM_PATTERNS:
             self._patterns.append((
                 re.compile(pattern),
                 ViolationType.MEMORY_CLAIM,
-                Severity.CRITICAL,
+                Severity.INFO,
                 message
             ))
 

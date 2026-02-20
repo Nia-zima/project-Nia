@@ -2,16 +2,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 from backend.core.config import settings
 
+logger = logging.getLogger(__name__)
 
 LOG_DIR = settings.LOG_DIR / "observations"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "turn_observations.jsonl"
+
+# --- Rotating JSONL writer via stdlib logging ---
+_obs_logger = logging.getLogger("nia.turn_observations")
+_obs_logger.setLevel(logging.INFO)
+_obs_logger.propagate = False
+
+_obs_handler = RotatingFileHandler(
+    str(LOG_FILE),
+    maxBytes=int(os.getenv("OBS_MAX_BYTES", str(50 * 1024 * 1024))),  # 50 MB
+    backupCount=int(os.getenv("OBS_BACKUP_COUNT", "10")),
+    encoding="utf-8",
+)
+_obs_handler.setFormatter(logging.Formatter("%(message)s"))
+_obs_logger.addHandler(_obs_handler)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -47,9 +65,8 @@ def log_turn_observation(entry: dict[str, Any]) -> None:
         "final_text_hash": _final_text_hash(str(entry.get("final_text") or "")),
     }
     try:
-        with open(Path(LOG_FILE), "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception:
+        _obs_logger.info(json.dumps(record, ensure_ascii=False))
+    except Exception as e:
         # Logging failure should never break response path.
-        pass
+        logger.warning("[observability] Failed to write turn observation: %s", e)
 

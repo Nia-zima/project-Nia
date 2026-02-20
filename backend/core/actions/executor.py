@@ -53,13 +53,19 @@ class ActionExecutor:
             "update_obs_text": self._handle_update_obs_text,
             "update_emotion_display": self._handle_update_emotion_display,
             "see_screen": self._handle_see_screen,
-            "web_search": self._handle_web_search,
             "read_file": self._handle_read_file,
             "write_file": self._handle_write_file,
-            "text_to_speech": self._handle_text_to_speech,
             "get_system_info": self._handle_get_system_info,
-            "send_notification": self._handle_send_notification,
             "log_observation": self._handle_log_observation,
+            # Minecraft game actions
+            "mc_chat": self._handle_mc_action,
+            "mc_move": self._handle_mc_action,
+            "mc_mine": self._handle_mc_action,
+            "mc_place": self._handle_mc_action,
+            "mc_craft": self._handle_mc_action,
+            "mc_attack": self._handle_mc_action,
+            # Twitter (X)
+            "post_tweet": self._handle_post_tweet,
         }
         return handlers.get(action_id)
 
@@ -103,10 +109,9 @@ class ActionExecutor:
         return {"updated": True, "text": payload.get("note", "")}
 
     async def _handle_update_emotion_display(self, payload: Dict[str, Any]) -> Any:
-        """感情表示更新"""
+        """感情表示更新（フロントエンドへの通知はSSE経由で配信）"""
         emotion = payload.get("emotion", "neutral")
         intensity = payload.get("intensity", 0.5)
-        # TODO: 実際の感情表示システムと連携
         logger.info(f"Emotion display updated: {emotion} (intensity={intensity})")
         return {"updated": True, "emotion": emotion, "intensity": intensity}
 
@@ -159,17 +164,6 @@ class ActionExecutor:
             logger.error(f"Screen capture failed: {e}")
             return {"error": str(e)}
 
-    async def _handle_web_search(self, payload: Dict[str, Any]) -> Any:
-        """Web検索"""
-        query = payload.get("query", "")
-        # TODO: 実際のWeb検索APIと連携
-        logger.info(f"Web search: {query}")
-        return {
-            "query": query,
-            "results": [],
-            "message": "Web検索機能は未実装です",
-        }
-
     async def _handle_read_file(self, payload: Dict[str, Any]) -> Any:
         """ファイル読み取り"""
         import os
@@ -207,17 +201,6 @@ class ActionExecutor:
             "size": len(content),
         }
 
-    async def _handle_text_to_speech(self, payload: Dict[str, Any]) -> Any:
-        """音声合成"""
-        text = payload.get("text", "")
-        # TODO: VOICEVOX連携の実装
-        logger.info(f"TTS request: {text[:50]}...")
-        return {
-            "synthesized": False,
-            "text": text,
-            "message": "音声合成機能は未実装です",
-        }
-
     async def _handle_get_system_info(self, payload: Dict[str, Any]) -> Any:
         """システム情報取得"""
         import platform
@@ -233,20 +216,6 @@ class ActionExecutor:
             "memory_available": psutil.virtual_memory().available,
         }
 
-    async def _handle_send_notification(self, payload: Dict[str, Any]) -> Any:
-        """通知送信"""
-        title = payload.get("title", "")
-        message = payload.get("message", "")
-
-        # TODO: デスクトップ通知の実装
-        logger.info(f"Notification: {title} - {message}")
-        return {
-            "sent": False,
-            "title": title,
-            "message": message,
-            "note": "通知機能は未実装です",
-        }
-
     async def _handle_log_observation(self, payload: Dict[str, Any]) -> Any:
         """観察ログ記録"""
         observation = payload.get("observation", "")
@@ -258,6 +227,43 @@ class ActionExecutor:
             "observation": observation,
             "category": category,
         }
+
+
+    async def _handle_post_tweet(self, payload: Dict[str, Any]) -> Any:
+        """ツイート投稿"""
+        from backend.services.twitter_client import twitter_client
+        text = payload.get("tweet_text", "")
+        if not text:
+            raise ValueError("tweet_text is required")
+        result = await twitter_client.post_tweet(text)
+        if not result.success:
+            raise RuntimeError(f"Tweet failed: {result.error}")
+        return {
+            "posted": True,
+            "tweet_id": result.tweet_id,
+            "tweet_text": result.tweet_text,
+            "char_count": len(result.tweet_text or ""),
+        }
+
+    async def _handle_mc_action(self, payload: Dict[str, Any]) -> Any:
+        """Minecraft ゲームアクション共通ハンドラ"""
+        from backend.services.minecraft import minecraft_client
+        if not minecraft_client:
+            return {"error": "Minecraft not connected"}
+        action = payload.get("_action_id", "chat")
+        # mc_ prefix を除去して Mineflayer アクション名に変換
+        mc_action = action.replace("mc_", "") if action.startswith("mc_") else action
+        action_map = {
+            "chat": "chat",
+            "move": "move_to",
+            "mine": "mine_block",
+            "place": "place_block",
+            "craft": "craft",
+            "attack": "attack",
+        }
+        mf_action = action_map.get(mc_action, mc_action)
+        params = {k: v for k, v in payload.items() if k != "_action_id"}
+        return await minecraft_client.execute_action(mf_action, params)
 
 
 # グローバルインスタンス

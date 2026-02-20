@@ -42,6 +42,12 @@ _ALLOWED_REASON_CODES = {
     "keyword_public",
     "action_say_held",
     "action_rejected",
+    # PII protection
+    "pii_in_output",
+    # Phase E: Guardrail v2
+    "guardrail_no_provenance",
+    "guardrail_contradiction",
+    "guardrail_thin_retrieval",
 }
 
 def _merge_reason_codes(existing: Optional[list], additions: Iterable[str]) -> list[str]:

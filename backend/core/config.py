@@ -215,10 +215,7 @@ class Settings:
         # Identity Manager secret key
         self.IDENTITY_SECRET_KEY = _env_str("IDENTITY_SECRET_KEY", "INTERNAL_SLEEP_PROCESS_ONLY")
 
-        # Post-Phase5: Policy and DSPy modes
-        # Phase 3 (Gymnasium) と Phase 4 (DSPy) は無効化
-        # 理由: 固定化・収束を引き起こすため（Body Constitution B.9「揺らぎの源泉」）
-        self.POLICY_MODE = _env_str("POLICY_MODE", "confidence")  # "confidence" | "learned" | "hybrid"
+        # Post-Phase5: DSPy mode (disabled — 固定化・収束を引き起こすため)
         self.DSPY_MODE = _env_str("DSPY_MODE", "disabled")        # "disabled" | "enabled" | "hybrid"
 
         # Post-Phase5.5: Experiment Mode
@@ -259,14 +256,55 @@ class Settings:
         self.CONTEXT_MAX_WORKING = _env_int("CONTEXT_MAX_WORKING", 5)
         self.CONTEXT_MAX_SEMANTIC = _env_int("CONTEXT_MAX_SEMANTIC", 8)
 
+        # Phase M: Memory Retrieval
+        self.RETRIEVAL_ENABLED = _env_bool("RETRIEVAL_ENABLED", True)
+        self.RETRIEVAL_CANDIDATE_N = _env_int("RETRIEVAL_CANDIDATE_N", 30)
+        self.RETRIEVAL_MIN_SCORE = _env_float("RETRIEVAL_MIN_SCORE", 0.1)
+        self.RETRIEVAL_W_SIM = _env_float("RETRIEVAL_W_SIM", 0.45)
+        self.RETRIEVAL_W_CONF = _env_float("RETRIEVAL_W_CONF", 0.25)
+        self.RETRIEVAL_W_REC = _env_float("RETRIEVAL_W_REC", 0.15)
+        self.RETRIEVAL_W_INTENT = _env_float("RETRIEVAL_W_INTENT", 0.15)
+
+        # Phase R: Autonomous Reflection
+        self.IDLE_DETECTION_ENABLED = _env_bool("IDLE_DETECTION_ENABLED", True)
+        self.REFLECTION_MIN_TURNS = _env_int("REFLECTION_MIN_TURNS", 10)
+        self.REFLECTION_TOKEN_THRESHOLD = _env_int("REFLECTION_TOKEN_THRESHOLD", 5000)
+        self.IDLE_THRESHOLD_MINUTES = _env_int("IDLE_THRESHOLD_MINUTES", 30)
+        self.IDLE_CHECK_INTERVAL_SEC = _env_int("IDLE_CHECK_INTERVAL_SEC", 120)
+
+        # Phase R.4: Cross-day Distillation
+        self.REFLECTION_LOOKBACK_DAYS = _env_int("REFLECTION_LOOKBACK_DAYS", 7)
+        self.REFLECTION_CROSS_MIN_DAYS = _env_int("REFLECTION_CROSS_MIN_DAYS", 3)
+
         # Phase E: Guardrail v2 settings
+        # HOLD_POLICY: "pii_only" = PII + G1 + G6 のみ, "strict" = 全トリガー
+        self.HOLD_POLICY = _env_str("HOLD_POLICY", "pii_only")
         self.GUARDRAIL_V2_ENABLED = _env_bool("GUARDRAIL_V2_ENABLED", True)
         self.GUARDRAIL_STAGNATION_TURNS = _env_int("GUARDRAIL_STAGNATION_TURNS", 3)
         self.GUARDRAIL_THIN_COVERAGE_TH = _env_float("GUARDRAIL_THIN_COVERAGE_TH", 0.4)
 
         # Phase F: Orchestrator S5
-        self.ORCHESTRATOR_S5_ENABLED = _env_bool("ORCHESTRATOR_S5_ENABLED", False)
+        self.ORCHESTRATOR_S5_ENABLED = _env_bool("ORCHESTRATOR_S5_ENABLED", True)
         self.DEPTH2_MIN_TURNS = _env_int("DEPTH2_MIN_TURNS", 100)
+
+        # Episodic compression & archival
+        self.EPISODIC_ARCHIVE_AFTER_DAYS = _env_int("EPISODIC_ARCHIVE_AFTER_DAYS", 7)
+        self.EPISODIC_SUMMARY_ENABLED = _env_bool("EPISODIC_SUMMARY_ENABLED", True)
+
+        # Checkpointer retention
+        self.CHECKPOINTER_RETENTION_DAYS = _env_int("CHECKPOINTER_RETENTION_DAYS", 7)
+
+        # Safety gate
+        self.SAFETY_GATE_ENABLED = _env_bool("SAFETY_GATE_ENABLED", True)
+        self.SAFETY_BLOCK_PII = _env_bool("SAFETY_BLOCK_PII", True)
+        self.SAFETY_LOG_INJECTION = _env_bool("SAFETY_LOG_INJECTION", True)
+
+        # CORS allowed origins (comma-separated, or "*" for all)
+        self.CORS_ALLOWED_ORIGINS = _env_str(
+            "CORS_ALLOWED_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:3001,http://127.0.0.1:3001",
+        )
 
         # Minecraft Bot Integration
         self.MINECRAFT_ENABLED = _env_bool("MINECRAFT_ENABLED", False)
@@ -291,6 +329,23 @@ class Settings:
         self.VIDEO_FRAME_INTERVAL_SEC = _env_int("VIDEO_FRAME_INTERVAL_SEC", 5)
         self.VIDEO_MAX_FRAMES = _env_int("VIDEO_MAX_FRAMES", 20)
         self.VIDEO_VISION_CONCURRENCY = _env_int("VIDEO_VISION_CONCURRENCY", 4)
+
+        # Twitter (X) Integration
+        self.TWITTER_ENABLED = _env_bool("TWITTER_ENABLED", False)
+        self.TWITTER_API_KEY = _env_str("TWITTER_API_KEY", "")
+        self.TWITTER_API_SECRET = _env_str("TWITTER_API_SECRET", "")
+        self.TWITTER_ACCESS_TOKEN = _env_str("TWITTER_ACCESS_TOKEN", "")
+        self.TWITTER_ACCESS_TOKEN_SECRET = _env_str("TWITTER_ACCESS_TOKEN_SECRET", "")
+        self.TWITTER_MAX_CHARS = _env_int("TWITTER_MAX_CHARS", 280)
+        self.TWITTER_AUTO_PROPOSE = _env_bool("TWITTER_AUTO_PROPOSE", False)
+
+        # Screen-based Game Integration
+        self.SCREEN_GAME_ENABLED = _env_bool("SCREEN_GAME_ENABLED", False)
+        self.GAME_VISION_PROVIDER = _env_str("GAME_VISION_PROVIDER", "gemini")
+        self.GEMINI_MODEL = _env_str("GEMINI_MODEL", "gemini-2.0-flash-lite")
+        self.SCREEN_CAPTURE_REGION = _env_str("SCREEN_CAPTURE_REGION", "")  # "x,y,w,h" or ""=fullscreen
+        self.SCREEN_GAME_LOOP_INTERVAL_SEC = _env_int("SCREEN_GAME_LOOP_INTERVAL_SEC", 3)
+        self.SCREEN_GAME_FRAME_BUFFER_SIZE = _env_int("SCREEN_GAME_FRAME_BUFFER_SIZE", 3)
 
 from backend.core.config_patch import _apply_retention_profile
 

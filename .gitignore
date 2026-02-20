@@ -74,3 +74,21 @@ data/checkpoints.sqlite
 data/ai_buddy_state.sqlite
 data/nia.sqlite3
 backend/chroma_db_storage/chroma.sqlite3
+
+# Runtime state / debug output
+public_status.json
+memory_dump.txt
+nul
+
+# Uploaded images (runtime data)
+backend/static/images/
+
+# Sleep outputs (runtime)
+sleep_outputs/
+
+# Rotated logs
+logs/*.log.*
+logs/observations/*.jsonl
+
+# Claude Code local settings
+.claude/settings.local.json

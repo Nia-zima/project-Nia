@@ -11,6 +11,7 @@ from backend.core.agent_graph.nodes import (
     depth2_value_align_and_preview,
     merge_output,
     action_processing,  # Phase 5: アクション処理ノード
+    s5_commit,  # Phase F: S5 Commit ノード
 )
 
 # --- Graph Definition ---
@@ -42,6 +43,7 @@ workflow.add_node("depth1", depth1_organize_and_ask)
 workflow.add_node("depth2", depth2_value_align_and_preview)
 workflow.add_node("merge", merge_output)
 workflow.add_node("action_processing", action_processing)  # Phase 5: 新規追加
+workflow.add_node("s5_commit", s5_commit)  # Phase F: S5 Commit ノード
 
 # Set Entry Point
 workflow.set_entry_point("safety")
@@ -49,10 +51,10 @@ workflow.set_entry_point("safety")
 # Add Edges
 workflow.add_conditional_edges(
     "safety",
-    lambda state: "safe" if state.get("safety_route") == "safe" else END,
+    lambda state: "safe" if state.get("safety_route", "safe") != "blocked" else "blocked",
     {
         "safe": "dissonance",
-        END: END,
+        "blocked": END,
     },
 )
 
@@ -74,7 +76,8 @@ workflow.add_edge("depth0", "merge")
 workflow.add_edge("depth1", "merge")
 workflow.add_edge("depth2", "merge")
 workflow.add_edge("merge", "action_processing")  # Phase 5: Mergeの後にアクション処理
-workflow.add_edge("action_processing", END)
+workflow.add_edge("action_processing", "s5_commit")  # Phase F: Action → S5 Commit
+workflow.add_edge("s5_commit", END)
 
 # Compile with Checkpointer
 memory = MemorySaver()

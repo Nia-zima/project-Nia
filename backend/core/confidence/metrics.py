@@ -129,11 +129,13 @@ class ContextCoverageCalculator:
     Context Coverage メトリクス - 最重要
 
     質問に答えるために必要な情報が文脈に含まれているかを判定。
+    Embedding (semantic similarity) ベースで計算し、フォールバックとして
+    旧ヒューリスティックを使用。
 
     重み: 40%（最も重要）
     """
 
-    # 情報不足を示すパターン
+    # 情報不足を示すパターン（フォールバック用）
     INFO_LACK_PATTERNS = [
         r"情報が.*不足",
         r"詳細が.*わからない",
@@ -145,7 +147,7 @@ class ContextCoverageCalculator:
         r"どの.*について",
     ]
 
-    # 十分な情報を示すパターン
+    # 十分な情報を示すパターン（フォールバック用）
     INFO_SUFFICIENT_PATTERNS = [
         r"確認.*できた",
         r"明らか.*",
@@ -157,49 +159,67 @@ class ContextCoverageCalculator:
     @staticmethod
     def calculate(question: str, context: List[str]) -> float:
         """
-        質問と文脈から情報充足度を計算
-
-        Args:
-            question: ユーザーの質問
-            context: 利用可能な文脈（過去のメッセージ等）
-
-        Returns:
-            float: 情報充足度 (0.0 - 1.0)
+        質問と文脈から情報充足度を計算。
+        Embedding ベースの semantic similarity を優先し、
+        失敗時は旧ヒューリスティックにフォールバック。
         """
-        score = 0.5  # デフォルト: 中立
+        # Try embedding-based calculation first
+        embedding_score = ContextCoverageCalculator._calculate_embedding(question, context)
+        if embedding_score is not None:
+            return embedding_score
+        return ContextCoverageCalculator._calculate_heuristic(question, context)
 
-        # 1. 質問の長さから推定（長い質問 = より多くの情報を含む）
+    @staticmethod
+    def _calculate_embedding(question: str, context: List[str]) -> Optional[float]:
+        """Embedding-based context coverage using semantic similarity."""
+        if not question or not context:
+            return None
+        try:
+            from backend.core.embedding_model import encode, cosine_similarity
+            context_text = " ".join(c[:200] for c in context if c)
+            if not context_text.strip():
+                return None
+            vecs = encode([question, context_text])
+            if vecs is None:
+                return None
+            sim = cosine_similarity(vecs[0], vecs[1])
+            # Scale: raw cosine [0,1] → coverage [0.1, 0.95]
+            # Low similarity (< 0.3) → low coverage; High (> 0.8) → high coverage
+            return max(0.0, min(1.0, sim * 0.85 + 0.1))
+        except Exception:
+            logger.debug("[ContextCoverage] embedding fallback", exc_info=True)
+            return None
+
+    @staticmethod
+    def _calculate_heuristic(question: str, context: List[str]) -> float:
+        """Legacy heuristic-based context coverage (fallback)."""
+        score = 0.5
+
         question_length_factor = min(len(question) / 200, 1.0)
         score += question_length_factor * 0.2
 
-        # 2. 文脈の量（多い = より多くの情報）
         if context:
             total_context_length = sum(len(c) for c in context)
             context_factor = min(total_context_length / 1000, 1.0)
             score += context_factor * 0.3
         else:
-            score -= 0.3  # 文脈なし = 低い情報充足度
+            score -= 0.3
 
-        # 3. 質問中の不確実性パターン
-        question_lower = question.lower()
         for pattern in ContextCoverageCalculator.INFO_LACK_PATTERNS:
             if re.search(pattern, question):
                 score -= 0.1
 
-        # 4. 文脈中の十分性パターン
         context_text = " ".join(context) if context else ""
         for pattern in ContextCoverageCalculator.INFO_SUFFICIENT_PATTERNS:
             if re.search(pattern, context_text):
                 score += 0.1
 
-        # 5. 質問中の疑問詞の数（多い = 情報不足）
         question_marks = ["何", "どう", "どの", "いつ", "どこ", "誰", "なぜ"]
         question_mark_count = sum(
             1 for mark in question_marks if mark in question
         )
         score -= min(question_mark_count * 0.05, 0.2)
 
-        # 0.0 - 1.0 にクランプ
         return max(0.0, min(1.0, score))
 
 

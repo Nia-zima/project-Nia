@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import deque
 from dataclasses import dataclass, field
@@ -11,6 +12,8 @@ from urllib.parse import quote
 import requests
 
 from backend.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 ExternalCategory = Literal["fact_check", "definition", "data"]
@@ -217,7 +220,7 @@ class ExternalDataBroker:
     def _execute_search(self, request: ExternalDataRequest) -> Optional[ExternalDataResult]:
         providers: list[str]
         if self.provider == "auto":
-            providers = ["google", "wikipedia", "duckduckgo"]
+            providers = ["google", "wikipedia"]
         else:
             providers = [self.provider]
 
@@ -477,12 +480,54 @@ class ExternalDataBroker:
         return max(0.0, min(1.0, hits / max(1, len(q_tokens))))
 
     def _detect_contradiction(self, evidence: list[dict[str, Any]]) -> bool:
-        years = []
+        snippets_by_source: dict[str, str] = {}
         for e in evidence:
+            src = str(e.get("source") or "unknown")
             txt = str(e.get("snippet") or "")
-            years.extend(re.findall(r"(?:19|20)\d{2}", txt))
-        uniq_years = {y for y in years}
-        return len(uniq_years) >= 2
+            snippets_by_source.setdefault(src, "")
+            snippets_by_source[src] += " " + txt
+
+        all_snippets = " ".join(snippets_by_source.values())
+
+        # 1. Year contradiction (cross-source)
+        years_by_source: dict[str, set[str]] = {}
+        for src, txt in snippets_by_source.items():
+            found = set(re.findall(r"(?:19|20)\d{2}", txt))
+            if found:
+                years_by_source[src] = found
+        if len(years_by_source) >= 2:
+            all_years = set()
+            for ys in years_by_source.values():
+                all_years |= ys
+            if len(all_years) >= 2:
+                return True
+
+        # 2. Numeric+unit contradiction (cross-source)
+        _NUM_UNIT = re.compile(
+            r"([\d,]+(?:\.\d+)?)\s*(万|億|兆|人|件|%|パーセント|ドル|円|km|kg|m²|ha)"
+        )
+        vals_by_source: dict[str, list[tuple[float, str]]] = {}
+        for src, txt in snippets_by_source.items():
+            for num_str, unit in _NUM_UNIT.findall(txt):
+                unit_norm = "%" if unit == "パーセント" else unit
+                try:
+                    val = float(num_str.replace(",", ""))
+                except ValueError:
+                    continue
+                vals_by_source.setdefault(src, []).append((val, unit_norm))
+
+        sources = list(vals_by_source.keys())
+        for i in range(len(sources)):
+            for j in range(i + 1, len(sources)):
+                for val_i, u_i in vals_by_source[sources[i]]:
+                    for val_j, u_j in vals_by_source[sources[j]]:
+                        if u_i != u_j or val_i == 0 or val_j == 0:
+                            continue
+                        ratio = max(val_i, val_j) / min(val_i, val_j)
+                        if ratio >= 2.0:
+                            return True
+
+        return False
 
     def record_feedback(
         self,
@@ -574,21 +619,31 @@ class ThinkingProcess:
         context: Optional[dict[str, Any]] = None,
     ) -> ThinkingResult:
         ctx = dict(context or {})
-        if depth < self.min_depth:
+        force_fetch = bool(ctx.get("force_fetch"))
+        if not force_fetch and depth < self.min_depth:
             return ThinkingResult(thought=thought)
 
-        request = self.language_gate.generate_request(
-            thought,
-            {"depth": depth, "user_input": user_input, **ctx},
+        # force_fetch 時は LanguageGate LLM 呼び出しをスキップ（既にユーザーが明示要求済み）
+        request = None
+        if not force_fetch:
+            request = self.language_gate.generate_request(
+                thought,
+                {"depth": depth, "user_input": user_input, **ctx},
+            )
+        candidates = self._extract_candidate_requests(
+            ctx.get("candidate_requests"), force_fetch=force_fetch,
         )
-        candidates = self._extract_candidate_requests(ctx.get("candidate_requests"))
         if request is not None:
             candidates.append(request)
         if not candidates:
             return ThinkingResult(thought=thought)
 
         surprise = float(self.surprise_calculator(thought, {"user_input": user_input, "depth": depth, **ctx}) or 0.0)
+        logger.info("[EXTERNAL_THINK] candidates=%d depth=%d surprise=%.2f force=%s", len(candidates), depth, surprise, force_fetch)
+        for c in candidates:
+            logger.info("[EXTERNAL_THINK] candidate: cat=%s query=%s", c.category, c.query[:60])
         fetchable = [r for r in candidates if self._should_fetch(request=r, depth=depth, surprise=surprise)]
+        logger.info("[EXTERNAL_THINK] fetchable=%d", len(fetchable))
         if not fetchable:
             first = candidates[0]
             priority = self.broker.compute_priority(surprise=surprise, category=first.category)
@@ -600,7 +655,17 @@ class ThinkingProcess:
         for req, priority in ranked:
             external = self.broker.fetch(req)
             last_external = external
-            if external and external.data and float(external.confidence or 0.0) >= float(self.broker.min_confidence) and not bool(external.contradiction_flag):
+            logger.info(
+                "[EXTERNAL_THINK] fetch result: data_len=%d conf=%.2f contradict=%s err=%s src=%s",
+                len(external.data or "") if external else 0,
+                float(external.confidence or 0) if external else 0,
+                bool(external.contradiction_flag) if external else None,
+                external.error if external else "no_result",
+                external.source if external else "none",
+            )
+            # force_fetch 時はユーザー明示要求なので confidence 閾値を緩める (0.3)
+            effective_min_conf = 0.3 if force_fetch else float(self.broker.min_confidence)
+            if external and external.data and float(external.confidence or 0.0) >= effective_min_conf and not bool(external.contradiction_flag):
                 self.broker.record_feedback(
                     category=req.category,
                     useful=True,
@@ -657,7 +722,9 @@ class ThinkingProcess:
                 base -= 0.05
         return max(0.5, min(0.95, base))
 
-    def _extract_candidate_requests(self, raw: Any) -> list[ExternalDataRequest]:
+    def _extract_candidate_requests(
+        self, raw: Any, *, force_fetch: bool = False,
+    ) -> list[ExternalDataRequest]:
         out: list[ExternalDataRequest] = []
         if not isinstance(raw, list):
             return out
@@ -673,7 +740,8 @@ class ThinkingProcess:
                         query=str(item.get("query") or "").strip(),
                         category=category,  # type: ignore[arg-type]
                     )
-            if req and req.validate():
+            # force_fetch 時は validate をスキップ（ユーザー明示要求）
+            if req and (force_fetch or req.validate()):
                 out.append(req)
         return out
 
@@ -688,8 +756,10 @@ class ThinkingProcess:
 
     def _integrate_external_data(self, thought: str, data: str) -> str:
         prompt = (
-            "元の思考と外部データを統合して、過剰解釈を避けつつ補強してください。\n"
-            f"元の思考: {thought}\n"
+            "外部データをもとに、質問への回答を日本語で1〜3文にまとめてください。\n"
+            "柔らかいタメ口で、表やリストは使わず自然な文章で答えること。\n"
+            "データに含まれない情報は推測せず、わかる範囲だけ伝えること。\n\n"
+            f"質問の文脈: {thought}\n"
             f"外部データ: {data}\n"
         )
         return (self.llm.generate(prompt, max_tokens=240) or "").strip()

@@ -4,11 +4,19 @@ import aiohttp
 import asyncio
 import logging
 import random
+import re
 from typing import Any, Dict, List, Optional
 
 from backend.core.config import settings
 
 logger = logging.getLogger("LLMClient")
+
+_THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks (Qwen3 reasoning traces)."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _chat_completions_url() -> str:
@@ -46,7 +54,8 @@ async def call_llm(
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data["choices"][0]["message"]["content"]
+                        raw = data["choices"][0]["message"]["content"]
+                        return _strip_think_blocks(raw) if raw else raw
 
                     body = await resp.text()
                     if resp.status in (408, 429, 500, 502, 503, 504) and attempt < max_retries:
@@ -77,9 +86,9 @@ async def call_llm(
         except Exception as e:
             if attempt < max_retries:
                 delay = min(base_delay_sec * (2 ** attempt) + random.uniform(0, 0.5), 30.0)
-                logger.warning("LLM connection error attempt=%s delay=%.2fs err=%s", attempt + 1, delay, e)
+                logger.warning("LLM connection error attempt=%s delay=%.2fs err=%r", attempt + 1, delay, e)
                 await asyncio.sleep(delay)
                 attempt += 1
                 continue
-            logger.error(f"Connection Error: {e}")
+            logger.error("LLM connection failed after %s attempts: %r", max_retries + 1, e)
             return None

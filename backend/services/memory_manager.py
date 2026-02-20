@@ -1088,6 +1088,101 @@ You exist within these boundaries, but your thoughts are your own.
     async def delete_thread_state_history(self, thread_id: str):
         return True
 
+    async def cleanup_old_checkpoints(self, retention_days: int | None = None) -> dict:
+        """retention_days より古いチェックポイントと writes を削除し VACUUM する。"""
+        if retention_days is None:
+            retention_days = getattr(settings, "CHECKPOINTER_RETENTION_DAYS", 7)
+
+        import time as _time
+        cutoff_ts = _time.time() - retention_days * 86400
+
+        db_path = settings.CHECKPOINTER_DB_PATH
+        if not os.path.exists(db_path):
+            return {"deleted_checkpoints": 0, "deleted_writes": 0, "freed_mb": 0.0}
+
+        size_before = os.path.getsize(db_path)
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # UUID v6 → Unix timestamp 変換でフィルタ
+            all_ids = conn.execute(
+                "SELECT thread_id, checkpoint_ns, checkpoint_id FROM checkpoints"
+            ).fetchall()
+
+            to_delete: list[tuple[str, str, str]] = []
+            for row in all_ids:
+                ts = self._uuid6_to_unix(row["checkpoint_id"])
+                if ts is not None and ts < cutoff_ts:
+                    to_delete.append(
+                        (row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"])
+                    )
+
+            deleted_cp = 0
+            deleted_wr = 0
+            for tid, ns, cid in to_delete:
+                conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?",
+                    (tid, ns, cid),
+                )
+                deleted_cp += 1
+                rc = conn.execute(
+                    "DELETE FROM writes WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?",
+                    (tid, ns, cid),
+                ).rowcount
+                deleted_wr += rc
+
+            conn.commit()
+            if deleted_cp > 0:
+                conn.execute("VACUUM")
+
+            size_after = os.path.getsize(db_path)
+            freed_mb = round((size_before - size_after) / (1024 * 1024), 2)
+
+            logger.info(
+                "[CHECKPOINTER_CLEANUP] deleted_cp=%d deleted_wr=%d freed=%.1fMB retention=%dd",
+                deleted_cp, deleted_wr, freed_mb, retention_days,
+            )
+            return {
+                "deleted_checkpoints": deleted_cp,
+                "deleted_writes": deleted_wr,
+                "freed_mb": freed_mb,
+            }
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _uuid6_to_unix(uuid_str: str) -> float | None:
+        """UUID v6 の checkpoint_id から Unix timestamp を抽出する。"""
+        try:
+            h = uuid_str.replace("-", "")
+            time_high = int(h[0:8], 16)
+            time_mid = int(h[8:12], 16)
+            time_low = int(h[13:16], 16)  # skip version nibble at h[12]
+            ticks = (time_high << 28) | (time_mid << 12) | time_low
+            return (ticks - 0x01B21DD213814000) / 1e7
+        except Exception:
+            return None
+
+    async def get_checkpointer_stats(self) -> dict:
+        """Diagnostics: checkpointer DB の統計を返す。"""
+        db_path = settings.CHECKPOINTER_DB_PATH
+        if not os.path.exists(db_path):
+            return {"size_mb": 0, "threads": 0, "checkpoints": 0, "retention_days": settings.CHECKPOINTER_RETENTION_DAYS}
+        size_mb = round(os.path.getsize(db_path) / (1024 * 1024), 1)
+        conn = sqlite3.connect(db_path)
+        try:
+            cp_count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
+            thread_count = conn.execute("SELECT COUNT(DISTINCT thread_id) FROM checkpoints").fetchone()[0]
+        finally:
+            conn.close()
+        return {
+            "size_mb": size_mb,
+            "threads": thread_count,
+            "checkpoints": cp_count,
+            "retention_days": settings.CHECKPOINTER_RETENTION_DAYS,
+        }
+
 # シングルトン作成
 
     def get_recent_memories(self, limit: int = 50) -> List[Dict]:

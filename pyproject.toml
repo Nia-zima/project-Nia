@@ -22,11 +22,13 @@ dependencies = [
     "chromadb (>=1.4.0,<2.0.0)",
     "sentence-transformers (>=5.2.0,<6.0.0)",
     "pyautogui",
+    "pydirectinput>=1.0.4",
     "pillow",
     "mss",
     "numpy",
     "watchdog",
     "dspy-ai>=2.5.0",
+    "tweepy>=4.14",
 ]
 
 

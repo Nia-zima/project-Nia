@@ -12,6 +12,7 @@ from typing import List, Dict, Optional
 
 from backend.core.logger import logger
 from backend.core.config import settings
+from backend.core.embedding_model import _MODEL_NAME as EMBEDDING_MODEL_NAME
 
 class VectorStore:
     _instance = None
@@ -60,7 +61,7 @@ class VectorStore:
 
             # 3. Embeddingモデルのロード
             self.embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="all-MiniLM-L6-v2"
+                model_name=EMBEDDING_MODEL_NAME
             )
 
             # 4. コレクションの確保
@@ -206,14 +207,25 @@ class VectorStore:
             )
 
             logger.info("[VEC] collection=%s count=%s", target_collection.name, target_collection.count())
-            where = {"thread_id": meta.get("thread_id"), "stage": meta.get("stage")}
-            logger.info("[VEC] peek where=%s", where)
-            peek = target_collection.get(where=where, limit=3, include=["metadatas"])
-            logger.info(
-                "[VEC] peek_n=%s meta0=%s",
-                len(peek.get("ids") or []),
-                (peek.get("metadatas") or [None])[0],
-            )
+            # Diagnostic peek (filter out None values; ChromaDB rejects them)
+            where_parts = {k: v for k, v in {
+                "thread_id": meta.get("thread_id"),
+                "stage": meta.get("stage"),
+            }.items() if v is not None}
+            if len(where_parts) > 1:
+                where = {"$and": [{k: v} for k, v in where_parts.items()]}
+            elif where_parts:
+                where = where_parts
+            else:
+                where = None
+            if where:
+                logger.info("[VEC] peek where=%s", where)
+                peek = target_collection.get(where=where, limit=3, include=["metadatas"])
+                logger.info(
+                    "[VEC] peek_n=%s meta0=%s",
+                    len(peek.get("ids") or []),
+                    (peek.get("metadatas") or [None])[0],
+                )
             return True
         except Exception:
             logger.exception("[VECTOR_UPSERT] upsert failed")
@@ -231,6 +243,20 @@ class VectorStore:
         count()を使わない高速・堅牢設計。
         """
         if not query_text:
+            return []
+
+        target_collection = self._get_collection(collection_type)
+        if target_collection is None:
+            return []
+
+        try:
+            results = target_collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+            return self._format_and_sanitize(results, include_distance=include_distance)
+        except Exception as e:
+            logger.error(f"❌ Search failed: {e}")
             return []
 
     def delete_memories_containing(self, text_fragment: str, collection_type: str = "episodic") -> int:
@@ -273,22 +299,6 @@ class VectorStore:
         except Exception as e:
             logger.error("❌ VectorStore delete by ids failed: %s", e)
             return 0
-
-        target_collection = self._get_collection(collection_type)
-        if target_collection is None:
-            return []
-
-        try:
-            # count() は呼ばず、queryでダメなら例外を握る
-            results = target_collection.query(
-                query_texts=[query_text],
-                n_results=n_results
-            )
-            return self._format_and_sanitize(results, include_distance=include_distance)
-
-        except Exception as e:
-            logger.error(f"❌ Search failed: {e}")
-            return []
 
     def _format_and_sanitize(self, chroma_results: Dict, include_distance: bool = False) -> List[Dict]:
         """

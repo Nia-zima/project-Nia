@@ -2,9 +2,85 @@ import re
 
 # --- Stream Sanitizer (Robust Rolling Buffer) ---
 
-# 状態タグ (PONDERING etc) 用の共通パターン
+# ── LLM Special Token Stripping ──────────────────────────────────
+# Qwen/ChatML 系の制御トークン: <|start|>, <|end|>, <|im_start|>, <|message|> 等
+# トークン直後に続く制御語 (final, system, commentary 等) も一緒にキャプチャ
+LLM_SPECIAL_TOKEN_RE = re.compile(
+    r"<\|[^|]*\|>"
+    r"(?:\s*(?:final|system|user|assistant|end|im_start|im_end"
+    r"|commentary|developer|message|tool|done)\b)?",
+    re.IGNORECASE,
+)
+
+# ChatML セクション構造: <|start|>final<|message|> の位置を検出
+_CHATML_FINAL_SECTION_RE = re.compile(
+    r"<\|start\|>\s*final\s*(?:<\|message\|>)?\s*",
+    re.IGNORECASE,
+)
+_CHATML_NEXT_SECTION_RE = re.compile(r"<\|start\|>", re.IGNORECASE)
+
+
+def _extract_final_section(text: str) -> str | None:
+    """ChatML セクション構造が検出された場合、final セクションの内容のみを抽出する。
+
+    Returns None if no final section marker is found.
+    """
+    m = _CHATML_FINAL_SECTION_RE.search(text)
+    if not m:
+        return None
+    after_final = text[m.end():]
+    # 次のセクション開始があればそこで切る
+    next_section = _CHATML_NEXT_SECTION_RE.search(after_final)
+    if next_section:
+        return after_final[:next_section.start()].strip()
+    return after_final.strip()
+
+
+def strip_llm_special_tokens(text: str) -> str:
+    """Remove LLM special tokens like <|start|>, <|message|>, etc.
+
+    If ChatML-style sections (commentary/developer/final) are detected,
+    extract only the 'final' section content and discard internal sections.
+    """
+    if "<|" not in text:
+        return text
+    # まず final セクション抽出を試みる
+    final_content = _extract_final_section(text)
+    if final_content is not None:
+        # final セクション内の残留トークンも除去
+        return LLM_SPECIAL_TOKEN_RE.sub("", final_content).strip()
+    # セクション構造なし → 全トークンをフラット除去
+    return LLM_SPECIAL_TOKEN_RE.sub("", text).strip()
+
+
+# ── Shared Tag Constants ──────────────────────────────────────────
+STATE_TAGS = [
+    "CONSENT", "DISSONANCE", "PONDERING",
+    "HAPPY", "SAD", "SURPRISED", "ANGRY", "RELAXED", "SHY", "SIGH", "NEUTRAL",
+]
+# 半角ブラケット用（extract_metadata の findall 等で使用）
 TAG_PATTERN = re.compile(
-    r"\[(CONSENT|DISSONANCE|PONDERING|HAPPY|SAD|SURPRISED|ANGRY|RELAXED|SHY|SIGH|NEUTRAL)\]",
+    r"\[(%s)\]" % "|".join(map(re.escape, STATE_TAGS)),
+    re.IGNORECASE,
+)
+# 全角ブラケット・前後スペース対応（finalize_output の本文浄化用）
+STATE_TAG_RE = re.compile(
+    r"[\[\［]\s*(?:%s)\s*[\]\］]" % "|".join(map(re.escape, STATE_TAGS)),
+    re.IGNORECASE,
+)
+
+# ── Gesture Tag Constants ────────────────────────────────────────
+GESTURE_TAGS = [
+    "NOD", "WAVE", "SHRUG", "TILT_HEAD", "POINT", "CLAP", "BOW", "FIST_PUMP",
+]
+# [GESTURE:NOD] / [GESTURE: NOD] / ［GESTURE：NOD］ 形式を抽出（既知タグのみ）
+GESTURE_TAG_PATTERN = re.compile(
+    r"[\[\［]\s*GESTURE\s*(?:[:：]|\s+)\s*(%s)\s*[\]\］]" % "|".join(map(re.escape, GESTURE_TAGS)),
+    re.IGNORECASE,
+)
+# Catch-all: 任意の [GESTURE:xxx] を除去（サニタイズ用、未知タグも含む）
+GESTURE_TAG_ANY_RE = re.compile(
+    r"[\[\［]\s*GESTURE\s*(?:[:：]|\s+)\s*[A-Za-z_][A-Za-z0-9_]*\s*[\]\］]",
     re.IGNORECASE,
 )
 
@@ -41,9 +117,16 @@ class StreamSanitizer:
     def _get_clean_and_mapping(self, s: str):
         """Finds skip ranges (tags, tool blocks) and returns cleaned text with raw index mapping."""
         skip_ranges = []
-        
+
+        # 0. LLM special tokens (<|start|>final<|message|> etc.) + trailing control words
+        for m in LLM_SPECIAL_TOKEN_RE.finditer(s):
+            skip_ranges.append((m.start(), m.end()))
+
         # 1. Standard Tags (PONDERING etc)
         for m in TAG_PATTERN.finditer(s):
+            skip_ranges.append((m.start(), m.end()))
+        # 1b. Gesture Tags — catch-all ([GESTURE:任意] を全て除去)
+        for m in GESTURE_TAG_ANY_RE.finditer(s):
             skip_ranges.append((m.start(), m.end()))
             
         # 2. Stateful Tool Blocks (Handles [SEARCH_MEMORY]... to [END_SEARCH_MEMORY] or EOF)
@@ -188,10 +271,6 @@ STAGE_DIRECTIONS = [
 
 TAG_LINE_RE = re.compile(r'^\[\[[A-Z0-9_]+\]\]\s*\{.*\}\s*$', re.IGNORECASE)
 SILENCE_TAG_RE = re.compile(r'^\s*\[SILENCE\]\s*$', re.IGNORECASE)
-TAG_PATTERN = re.compile(
-    r"\[(CONSENT|DISSONANCE|PONDERING|HAPPY|SAD|SURPRISED|ANGRY|RELAXED|SHY|SIGH|NEUTRAL)\]",
-    re.IGNORECASE,
-)
 
 # 内部状態やLLMメタ情報のハードブロック（本気で漏洩している場合のみ沈黙へ）
 # 定数定義: JSON検知パターン（誤爆判定用に分離）
@@ -256,17 +335,6 @@ SOFT_REWRITE_PERSONALITY = [
     (r"私は考えています", "……"),
     (r"判断しました", "そう感じる"),
 ]
-
-# Define STATE_TAGS constant for reuse
-STATE_TAGS = [
-    "CONSENT", "DISSONANCE", "PONDERING",
-    "HAPPY", "SAD", "SURPRISED", "ANGRY", "RELAXED", "SHY", "SIGH", "NEUTRAL"
-]
-# Robust Regex: Handle [TAG], [ TAG ], ［TAG］(fullwidth)
-STATE_TAG_RE = re.compile(
-    r"[\[\［]\s*(?:%s)\s*[\]\］]" % "|".join(map(re.escape, STATE_TAGS)),
-    re.IGNORECASE,
-)
 
 # --- Style Guard: Suppress instant conclusions / forced guidance ---
 DECISIVE_PATTERNS = [
@@ -365,9 +433,13 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
     if not text:
         return SILENCE_DEFAULT
 
+    # 0) LLM特殊トークン除去 (<|start|>, <|message|> 等)
+    text = strip_llm_special_tokens(text)
+
     # 1) 状態タグ除去（最優先・最強力）
     #    文中のどこにあっても確実に消す
     text = STATE_TAG_RE.sub("", text)
+    text = GESTURE_TAG_ANY_RE.sub("", text)
 
     # 2) [SEARCH_MEMORY]... 等のtool block除去
     text = re.sub(
@@ -389,9 +461,9 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
         flags=re.MULTILINE | re.DOTALL,
     )
 
-    # --- 以下、従来のクリーニング ---
+    # ── Phase 2: Line-level filtering ───────────────────────────────
 
-    # --- 1) 行分割とタグの退避 ---
+    # 5) 行分割とシステムタグの退避
     lines = text.splitlines()
     speech_lines = []
     system_tags = []
@@ -405,13 +477,13 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
 
     speech_body = "\n".join(speech_lines).strip()
 
-    # --- 2) 沈黙（SILENCE）判定：最優先 ---
+    # 6) 沈黙（SILENCE）判定
     if force_silence or SILENCE_TAG_RE.fullmatch(speech_body) or "[SILENCE]" in speech_body:
         return SILENCE_DEFAULT
 
     t = speech_body
 
-    # --- 3) 技術タグの除去：閉じタグがある時だけブロック除去 ---
+    # 7) 技術XMLタグの除去
     t = re.sub(
         r"<(INTERNAL_LOG|SYSTEM_INSTRUCTION)>\s*.*?\s*</\1>",
         "",
@@ -420,80 +492,58 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
     )
     t = re.sub(r"</?(INTERNAL_LOG|SYSTEM_INSTRUCTION)>", "", t, flags=re.IGNORECASE)
 
-    # --- 4) 接頭辞・レイヤータグの除去（行頭のみ） ---
+    # 8) 接頭辞・レイヤータグ・ログ行の除去
     t = re.sub(r"^\s*\[?(LAYER\s*3|SPEECH|RESPONSE|ニア|応答)[^\]]*\]?[:：]?\s*", "", t, flags=re.IGNORECASE)
 
-    # フィルタ後の行を精査（ログ形式の行を排除）
-    final_speech_lines = []
-    # 完全に排除したいキーワード（大文字小文字無視）
     LOG_KEYWORDS = [r"Memory Pending", r"INFO", r"ERROR", r"WARNING", r"DEBUG", r"VectorStore", r"telemetry"]
     log_pattern = re.compile(rf"({'|'.join(LOG_KEYWORDS)})", re.IGNORECASE)
 
+    final_speech_lines = []
     for line in t.splitlines():
         if _looks_like_plan_line(line):
             continue
-        # 日付形式 (2026-01-11) や ログキーワードを含む行を排除
         if re.search(r'^\d{4}-\d{2}-\d{2}', line) or log_pattern.search(line):
             continue
         final_speech_lines.append(line)
     t = "\n".join(final_speech_lines).strip()
 
-    # --- 5) HARD_BLOCK（CRITICAL：該当行のみをフィルタリング） ---
-    # 旧：本文全体を無効化 -> 改善：該当行だけ落として、残りがあれば通す
+    # 9) CRITICAL行ブロック（該当行のみ除外）
     t_lines = t.splitlines()
-    final_t_lines = []
-    for line in t_lines:
-        is_critical = any(re.search(pat, line, re.IGNORECASE) for pat in CRITICAL_BLOCK)
-        if not is_critical:
-            final_t_lines.append(line)
-        else:
-            # クリティカル行が見つかったらログを出してもいい（Adviser推奨）
-            pass
+    final_t_lines = [line for line in t_lines
+                     if not any(re.search(pat, line, re.IGNORECASE) for pat in CRITICAL_BLOCK)]
     t = "\n".join(final_t_lines).strip()
 
-    # --- 5.5) State/Emotion タグの完全除去 ---
-    # TAG_PATTERN ([PONDERING], [CONSENT], etc.) を本文から確実に削除
+    # ── Phase 3: Text-level cleanup ──────────────────────────────
+
+    # 10) 残留状態タグの完全除去 + 空白正規化
     t = TAG_PATTERN.sub("", t)
-    # 二重スペース整形
     t = re.sub(r"[ \t]{2,}", " ", t)
 
-    # --- 6) ト書き削除 / ソフト置換 ---
+    # 11) ト書き削除 + ソフト置換
     for pat in STAGE_DIRECTIONS:
         t = re.sub(pat, "", t, flags=re.MULTILINE)
-    
-    # SAFEな置換のみ適用（人格は削らない）
     for pat, repl in SOFT_REWRITE_SAFE:
         t = re.sub(pat, repl, t)
 
-    # 人格置換 (SOFT_REWRITE_PERSONALITY) は意図的にスキップ
-
     clean_speech = t.strip()
 
-    # --- 7) Sentence-level tool mention filter (Refined) ---
-    # Drop sentences that mention internal tool/search operations as code/logs
-    # より「動詞結合」や「特定の言い回し」に絞り、日常会話の単語（検索、関数など）単体での誤爆を防ぐ。
+    # 12) ツール言及文の除去
     TOOL_SENTENCE_RE = re.compile(
-        r"(検索(を実行|します|中)|ツールを?(呼|起動|使)|関数を?(呼|起動|使)|(tool|search|function|query)\s*(call|exec|run|running))", 
+        r"(検索(を実行|します|中)|ツールを?(呼|起動|使)|関数を?(呼|起動|使)|(tool|search|function|query)\s*(call|exec|run|running))",
         re.IGNORECASE
     )
     sentences = re.split(r"(?<=[。！？\n])", clean_speech)
-    filtered_sentences = [s for s in sentences if not TOOL_SENTENCE_RE.search(s)]
-    clean_speech = "".join(filtered_sentences).strip()
+    clean_speech = "".join(s for s in sentences if not TOOL_SENTENCE_RE.search(s)).strip()
 
-    # --- 8) 最後のゴミ掃除（孤立したカッコの除去） ---
-    # アドバイザー推奨：独立した ] や [[ を消す
+    # 13) スタイルガード（断定抑制）
+    clean_speech = _soften_decisive_guidance(clean_speech)
+
+    # 14) 孤立ブラケット除去 + 最終沈黙判定
     clean_speech = re.sub(r"^\s*[\[\]]+\s*$", "", clean_speech, flags=re.MULTILINE).strip()
     clean_speech = re.sub(r"\[\[[^\n]*$", "", clean_speech).strip()
 
-    # --- 7.5) Style guard: suppress instant conclusions / forced guidance ---
-    clean_speech = _soften_decisive_guidance(clean_speech)
-
-    # --- 8) 最終沈黙判定と救済 ---
     if (not clean_speech) or re.fullmatch(r"[\.\,。．、…・\s!！?？\-—～〜ー]*", clean_speech):
-        if system_tags:
-            return SILENCE_DEFAULT
-        else:
-            return SILENCE_DEFAULT
+        return SILENCE_DEFAULT
 
     return clean_speech
 
@@ -503,14 +553,18 @@ def extract_metadata(text: str):
     タグを抽出し、本文から完全に除去する。
     - 全タグを大文字化して返す
     - primary_tag は末尾に最も近いタグを採用
+    - gesture_tags: [GESTURE:NOD] 等のジェスチャータグも抽出
+    Returns: (cleaned_text, primary_tag, all_tags, gesture_tags)
     """
     if not text:
-        return "", "NONE", []
+        return "", "NONE", [], []
 
     all_tags = [t.upper() for t in TAG_PATTERN.findall(text)]
-    cleaned_text = TAG_PATTERN.sub("", text).replace("  ", " ").strip()
+    gesture_tags = [t.upper() for t in GESTURE_TAG_PATTERN.findall(text)]
+    cleaned_text = TAG_PATTERN.sub("", text)
+    cleaned_text = GESTURE_TAG_ANY_RE.sub("", cleaned_text).replace("  ", " ").strip()
     primary_tag = all_tags[-1] if all_tags else "NONE"
-    return cleaned_text, primary_tag, all_tags
+    return cleaned_text, primary_tag, all_tags, gesture_tags
 
 
 # --- 高精度 greeting-only 判定 (Adviser's Advanced Version) ---

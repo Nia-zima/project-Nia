@@ -11,6 +11,11 @@ from backend.services.memory_manager import memory_manager
 from backend.tools.judge_inspector import JudgeInspector
 from backend.services.identity_diff import IdentityDiff
 from backend.services.llm_client import call_llm
+
+# Sleep Cycle は非同期バッチ処理なのでタイムアウトを長めに設定
+_SLEEP_LLM_TIMEOUT = 180
+# Qwen3 の <think> モードを抑制（推論にトークンを消費して出力が空になるのを防止）
+_NO_THINK_SUFFIX = "\n/no_think"
 from backend.core.logger import setup_logging
 
 from backend.core.config import settings
@@ -66,7 +71,7 @@ async def normalize_learnings_safe(current_text: str, new_patch: str, max_lines=
 【出力】
 - 箇条書きのみ
 """
-    normalized_text = await call_llm([{"role": "system", "content": editor_prompt}], temperature=0.1)
+    normalized_text = await call_llm([{"role": "system", "content": editor_prompt + _NO_THINK_SUFFIX}], temperature=0.1, timeout_seconds=_SLEEP_LLM_TIMEOUT)
 
     def _fallback():
         lines = [l.strip() for l in (new_patch + "\n" + current_text).splitlines() if l.strip()]
@@ -258,8 +263,39 @@ def estimate_importance(patch_text: str) -> float:
     return min(importance, 1.0)
 
 
+def save_proposal_to_db(
+    proposal_text: str,
+    importance: float | None = None,
+    chapter_context: str | None = None,
+    status: str = "pending",
+) -> str:
+    """Save an identity proposal to the database. Returns the proposal ID."""
+    import uuid as _uuid
+    from backend.core.db import get_conn
+    proposal_id = _uuid.uuid4().hex
+    now = datetime.now()
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO identity_proposals
+               (id, created_at, date, status, importance, proposal, chapter_context)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (proposal_id, now.timestamp(), now.strftime("%Y-%m-%d"),
+             status, importance, proposal_text, chapter_context),
+        )
+        logger.info(f"[IDENTITY_DB] Proposal {proposal_id} saved (status={status})")
+        return proposal_id
+    finally:
+        conn.close()
+
+
 def save_auto_applied_log(patch_text: str, importance: float):
-    """自動適用された変更の履歴を保存"""
+    """自動適用された変更の履歴を保存（DB + legacy JSONL）"""
+    save_proposal_to_db(
+        proposal_text=patch_text,
+        importance=importance,
+        status="auto_applied",
+    )
     entry = {
         "timestamp": datetime.now().isoformat(),
         "date": datetime.now().strftime("%Y-%m-%d"),
@@ -305,7 +341,7 @@ Daily Memories:
     data = {"impressions": [], "mood": "neutral", "surprise": None}
 
     try:
-        response = await call_llm([{"role": "system", "content": prompt}], temperature=0.4)
+        response = await call_llm([{"role": "system", "content": prompt + _NO_THINK_SUFFIX}], temperature=0.4, timeout_seconds=_SLEEP_LLM_TIMEOUT)
         if response:
             json_str = response.strip()
             if "```json" in json_str: json_str = json_str.split("```json")[1].split("```")[0]
@@ -396,7 +432,7 @@ Daily Memories:
 提案がない場合: 「特になし」とだけ書く
 """
     full_prompt = prompt.replace("(省略)", current_identity)
-    patch_text = await call_llm([{"role": "system", "content": full_prompt}], temperature=0.2)
+    patch_text = await call_llm([{"role": "system", "content": full_prompt + _NO_THINK_SUFFIX}], temperature=0.2, timeout_seconds=_SLEEP_LLM_TIMEOUT)
 
     proposal_saved = False
     patch_lines = 0
@@ -404,21 +440,11 @@ Daily Memories:
     if patch_text and "特になし" not in patch_text:
         logger.info(f"🛡️ Proposal Generated:\n{patch_text}")
 
-        # 提案をファイルに保存（自動適用しない）
-        proposal_data = {
-            "timestamp": datetime.now().isoformat(),
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "status": "pending",  # pending / approved / rejected
-            "proposal": patch_text,
-            "chapter_context": chapter_data.get("chapter_title") if chapter_data else None,
-        }
-
-        filename = f"{datetime.now().strftime('%Y-%m-%d')}_identity_proposal.json"
-        path = PENDING_PROPOSALS_DIR / filename
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(proposal_data, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"📋 Proposal saved to {path} (awaiting human approval)")
+        # 提案を DB に保存（自動適用しない）
+        save_proposal_to_db(
+            proposal_text=patch_text,
+            chapter_context=chapter_data.get("chapter_title") if chapter_data else None,
+        )
         proposal_saved = True
         patch_lines = len([l for l in patch_text.splitlines() if l.strip()])
     else:
@@ -479,7 +505,7 @@ Daily Memories:
 提案がない場合: 「特になし」とだけ書く
 """
     full_prompt = prompt.replace("(省略)", current_identity)
-    patch_text = await call_llm([{"role": "system", "content": full_prompt}], temperature=0.2)
+    patch_text = await call_llm([{"role": "system", "content": full_prompt + _NO_THINK_SUFFIX}], temperature=0.2, timeout_seconds=_SLEEP_LLM_TIMEOUT)
 
     proposal_saved = False
     auto_applied = False
@@ -510,20 +536,12 @@ Daily Memories:
             logger.info(f"🟡 High importance ({importance:.2f}) - Awaiting approval")
 
         if not auto_applied:
-            # 大きな変化 → 承認待ち（従来と同じ）
-            proposal_data = {
-                "timestamp": datetime.now().isoformat(),
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "status": "pending",
-                "importance": round(importance, 3),
-                "proposal": patch_text,
-                "chapter_context": chapter_data.get("chapter_title") if chapter_data else None,
-            }
-            filename = f"{datetime.now().strftime('%Y-%m-%d')}_identity_proposal.json"
-            path = PENDING_PROPOSALS_DIR / filename
-            with path.open("w", encoding="utf-8") as f:
-                json.dump(proposal_data, f, ensure_ascii=False, indent=2)
-            logger.info(f"📋 Proposal saved to {path} (awaiting human approval)")
+            # 大きな変化 → 承認待ち（DB に保存）
+            save_proposal_to_db(
+                proposal_text=patch_text,
+                importance=round(importance, 3),
+                chapter_context=chapter_data.get("chapter_title") if chapter_data else None,
+            )
             proposal_saved = True
     else:
         logger.info("🛡️ No Proposal Needed.")
@@ -535,6 +553,394 @@ Daily Memories:
     return proposal_saved or auto_applied, current_learnings, patch_lines, normalized_lines
 
 
+# --- Phase R.3: Build memory_block from daily_reflections ---
+
+
+def _build_memory_block_from_reflections(daily_logs: list) -> str:
+    """Build memory_block from daily_reflections for Layer A/B input."""
+    parts: list[str] = []
+    for log_row in daily_logs:
+        try:
+            data = json.loads(log_row["content_json"])
+        except (ValueError, TypeError):
+            continue
+        summary = data.get("summary", "")
+        topics = data.get("key_topics", [])
+        moments = data.get("emotional_moments", [])
+        if summary:
+            parts.append(f"- {summary}")
+        if topics:
+            parts.append(f"  話題: {', '.join(topics)}")
+        if moments:
+            parts.append(f"  印象: {', '.join(moments)}")
+    return "\n".join(parts) if parts else ""
+
+
+# --- Semantic Extraction from Episodic Events ---
+# Phase G: Sleep Cycle で1日分の episodic を LLM に渡し、semantic を生成
+
+def _deduplicate_claims(claims: list[dict]) -> list[dict]:
+    """Remove near-duplicate claims, keeping the one with higher confidence."""
+    unique: list[dict] = []
+    for claim in claims:
+        is_dup = False
+        for existing in unique:
+            if (claim["content"] in existing["content"]
+                    or existing["content"] in claim["content"]
+                    or _bigram_jaccard(claim["content"], existing["content"]) > 0.6):
+                if claim["confidence"] > existing["confidence"]:
+                    existing["content"] = claim["content"]
+                    existing["confidence"] = claim["confidence"]
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(dict(claim))
+    return unique
+
+
+def _bigram_jaccard(a: str, b: str) -> float:
+    """Character-bigram Jaccard similarity for Japanese text."""
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    set_a = {a[i:i + 2] for i in range(len(a) - 1)}
+    set_b = {b[i:i + 2] for i in range(len(b) - 1)}
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union else 0.0
+
+
+async def _extract_semantics_from_episodic() -> int:
+    """
+    Review episodic events since last sleep cycle and extract semantic memories
+    using LLM. Returns the number of semantic memories created.
+
+    This replaces real-time regex extraction (former S5 semantic).
+    The LLM sees the full day's conversations and can identify patterns,
+    preferences, and facts that span multiple turns.
+
+    Improvements over initial version:
+    - LLM outputs confidence per claim (was: fixed 0.5)
+    - No artificial item cap; forgetting mechanism handles decay (was: fixed 5)
+    - Conversations processed in 25-turn chunks (was: 4000 char truncation)
+    - Cross-chunk deduplication via bigram Jaccard similarity
+    - seed_retention derived from confidence (was: fixed 0.5)
+    """
+    import re as _re
+    import time as _time
+    import uuid as _uuid
+    from backend.core.db import get_conn
+    from backend.services.memory import semantic_store
+    from backend.services.memory.models import SemanticMemory
+
+    CHUNK_TURNS = 25
+
+    # Get last sleep cycle timestamp
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT v FROM telemetry_kv WHERE k = 'last_sleep_completed_at'"
+        ).fetchone()
+        since = float(row["v"]) if row else 0.0
+    finally:
+        conn.close()
+
+    # Get episodic events since last sleep cycle
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT event_id, thread_id, payload_json, created_at
+               FROM memory_events
+               WHERE event_type = 'conversation_turn' AND created_at > ?
+               ORDER BY created_at ASC""",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        logger.info("[SleepCycle] No new episodic events for semantic extraction")
+        return 0
+
+    # Group by thread
+    threads: dict[str, list] = {}
+    for row in rows:
+        tid = row["thread_id"]
+        threads.setdefault(tid, []).append(row)
+
+    total_extracted = 0
+    now = _time.time()
+
+    for thread_id, events in threads.items():
+        all_claims: list[dict] = []
+
+        # Process conversation in chunks to avoid truncation
+        for chunk_start in range(0, len(events), CHUNK_TURNS):
+            chunk = events[chunk_start:chunk_start + CHUNK_TURNS]
+            chunk_event_ids = [ev["event_id"] for ev in chunk]
+
+            conversation_lines = []
+            for ev in chunk:
+                try:
+                    payload = json.loads(ev["payload_json"])
+                except (ValueError, TypeError):
+                    continue
+                user_text = payload.get("user_text", "")
+                ai_response = payload.get("ai_response", "")
+                if user_text:
+                    conversation_lines.append(f"Origin: {user_text}")
+                if ai_response:
+                    conversation_lines.append(f"Nia: {ai_response}")
+
+            if not conversation_lines:
+                continue
+
+            conv_text = "\n".join(conversation_lines)
+
+            prompt = (
+                "以下の会話から覚えておくべき情報を抽出してください。\n"
+                "3つのカテゴリが対象です:\n"
+                '  "origin" — Originが述べた事実・好み・特徴・要望\n'
+                '  "nia"    — ニア自身が表明した意見・約束・判断・気づき\n'
+                '  "shared" — 二人の間で起きた出来事・共有した話題・関係性の変化\n'
+                "\n推測や曖昧な情報は含めず、会話中に明確に現れた内容のみ対象です。\n\n"
+                f"【会話】\n{conv_text}\n\n"
+                'JSON配列で返してください: [{"content": "内容", "category": "origin|nia|shared", "confidence": 確信度}]\n'
+                "confidenceは0.0〜1.0: 1.0=明言, 0.7=文脈から高確率, 0.4=示唆レベル\n"
+                "何もなければ [] を返してください。"
+            ) + _NO_THINK_SUFFIX
+
+            try:
+                response = await call_llm([{"role": "system", "content": prompt}], timeout_seconds=_SLEEP_LLM_TIMEOUT)
+                if not response:
+                    continue
+
+                json_match = _re.search(r'\[.*\]', response, _re.DOTALL)
+                if not json_match:
+                    continue
+
+                claims = json.loads(json_match.group())
+                if not isinstance(claims, list):
+                    continue
+
+                for claim in claims:
+                    content = (
+                        claim.get("content", "").strip()
+                        if isinstance(claim, dict)
+                        else str(claim).strip()
+                    )
+                    if not content or len(content) < 3:
+                        continue
+
+                    conf = float(claim.get("confidence", 0.5)) if isinstance(claim, dict) else 0.5
+                    conf = max(0.0, min(1.0, conf))
+                    cat = claim.get("category", "origin") if isinstance(claim, dict) else "origin"
+                    if cat not in ("origin", "nia", "shared"):
+                        cat = "origin"
+
+                    all_claims.append({
+                        "content": content[:500],
+                        "confidence": conf,
+                        "category": cat,
+                        "source_event_ids": chunk_event_ids,
+                    })
+
+            except Exception as e:
+                logger.warning(
+                    "[SleepCycle] semantic extraction chunk failed thread=%s offset=%d: %s",
+                    thread_id, chunk_start, e,
+                )
+
+        if not all_claims:
+            continue
+
+        # Deduplicate across chunks — no artificial cap; forgetting handles decay
+        unique_claims = _deduplicate_claims(all_claims)
+
+        conn = get_conn()
+        try:
+            batch = []
+            for claim in unique_claims:
+                # seed_retention derived from confidence: 0.3 + conf * 0.5
+                seed_ret = round(0.3 + claim["confidence"] * 0.5, 3)
+                batch.append(SemanticMemory(
+                    id=_uuid.uuid4().hex,
+                    thread_id=thread_id,
+                    content=claim["content"],
+                    status="inferred",
+                    confidence=claim["confidence"],
+                    state_tag=claim.get("category", "origin"),
+                    valid_from=now,
+                    source_turn_ids="[]",
+                    source_event_ids=json.dumps(claim.get("source_event_ids", [])),
+                    seed_retention=seed_ret,
+                    created_at=now,
+                    updated_at=now,
+                ))
+
+            if batch:
+                count = semantic_store.upsert_batch(conn, batch)
+                conn.commit()
+                total_extracted += count
+        finally:
+            conn.close()
+
+    logger.info(
+        "[SleepCycle] extracted %d semantic memories from episodic events",
+        total_extracted,
+    )
+    return total_extracted
+
+
+async def _compress_old_episodic() -> int:
+    """Compress old episodic events into daily summaries and archive originals."""
+    import time as _time
+    import uuid as _uuid
+    from datetime import date as _date, timedelta as _td
+    from backend.core.db import get_conn
+
+    archive_days = getattr(settings, "EPISODIC_ARCHIVE_AFTER_DAYS", 7)
+    cutoff = _time.time() - archive_days * 86400
+
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT event_id, thread_id, turn_id, message_id,
+                      event_type, payload_json, created_at, schema_version
+               FROM memory_events
+               WHERE created_at < ?
+               ORDER BY thread_id, created_at ASC""",
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        logger.info("[SleepCycle] No old episodic events to compress")
+        return 0
+
+    # Group by (thread_id, date)
+    from collections import defaultdict
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in rows:
+        tid = row["thread_id"]
+        day_str = _date.fromtimestamp(row["created_at"]).isoformat()
+        groups[(tid, day_str)].append(dict(row))
+
+    total_archived = 0
+    now = _time.time()
+
+    for (thread_id, day_str), events in groups.items():
+        # Skip if already summarized
+        conn = get_conn()
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM episodic_summaries WHERE thread_id = ? AND summary_date = ?",
+                (thread_id, day_str),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if existing:
+            # Already summarized — still archive the events
+            conn = get_conn()
+            try:
+                event_ids = [e["event_id"] for e in events]
+                conn.executemany(
+                    """INSERT OR IGNORE INTO memory_events_archive
+                       (event_id, thread_id, turn_id, message_id,
+                        event_type, payload_json, created_at, schema_version, archived_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(e["event_id"], e["thread_id"], e["turn_id"], e["message_id"],
+                      e["event_type"], e["payload_json"], e["created_at"],
+                      e["schema_version"], now) for e in events],
+                )
+                placeholders = ",".join("?" * len(event_ids))
+                conn.execute(
+                    f"DELETE FROM memory_events WHERE event_id IN ({placeholders})",
+                    event_ids,
+                )
+                conn.commit()
+                total_archived += len(events)
+            finally:
+                conn.close()
+            continue
+
+        # Build conversation text for LLM summary
+        conversation_lines = []
+        for ev in events:
+            try:
+                payload = json.loads(ev["payload_json"])
+            except (ValueError, TypeError):
+                continue
+            user_text = payload.get("user_text", "")
+            ai_response = payload.get("ai_response", "")
+            if user_text:
+                conversation_lines.append(f"Origin: {user_text}")
+            if ai_response:
+                conversation_lines.append(f"Nia: {ai_response}")
+
+        if not conversation_lines:
+            continue
+
+        conv_text = "\n".join(conversation_lines)
+        prompt = (
+            "以下はOriginとニアの1日分の会話ログです。\n"
+            "この日の会話の流れ・主要な話題・印象的なやり取りを3-5文で要約してください。\n"
+            "事実のみ記述し、感想や推測は含めないでください。\n\n"
+            f"【日付】{day_str}\n"
+            f"【会話】\n{conv_text[:4000]}\n\n"
+            "要約:"
+        ) + _NO_THINK_SUFFIX
+
+        try:
+            summary_text = await call_llm([{"role": "system", "content": prompt}], timeout_seconds=_SLEEP_LLM_TIMEOUT)
+            if not summary_text or len(summary_text.strip()) < 10:
+                logger.warning("[SleepCycle] empty summary for %s/%s, skipping", thread_id, day_str)
+                continue
+        except Exception as e:
+            logger.warning("[SleepCycle] LLM summary failed for %s/%s: %s", thread_id, day_str, e)
+            continue
+
+        # Atomic per-day transaction: insert summary + archive + delete
+        event_ids = [e["event_id"] for e in events]
+        conn = get_conn()
+        try:
+            conn.execute(
+                """INSERT INTO episodic_summaries
+                   (id, thread_id, summary_date, summary_text, event_count, source_event_ids, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (_uuid.uuid4().hex, thread_id, day_str,
+                 summary_text.strip(), len(events),
+                 json.dumps(event_ids), now),
+            )
+            conn.executemany(
+                """INSERT OR IGNORE INTO memory_events_archive
+                   (event_id, thread_id, turn_id, message_id,
+                    event_type, payload_json, created_at, schema_version, archived_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(e["event_id"], e["thread_id"], e["turn_id"], e["message_id"],
+                  e["event_type"], e["payload_json"], e["created_at"],
+                  e["schema_version"], now) for e in events],
+            )
+            placeholders = ",".join("?" * len(event_ids))
+            conn.execute(
+                f"DELETE FROM memory_events WHERE event_id IN ({placeholders})",
+                event_ids,
+            )
+            conn.commit()
+            total_archived += len(events)
+            logger.info(
+                "[SleepCycle] compressed %d events for %s/%s",
+                len(events), thread_id, day_str,
+            )
+        except Exception as e:
+            logger.warning("[SleepCycle] archive transaction failed for %s/%s: %s", thread_id, day_str, e)
+        finally:
+            conn.close()
+
+    return total_archived
+
+
 # --- Main Flow ---
 # --- Phase 2: DB-Based Sleep Cycle ---
 from backend.core.db import init_schema
@@ -543,43 +949,86 @@ from backend.services.dream_store import dream_store
 
 async def integrated_sleep_cycle():
     logger.info("\n🌙 === Integrated Sleep Cycle (DB-Based v2) ===\n")
-    
-    # 1. Fetch from Short-Term Memory (Daily Buffer)
-    unprocessed_memories = memory_store.get_unprocessed_daily_memories()
-    logger.info(f"🔍 Unprocessed Memories: {len(unprocessed_memories)}")
-    
-    if not unprocessed_memories:
-        logger.info("💤 No new memories to process.")
-        # GC only
+
+    from backend.core.db import get_conn as _get_conn
+    from datetime import date as _date
+    import time as _time_mod
+
+    # 1. Check daily_reflections first (Phase R.3: preprocessed daily logs)
+    _today_str = _date.today().isoformat()
+    _conn = _get_conn()
+    try:
+        _dr_rows = _conn.execute(
+            """SELECT content_json, phase, session_index, turn_count
+               FROM daily_reflections
+               WHERE thread_id = 'default_thread' AND reflection_date = ?
+               ORDER BY session_index ASC""",
+            (_today_str,),
+        ).fetchall()
+    finally:
+        _conn.close()
+
+    _has_reflections = bool(_dr_rows)
+    memory_block = ""
+
+    if _has_reflections:
+        # Phase R.3: Use daily_reflections as primary input
+        _daily_logs = [r for r in _dr_rows if r["phase"] == "daily_log"]
+        memory_block = _build_memory_block_from_reflections(_daily_logs)
+        _total_turns = sum(r["turn_count"] or 0 for r in _daily_logs)
+        logger.info("🔍 Using daily_reflections: %d sessions, %d turns", len(_daily_logs), _total_turns)
+    else:
+        # Fallback: raw memory_events (backward compat / no reflection ran today)
+        _conn = _get_conn()
         try:
-            from backend.services.vector_store import vector_store
-            if hasattr(vector_store, "garbage_collect_stream_memory"):
-                vector_store.garbage_collect_stream_memory()
-        except: pass
+            _row = _conn.execute(
+                "SELECT v FROM telemetry_kv WHERE k = 'last_sleep_completed_at'"
+            ).fetchone()
+            _since = float(_row["v"]) if _row else 0.0
+        finally:
+            _conn.close()
+
+        _conn = _get_conn()
+        try:
+            _event_rows = _conn.execute(
+                """SELECT event_id, payload_json, created_at
+                   FROM memory_events
+                   WHERE event_type = 'conversation_turn' AND created_at > ?
+                   ORDER BY created_at ASC""",
+                (_since,),
+            ).fetchall()
+        finally:
+            _conn.close()
+
+        logger.info("🔍 Fallback: Unprocessed Episodic Events: %d", len(_event_rows))
+
+        if not _event_rows:
+            logger.info("💤 No new memories to process.")
+            try:
+                from backend.services.vector_store import vector_store
+                if hasattr(vector_store, "garbage_collect_stream_memory"):
+                    vector_store.garbage_collect_stream_memory()
+            except: pass
+            return
+
+        conversation_summaries = []
+        for ev in _event_rows:
+            try:
+                payload = json.loads(ev["payload_json"])
+            except (ValueError, TypeError):
+                continue
+            user_text = payload.get("user_text", "")
+            ai_response = payload.get("ai_response", "")
+            if user_text or ai_response:
+                conversation_summaries.append(
+                    f"- Origin: {user_text[:200]} → Nia: {ai_response[:200]}"
+                )
+        memory_block = "\n".join(conversation_summaries)
+
+    if not memory_block:
+        logger.info("💤 No memory content to process.")
         return
 
-    # Convert to format expected by sleep logic
-    # daily_memories table has: id, user_input, summary, surprise, importance
-    important_memories = []
-    ids_to_mark = []
-    
-    for m in unprocessed_memories:
-        ids_to_mark.append(m["id"])
-        # Filter Logic (can be redundant if store already filters, but good to keep)
-        # memory_judge handles thresholding, so everything in daily_memories is at least "pending" worth
-        # But we can re-check importance if we want strictly "important" ones for dreams
-        if m["importance"] >= 0.35 or m["surprise"] >= 0.35:
-            important_memories.append({
-                "summary": m["summary"],
-                "surprise": m["surprise"],
-                "importance": m["importance"]
-            })
-
-    memory_block = "\n".join([
-        f"- {m['summary']} (Surprise: {m['surprise']:.2f}, Imp: {m['importance']:.2f})" 
-        for m in important_memories
-    ])
-    
     current_identity = identity_manager.get_identity()
 
     # 3. Layer A & B (Logic unchanged, input sanitized)
@@ -588,7 +1037,7 @@ async def integrated_sleep_cycle():
     
     # Post-Phase5: Layer A は印象記録のみ（変わりたい願望は生成しない）
     layer_a_data = {"impressions": [], "mood": "neutral", "surprise": None}
-    if important_memories:
+    if memory_block:
         layer_a_data = await layer_a_impression_record(current_identity, memory_block)
 
     mood = layer_a_data.get("mood", "neutral")
@@ -616,7 +1065,7 @@ async def integrated_sleep_cycle():
     patch_lines = 0
     normalized_lines = 0
 
-    if important_memories:
+    if memory_block:
         if layer_b_mode == "adaptive":
             logger.info("🔀 Layer B Mode: adaptive")
             proposal_saved, current_learnings, patch_lines, normalized_lines = await layer_b_guardian_adaptive(current_identity, memory_block)
@@ -631,8 +1080,8 @@ async def integrated_sleep_cycle():
 以下の出来事を、「第〇話」のような日記形式で要約してください。
 気分: {mood}
 【出来事】{memory_block}
-"""
-            diary_summary = await call_llm([{"role": "system", "content": diary_prompt}])
+""" + _NO_THINK_SUFFIX
+            diary_summary = await call_llm([{"role": "system", "content": diary_prompt}], timeout_seconds=_SLEEP_LLM_TIMEOUT)
             if diary_summary:
                 full_details = f"Mood: {mood}\nRaw: {memory_block}"
                 await memory_manager.add_episode(
@@ -641,17 +1090,89 @@ async def integrated_sleep_cycle():
                     details=full_details
                 )
 
-    # 5. Mark as Processed
-    memory_store.mark_daily_memories_processed(ids_to_mark)
-    logger.info("✅ Marked memories as processed.")
+    # 5. (No-op: memory_events uses last_sleep_completed_at timestamp, no marking needed)
 
-    # 6. GC
+    # 5.5. Semantic extraction — handled by Idle Reflection (Phase R.2)
+    # _extract_semantics_from_episodic() is no longer called here.
+    # The reflection_engine runs during idle time and saves to semantic_memories.
+    # The function definition is preserved for manual/fallback use.
+    if _has_reflections:
+        logger.info("🧠 Semantic extraction: handled by Idle Reflection (R.2)")
+    else:
+        # Fallback: run extraction for sessions where idle reflection didn't fire
+        try:
+            sem_count = await _extract_semantics_from_episodic()
+            if sem_count:
+                logger.info("🧠 Fallback: Extracted %d semantic memories from episodic events", sem_count)
+        except Exception:
+            logger.exception("[SleepCycle] episodic → semantic extraction failed")
+
+    # 6. Semantic Memory: confirm inferred (24h+) & orphan scan
+    try:
+        from backend.services.memory import semantic_store
+        from backend.services.memory.vector_sync import process_semantic_vector_sync
+
+        # Confirm inferred memories older than 24h
+        old_inferred = semantic_store.get_inferred_older_than(86400)
+        if old_inferred:
+            confirm_ids = [m.id for m in old_inferred]
+            confirmed = semantic_store.confirm_batch(confirm_ids)
+            logger.info("[SleepCycle] confirmed %d/%d inferred semantic memories", confirmed, len(old_inferred))
+
+        # Orphan reference scan
+        orphans = semantic_store.scan_orphan_references()
+        if orphans:
+            logger.warning("[SleepCycle] %d orphan references found in semantic_memories", len(orphans))
+
+        # Vector sync for any pending semantic memories
+        synced = process_semantic_vector_sync(limit=200)
+        if synced:
+            logger.info("[SleepCycle] synced %d semantic memories to vector store", synced)
+    except Exception:
+        logger.exception("[SleepCycle] semantic memory maintenance failed")
+
+    # 7. Record sleep completion timestamp
+    try:
+        from backend.core.db import get_conn
+        import time as _time
+        _conn = get_conn()
+        try:
+            _conn.execute(
+                "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES (?, ?, ?)",
+                ("last_sleep_completed_at", str(_time.time()), int(_time.time())),
+            )
+        finally:
+            _conn.close()
+    except Exception:
+        logger.exception("[SleepCycle] failed to record sleep completion timestamp")
+
+    # 8. GC
     try:
         from backend.services.vector_store import vector_store
         if hasattr(vector_store, "garbage_collect_stream_memory"):
             vector_store.garbage_collect_stream_memory()
     except: pass
-    
+
+    # 9. Episodic compression & archival
+    if getattr(settings, "EPISODIC_SUMMARY_ENABLED", True):
+        try:
+            archived = await _compress_old_episodic()
+            if archived:
+                logger.info("📦 Archived %d old episodic events", archived)
+        except Exception:
+            logger.exception("[SleepCycle] episodic compression failed")
+
+    # 10. Checkpointer cleanup
+    try:
+        from backend.scripts.cleanup_checkpoints import run_cleanup
+        result = await run_cleanup()
+        logger.info(
+            "[SleepCycle] Checkpointer cleanup: %d cp, %d wr removed, %.1f MB freed",
+            result["deleted_checkpoints"], result["deleted_writes"], result["freed_mb"],
+        )
+    except Exception:
+        logger.exception("[SleepCycle] Checkpointer cleanup failed")
+
     logger.info("\n🛌 Sleep Cycle Completed.")
 
 def _archive_logs():

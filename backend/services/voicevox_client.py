@@ -11,6 +11,7 @@ class VoicevoxClient:
 
     def generate_audio(self, text: str, speaker_id: int) -> Optional[bytes]:
         if not text: return None
+        logger.info(f"[VOICEVOX] generate_audio speaker={speaker_id} text_len={len(text)} text='{text[:50]}...'")
         try:
             # 1. Audio Query
             query_res = requests.post(

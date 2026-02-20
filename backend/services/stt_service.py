@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import struct
+import threading
 import subprocess
 import tempfile
 import os
@@ -29,6 +31,98 @@ def _env_bool(key: str, default: bool) -> bool:
     if v is None or str(v).strip() == "":
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+class StreamingDecoder:
+    """1つの発話に対して持続する ffmpeg プロセス。
+    webm チャンクを feed() → PCM (s16le, 16kHz, mono) が蓄積される。
+    finish() で残りをフラッシュして PCM 全体を返す。
+
+    stdout はバックグラウンドスレッドで連続読み取りするため、
+    feed() がブロックしない（Windows パイプ互換）。
+    """
+
+    def __init__(self, ffmpeg_bin: str, mime_type: str, max_buffer_bytes: int = 4 * 1024 * 1024):
+        input_format = "webm" if "webm" in (mime_type or "").lower() else "ogg"
+        self._proc = subprocess.Popen(
+            [
+                ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+                "-f", input_format, "-i", "pipe:0",
+                "-ar", "16000", "-ac", "1", "-f", "s16le", "pipe:1",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._pcm = bytearray()
+        self._max_buffer_bytes = max_buffer_bytes
+        self._closed = False
+        # stdout をバックグラウンドで連続読み取り（read() のブロックを回避）
+        self._reader = threading.Thread(target=self._bg_read, daemon=True)
+        self._reader.start()
+
+    def _bg_read(self) -> None:
+        """バックグラウンドスレッドで stdout を連続読み取りし _pcm に蓄積。"""
+        stdout = self._proc.stdout
+        if stdout is None:
+            return
+        try:
+            while True:
+                data = stdout.read(65536)
+                if not data:
+                    break
+                self._pcm.extend(data)
+                # バッファ上限を超えたら古いデータを切り捨て（先頭を破棄）
+                if self._max_buffer_bytes > 0 and len(self._pcm) > self._max_buffer_bytes:
+                    excess = len(self._pcm) - self._max_buffer_bytes
+                    del self._pcm[:excess]
+        except (OSError, ValueError):
+            pass
+
+    def feed(self, chunk: bytes) -> None:
+        """webm チャンクを ffmpeg stdin に送る。stdout はバックグラウンドで読み取り中。"""
+        if self._closed or not chunk:
+            return
+        try:
+            self._proc.stdin.write(chunk)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self._closed = True
+
+    def get_pcm(self) -> bytes:
+        """蓄積された PCM のスナップショットを返す（バックグラウンドスレッドが随時追加中）。"""
+        return bytes(self._pcm)
+
+    def finish(self) -> bytes:
+        """stdin を閉じて残りの PCM をフラッシュ。プロセス終了。"""
+        if not self._closed:
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+            self._closed = True
+        # リーダースレッドが EOF を検知して終了するのを待つ
+        try:
+            self._reader.join(timeout=5)
+        except Exception:
+            pass
+        return bytes(self._pcm)
+
+    def cleanup(self) -> None:
+        """プロセスが残っていれば kill。リーダースレッドも終了させる。"""
+        try:
+            if self._proc.poll() is None:
+                self._proc.kill()
+        except Exception:
+            pass
+        try:
+            self._reader.join(timeout=2)
+        except Exception:
+            pass
 
 
 class STTService:
@@ -328,8 +422,74 @@ class STTService:
         if not wav_bytes:
             return {"ok": False, "text": "", "provider": self.provider, "reason": "audio decode failed"}
 
-        text = await asyncio.to_thread(self._transcribe_wav_sync, wav_bytes)
-        return {"ok": True, "text": text, "provider": self.provider}
+        # Retry on transient errors (MemoryError, OSError, etc.)
+        max_retries = 2
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                text = await asyncio.to_thread(self._transcribe_wav_sync, wav_bytes)
+                return {"ok": True, "text": text, "provider": self.provider}
+            except (MemoryError, OSError) as e:
+                last_err = e
+                if attempt < max_retries:
+                    delay = 0.3 * (2 ** attempt)
+                    logger.warning("[STT] transient error (attempt %d/%d): %s, retrying in %.1fs",
+                                   attempt + 1, max_retries + 1, e, delay)
+                    await asyncio.sleep(delay)
+                else:
+                    logger.exception("[STT] all %d attempts failed: %s", max_retries + 1, e)
+            except Exception as e:
+                logger.exception("[STT] non-retryable error: %s", e)
+                return {"ok": False, "text": "", "provider": self.provider, "reason": str(e)}
+        return {"ok": False, "text": "", "provider": self.provider, "reason": str(last_err)}
+
+    @staticmethod
+    def _pcm_to_wav(pcm: bytes) -> bytes:
+        """raw PCM (16kHz, 16-bit, mono) に WAV ヘッダーを付与。"""
+        data_size = len(pcm)
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_size, b"WAVE",
+            b"fmt ", 16, 1, 1, 16000, 32000, 2, 16,
+            b"data", data_size,
+        )
+        return header + pcm
+
+    async def transcribe_pcm_bytes(self, pcm_bytes: bytes) -> dict[str, Any]:
+        """raw PCM (16kHz, s16le, mono) を直接 transcribe。ffmpeg をスキップする。"""
+        if not pcm_bytes:
+            return {"ok": True, "text": "", "provider": self.provider}
+        if self.provider != "faster_whisper":
+            return {"ok": False, "text": "", "provider": self.provider, "reason": "stt provider disabled"}
+
+        model = await self._ensure_model()
+        if model is None:
+            return {"ok": False, "text": "", "provider": self.provider, "reason": "stt model unavailable"}
+
+        def _to_wav_and_transcribe() -> str:
+            wav = self._pcm_to_wav(pcm_bytes)
+            return self._transcribe_wav_sync(wav)
+
+        # Retry on transient errors (MemoryError, OSError, etc.)
+        max_retries = 2
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                text = await asyncio.to_thread(_to_wav_and_transcribe)
+                return {"ok": True, "text": text, "provider": self.provider}
+            except (MemoryError, OSError) as e:
+                last_err = e
+                if attempt < max_retries:
+                    delay = 0.3 * (2 ** attempt)
+                    logger.warning("[STT_PCM] transient error (attempt %d/%d): %s, retrying in %.1fs",
+                                   attempt + 1, max_retries + 1, e, delay)
+                    await asyncio.sleep(delay)
+                else:
+                    logger.exception("[STT_PCM] all %d attempts failed: %s", max_retries + 1, e)
+            except Exception as e:
+                logger.exception("[STT_PCM] non-retryable error: %s", e)
+                return {"ok": False, "text": "", "provider": self.provider, "reason": str(e)}
+        return {"ok": False, "text": "", "provider": self.provider, "reason": str(last_err)}
 
 
 stt_service = STTService()

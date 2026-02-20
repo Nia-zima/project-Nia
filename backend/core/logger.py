@@ -41,6 +41,15 @@ class RateLimitFilter(logging.Filter):
             return True
 
 
+class _QuietPollFilter(logging.Filter):
+    """高頻度ポーリングのアクセスログを抑制"""
+    _QUIET_PATHS = ("/api/diagnostics", "/api/status", "/health")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(p in msg for p in self._QUIET_PATHS)
+
+
 def attach_debug_suppress_filter(target: logging.Filterer) -> None:
     """
     高頻度デバッグログだけ間引くフィルタを logger/handler に付与。
@@ -135,6 +144,12 @@ def setup_logging(
     logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
     logging.getLogger("chromadb.telemetry").setLevel(logging.WARNING)
+
+    # 高頻度ポーリングエンドポイントのアクセスログ抑制
+    _uvicorn_access = logging.getLogger("uvicorn.access")
+    if not getattr(_uvicorn_access, "_quiet_poll_filter", False):
+        _uvicorn_access.addFilter(_QuietPollFilter())
+        setattr(_uvicorn_access, "_quiet_poll_filter", True)
 
 
 class CustomLogger:

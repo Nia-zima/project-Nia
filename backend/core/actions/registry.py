@@ -90,18 +90,7 @@ class ActionRegistry:
             payload={},
         ))
 
-        # 4. Web検索（MEDIUM）
-        self.register(Action(
-            id="web_search",
-            name="Web検索",
-            category=ActionCategory.WEB_SEARCH,
-            risk_level=RiskLevel.MEDIUM,
-            description="Webで情報を検索",
-            payload={},
-            requires_confirmation=True,
-        ))
-
-        # 5. ファイル読み取り（SAFE）
+        # 4. ファイル読み取り（SAFE）
         self.register(Action(
             id="read_file",
             name="ファイル読み取り",
@@ -122,17 +111,7 @@ class ActionRegistry:
             requires_confirmation=True,
         ))
 
-        # 7. 音声合成（LOW）
-        self.register(Action(
-            id="text_to_speech",
-            name="音声合成",
-            category=ActionCategory.TOOL_CALL,
-            risk_level=RiskLevel.LOW,
-            description="テキストを音声に変換",
-            payload={},
-        ))
-
-        # 8. システム情報取得（SAFE）
+        # 7. システム情報取得（SAFE）
         self.register(Action(
             id="get_system_info",
             name="システム情報取得",
@@ -142,17 +121,7 @@ class ActionRegistry:
             payload={},
         ))
 
-        # 9. 通知送信（MEDIUM）
-        self.register(Action(
-            id="send_notification",
-            name="通知送信",
-            category=ActionCategory.COMMUNICATION,
-            risk_level=RiskLevel.MEDIUM,
-            description="デスクトップ通知を送信",
-            payload={},
-        ))
-
-        # 10. ログ記録（SAFE）
+        # 8. ログ記録（SAFE）
         self.register(Action(
             id="log_observation",
             name="観察ログ記録",
@@ -160,6 +129,67 @@ class ActionRegistry:
             risk_level=RiskLevel.SAFE,
             description="観察内容をログに記録",
             payload={},
+        ))
+
+        # 9. Minecraft ゲームアクション
+        self.register(Action(
+            id="mc_chat",
+            name="ゲーム内チャット",
+            category=ActionCategory.GAME,
+            risk_level=RiskLevel.SAFE,
+            description="Minecraftゲーム内でチャットメッセージを送信",
+            payload={},
+        ))
+        self.register(Action(
+            id="mc_move",
+            name="移動",
+            category=ActionCategory.GAME,
+            risk_level=RiskLevel.SAFE,
+            description="指定座標に移動",
+            payload={},
+        ))
+        self.register(Action(
+            id="mc_mine",
+            name="ブロック採掘",
+            category=ActionCategory.GAME,
+            risk_level=RiskLevel.LOW,
+            description="指定位置のブロックを採掘",
+            payload={},
+        ))
+        self.register(Action(
+            id="mc_place",
+            name="ブロック設置",
+            category=ActionCategory.GAME,
+            risk_level=RiskLevel.LOW,
+            description="指定位置にブロックを設置",
+            payload={},
+        ))
+        self.register(Action(
+            id="mc_craft",
+            name="クラフト",
+            category=ActionCategory.GAME,
+            risk_level=RiskLevel.LOW,
+            description="アイテムをクラフト",
+            payload={},
+        ))
+        self.register(Action(
+            id="mc_attack",
+            name="攻撃",
+            category=ActionCategory.GAME,
+            risk_level=RiskLevel.MEDIUM,
+            description="近くのエンティティを攻撃",
+            payload={},
+        ))
+
+        # 10. Twitter (X) Post
+        self.register(Action(
+            id="post_tweet",
+            name="ツイート投稿",
+            category=ActionCategory.COMMUNICATION,
+            risk_level=RiskLevel.HIGH,
+            description="X (Twitter) にニアのツイートを投稿",
+            payload={},
+            requires_confirmation=True,
         ))
 
 

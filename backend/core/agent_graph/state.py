@@ -43,3 +43,16 @@ class AgentState(TypedDict):
     external_used: Optional[bool]  # 外部データを実際に統合したか
     external_confidence: Optional[float]  # 外部データ信頼度
     contradiction_flag: Optional[bool]  # 外部データ矛盾フラグ
+    # Phase G: Context Builder
+    thread_id: Optional[str]  # config から伝播（全ノードで利用）
+    memory_context: Optional[str]  # Context Builder 出力（depth ノード用）
+    memory_sections: Optional[Dict[str, str]]  # Context Builder セクション dict（guardrail 用）
+    # Phase F: Orchestrator
+    orchestrator_stage: Optional[str]  # "S0"〜"S5"（観測用）
+    commit_result: Optional[Dict[str, Any]]  # CommitResult サマリ
+    depth2_gate_met: Optional[bool]  # Depth2 発動条件を満たしたか
+    cumulative_turn_count: Optional[int]  # 累計ターン数
+    pre_thought_action: Optional[str]  # S1 Pre-Thought: "WAIT" / "short_ack" / None
+    # Minecraft Game Integration
+    game_context: Optional[str]  # ゲーム状態のLLMコンテキスト
+    game_active: Optional[bool]  # Minecraftセッションがアクティブか

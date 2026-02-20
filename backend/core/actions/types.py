@@ -23,6 +23,7 @@ class ActionCategory(Enum):
     WEB_SEARCH = "search"       # Web検索
     TOOL_CALL = "tool"          # ツール呼び出し
     SYSTEM = "system"           # システム操作
+    GAME = "game"               # ゲーム操作（Minecraft等）
 
 
 @dataclass

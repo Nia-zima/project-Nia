@@ -22,10 +22,13 @@ DEPTH1_SYSTEM_PROMPT_V11 = (
     "- 重要点を短くまとめる\n"
     "- 不確かな場合は短い一文で示す\n"
     "- 質問は最大1つまで（必要なら）\n"
-    "- 読み上げに自然な長さにする（2〜4文程度）\n"
+    "- 読み上げに自然な長さにする（2〜5文程度）\n"
     "- カジュアルで落ち着いたトーン\n"
-    "- 出力は必ず日本語のみ\n\n"
+    "- 出力は必ず日本語のみ\n"
+    "- 自然な場面では体の動きタグを1つ付けてよい: "
+    "[GESTURE:NOD], [GESTURE:WAVE], [GESTURE:TILT_HEAD], [GESTURE:SHRUG], [GESTURE:BOW] など\n"
+    "- 無理に付けなくてもよい。自然に出る場合だけ\n\n"
     f"{NIA_SPINE_ANCHOR_V10}\n"
 )
 
-DEPTH1_PROMPT_VERSION = "v1.2"  # Post-Phase5.5: 制約を緩和、肯定形に変更
+DEPTH1_PROMPT_VERSION = "v1.3"  # v1.2 + ジェスチャータグ対応

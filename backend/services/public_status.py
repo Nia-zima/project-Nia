@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
-from backend.core.config import settings, PUBLIC_STATUS_JSON
+from backend.core.config import settings
+
+# スレッドセーフティ: 非同期環境での read/write 排他制御
+_status_lock = asyncio.Lock()
 
 
 def _default_status() -> Dict[str, Any]:
@@ -23,7 +27,7 @@ def _resolve_project_root(project_root: Optional[Path]) -> Path:
 
 def get_public_status_path(project_root: Optional[Path] = None) -> Path:
     root = _resolve_project_root(project_root)
-    return root / PUBLIC_STATUS_JSON
+    return root / settings.PUBLIC_STATUS_JSON
 
 
 def read_public_status(
@@ -80,3 +84,28 @@ def update_public_status(
         write_public_status(current, project_root=project_root)
 
     return current
+
+
+async def async_update_public_status(
+    updates: Dict[str, Any],
+    *,
+    project_root: Optional[Path] = None,
+    allowed_keys: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    """スレッドセーフな非同期版 update_public_status"""
+    async with _status_lock:
+        return update_public_status(
+            updates,
+            project_root=project_root,
+            allowed_keys=allowed_keys,
+        )
+
+
+async def async_read_public_status(
+    *,
+    project_root: Optional[Path] = None,
+    default: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """スレッドセーフな非同期版 read_public_status"""
+    async with _status_lock:
+        return read_public_status(project_root=project_root, default=default)

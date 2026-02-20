@@ -3,14 +3,14 @@ from __future__ import annotations
 import sqlite3
 import time
 from typing import Dict, Any
-from backend.core.config import DB_PATH, ensure_dirs, settings
+from backend.core.config import ensure_dirs, settings
 from backend.core.logger import logger
 
 def get_conn() -> sqlite3.Connection:
     """唯一のDB接続エントリポイント"""
     ensure_dirs()
     # check_same_thread=False is needed for FastAPI/asyncio environment
-    conn = sqlite3.connect(str(DB_PATH), isolation_level=None, check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(str(settings.DB_PATH), isolation_level=None, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     # Performance & Reliability Settings
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -268,6 +268,53 @@ def init_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_me_thread_turn ON memory_events(thread_id, turn_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_me_thread_type ON memory_events(thread_id, event_type, created_at DESC);")
 
+        # 12b. Episodic Summaries (daily digests of compressed episodes)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS episodic_summaries (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            summary_date TEXT NOT NULL,
+            summary_text TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            source_event_ids TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_es_thread_date ON episodic_summaries(thread_id, summary_date DESC);")
+
+        # 12c. Memory Events Archive (original data preserved after compression)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS memory_events_archive (
+            event_id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT,
+            message_id TEXT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            archived_at REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mea_thread_time ON memory_events_archive(thread_id, created_at DESC);")
+
+        # 12d. Daily Reflections (Phase R — Autonomous Reflection)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS daily_reflections (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            reflection_date TEXT NOT NULL,
+            session_index INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            turn_count INTEGER DEFAULT 0,
+            token_count INTEGER DEFAULT 0,
+            created_at REAL NOT NULL,
+            UNIQUE(thread_id, reflection_date, session_index, phase)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dr_thread_date ON daily_reflections(thread_id, reflection_date DESC);")
+
         # 13. Memory Index (derived/rebuildable retrieval surface)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS memory_index (
@@ -307,7 +354,118 @@ def init_schema() -> None:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_actions_dedupe ON pending_actions(dedupe_key);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_thread_status ON pending_actions(thread_id, status, created_at);")
 
-        logger.info(f"[DB] Schema initialized at {DB_PATH}")
+        # 15. Semantic Memories (Memory Redesign v2 - Phase B)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS semantic_memories (
+            id              TEXT PRIMARY KEY,
+            thread_id       TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'inferred',
+            confidence      REAL NOT NULL DEFAULT 0.5,
+            state_tag       TEXT,
+            supersedes_id   TEXT,
+            revoked_by_id   TEXT,
+            revoke_reason   TEXT,
+            valid_from      REAL NOT NULL,
+            valid_to        REAL,
+            staleness_days  REAL,
+            source_turn_ids TEXT NOT NULL DEFAULT '[]',
+            source_event_ids TEXT NOT NULL DEFAULT '[]',
+            note            TEXT,
+            seed_retention  REAL NOT NULL DEFAULT 0.5,
+            vector_sync_pending INTEGER NOT NULL DEFAULT 1,
+            created_at      REAL NOT NULL,
+            updated_at      REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_thread_status ON semantic_memories(thread_id, status, created_at DESC);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_status_valid ON semantic_memories(status, valid_to);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_supersedes ON semantic_memories(supersedes_id) WHERE supersedes_id IS NOT NULL;")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_vector_pending ON semantic_memories(vector_sync_pending) WHERE vector_sync_pending = 1;")
+
+        # 16. Working Items (Memory Redesign v2 - Phase C)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS working_items (
+            id              TEXT PRIMARY KEY,
+            thread_id       TEXT NOT NULL,
+            item_type       TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            priority        INTEGER NOT NULL DEFAULT 3,
+            status          TEXT NOT NULL DEFAULT 'open',
+            close_reason    TEXT,
+            linked_semantic_ids TEXT NOT NULL DEFAULT '[]',
+            linked_event_ids    TEXT NOT NULL DEFAULT '[]',
+            merged_into_id  TEXT,
+            ttl_turns       INTEGER,
+            expires_at      REAL,
+            stale_turn_count INTEGER NOT NULL DEFAULT 0,
+            created_turn_id TEXT NOT NULL,
+            created_at      REAL NOT NULL,
+            updated_at      REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wi_thread_open ON working_items(thread_id, status, priority) WHERE status = 'open';")
+
+        # Phase E migration: add stale_turn_count to existing working_items
+        try:
+            conn.execute("ALTER TABLE working_items ADD COLUMN stale_turn_count INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+
+        # 17. Motion Presets (VRM Gesture Library)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS motion_presets (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL UNIQUE,
+            description     TEXT NOT NULL,
+            keyframes_json  TEXT NOT NULL,
+            tags            TEXT,
+            context_hint    TEXT,
+            use_count       INTEGER DEFAULT 0,
+            success_count   INTEGER DEFAULT 0,
+            failure_count   INTEGER DEFAULT 0,
+            source          TEXT DEFAULT 'manual',
+            created_at      REAL,
+            updated_at      REAL
+        );
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_motion_presets_name ON motion_presets(name);")
+
+        # 18. Minecraft Skills (Voyager Phase B)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS minecraft_skills (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL UNIQUE,
+            description     TEXT NOT NULL,
+            code            TEXT NOT NULL,
+            code_hash       TEXT NOT NULL,
+            success_count   INTEGER DEFAULT 0,
+            failure_count   INTEGER DEFAULT 0,
+            tags            TEXT,
+            created_at      REAL,
+            updated_at      REAL
+        );
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mc_skills_name ON minecraft_skills(name);")
+
+        # Identity Proposals (Sleep Cycle Layer B)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS identity_proposals (
+            id              TEXT PRIMARY KEY,
+            created_at      REAL NOT NULL,
+            date            TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            importance      REAL,
+            proposal        TEXT NOT NULL,
+            chapter_context TEXT,
+            review_note     TEXT,
+            resolved_at     REAL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_status ON identity_proposals(status, created_at DESC);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_date ON identity_proposals(date);")
+
+        logger.info(f"[DB] Schema initialized at {settings.DB_PATH}")
     except Exception as e:
         logger.exception(f"[DB] Schema initialization failed: {e}")
         raise
@@ -343,7 +501,7 @@ def health_check() -> Dict[str, Any]:
         
         return {
             "status": "ok" if integrity == "ok" else "error",
-            "db_path": str(DB_PATH),
+            "db_path": str(settings.DB_PATH),
             "integrity_check": integrity,
             "tables": tables,
             "counts": counts,
@@ -355,7 +513,7 @@ def health_check() -> Dict[str, Any]:
         return {
             "status": "error",
             "error": str(e),
-            "db_path": str(DB_PATH)
+            "db_path": str(settings.DB_PATH)
         }
     finally:
         conn.close()
