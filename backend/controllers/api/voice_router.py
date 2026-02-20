@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from os import getenv
 from typing import Any
 import base64
@@ -8,7 +9,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, st
 from pydantic import BaseModel
 
 from backend.core.logger import logger
-from backend.services.stt_service import stt_service
+from backend.services.stt_service import stt_service, StreamingDecoder
 from backend.services.voice_session_manager import voice_session_manager
 
 router = APIRouter()
@@ -101,11 +102,10 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
         state = turns.get(utterance_id)
         if state is not None:
             return state
-        state = {
-            "buffer": bytearray(),
+        state: dict[str, Any] = {
+            "decoder": None,       # StreamingDecoder（最初のチャンクで作成）
             "chunk_count": 0,
             "last_partial": "",
-            "recent_chunks": [],
             "last_seq": -1,
         }
         turns[utterance_id] = state
@@ -113,7 +113,9 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
         if len(turns) > 8:
             oldest = next(iter(turns.keys()))
             if oldest != utterance_id:
-                turns.pop(oldest, None)
+                old_state = turns.pop(oldest, None)
+                if old_state and old_state.get("decoder"):
+                    old_state["decoder"].cleanup()
         return state
 
     try:
@@ -157,57 +159,52 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
                     try:
                         chunk_bytes = base64.b64decode(payload_b64)
                         if chunk_bytes:
-                            buffer = state["buffer"]
-                            recent_chunks = state["recent_chunks"]
-                            buffer.extend(chunk_bytes)
+                            # StreamingDecoder が無ければ作成（最初のチャンク = webm header）
+                            if state["decoder"] is None:
+                                state["decoder"] = StreamingDecoder(stt_service.ffmpeg_bin, mime_type, max_buffer_bytes=stt_service.max_buffer_bytes)
+                            # チャンクを ffmpeg に feed（リアルタイムで PCM 変換）
+                            await asyncio.to_thread(state["decoder"].feed, chunk_bytes)
                             state["chunk_count"] = int(state["chunk_count"]) + 1
-                            recent_chunks.append((chunk_bytes, mime_type))
-                            if len(recent_chunks) > 24:
-                                state["recent_chunks"] = recent_chunks[-24:]
-                            if len(buffer) > stt_service.max_buffer_bytes:
-                                overflow = len(buffer) - stt_service.max_buffer_bytes
-                                del buffer[:overflow]
                     except Exception:
                         logger.warning("[VOICE_WS] failed to decode voice_chunk base64 seq=%s", str(seq))
                 await websocket.send_json({"type": "voice_chunk_ack", "seq": seq, "utterance_id": utterance_id})
 
-                # Step 3: opportunistic partial transcript every few chunks
+                # opportunistic partial transcript every few chunks
                 interval = max(1, int(getattr(stt_service, "partial_interval_chunks", 8)))
-                min_partial_bytes = max(0, int(getattr(stt_service, "partial_min_buffer_bytes", 0)))
+                min_partial_pcm = max(0, int(getattr(stt_service, "partial_min_buffer_bytes", 0)))
+                decoder = state.get("decoder")
                 if (
-                    int(state["chunk_count"]) > 0
+                    decoder is not None
+                    and int(state["chunk_count"]) > 0
                     and int(state["chunk_count"]) % interval == 0
-                    and state["buffer"]
-                    and len(state["buffer"]) >= min_partial_bytes
                 ):
-                    stt_res = await stt_service.transcribe_container_bytes(bytes(state["buffer"]), mime_type)
-                    if not stt_res.get("ok") and state["recent_chunks"]:
-                        # webm/ogg の途中切断や連結不整合時は、最新チャンク単体でフォールバック
-                        last_chunk, last_mime = state["recent_chunks"][-1]
-                        stt_res = await stt_service.transcribe_container_bytes(last_chunk, last_mime or mime_type)
-                    text = str(stt_res.get("text") or "").strip()
-                    if text and text != str(state["last_partial"]):
-                        state["last_partial"] = text
-                        await websocket.send_json(
-                            {
-                                "type": "stt_partial",
-                                "utterance_id": utterance_id,
-                                "text": text,
-                                "provider": stt_res.get("provider"),
-                            }
-                        )
+                    pcm = decoder.get_pcm()
+                    if pcm and len(pcm) >= min_partial_pcm:
+                        stt_res = await stt_service.transcribe_pcm_bytes(pcm)
+                        text = str(stt_res.get("text") or "").strip()
+                        if text and text != str(state["last_partial"]):
+                            state["last_partial"] = text
+                            await websocket.send_json(
+                                {
+                                    "type": "stt_partial",
+                                    "utterance_id": utterance_id,
+                                    "text": text,
+                                    "provider": stt_res.get("provider"),
+                                }
+                            )
                 continue
 
             if msg_type in {"voice_turn_end", "audio_turn_end"}:
                 utterance_id = str(message.get("utterance_id") or "default")
-                mime_type = str(message.get("mime_type") or "audio/webm")
                 source = str(message.get("source") or "unknown")
                 speech_ms = message.get("speech_ms")
                 chunks = message.get("chunks")
                 rms = message.get("rms")
                 state = _turn_state(utterance_id)
+                decoder = state.get("decoder")
+                pcm_len = len(decoder.get_pcm()) if decoder else 0
                 turn_log = (
-                    "[VOICE_WS] turn_end source=%s utterance=%s chunks=%s speech_ms=%s rms=%s buffer_bytes=%s"
+                    "[VOICE_WS] turn_end source=%s utterance=%s chunks=%s speech_ms=%s rms=%s pcm_bytes=%s"
                 )
                 turn_args = (
                     source,
@@ -215,20 +212,24 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
                     str(chunks),
                     str(speech_ms),
                     str(rms),
-                    len(state["buffer"]),
+                    pcm_len,
                 )
                 if verbose_log:
                     logger.info(turn_log, *turn_args)
                 else:
                     logger.debug(turn_log, *turn_args)
-                stt_res = await stt_service.transcribe_container_bytes(bytes(state["buffer"]), mime_type)
-                if not stt_res.get("ok") and state["recent_chunks"]:
-                    # final decode failed 時の救済: 新しい順に単体チャンクを試す
-                    for chunk_bytes, chunk_mime in reversed(state["recent_chunks"]):
-                        retry = await stt_service.transcribe_container_bytes(chunk_bytes, chunk_mime or mime_type)
-                        if retry.get("ok"):
-                            stt_res = retry
-                            break
+
+                # StreamingDecoder から最終 PCM を取得して transcribe
+                if decoder:
+                    pcm = await asyncio.to_thread(decoder.finish)
+                    if pcm:
+                        stt_res = await stt_service.transcribe_pcm_bytes(pcm)
+                    else:
+                        stt_res = {"ok": False, "text": "", "provider": stt_service.provider, "reason": "no pcm"}
+                    decoder.cleanup()
+                else:
+                    stt_res = {"ok": False, "text": "", "provider": stt_service.provider, "reason": "no decoder"}
+
                 text = str(stt_res.get("text") or "").strip()
                 if not text and state["last_partial"]:
                     # 最終確定が空でも、直近partialがあれば救済して確定扱いにする
@@ -252,4 +253,10 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
     except Exception:
         logger.exception("[VOICE_WS] error session_id=%s client_id=%s", session_id, client_id)
     finally:
+        # 残っている StreamingDecoder を cleanup
+        for _uid, _st in turns.items():
+            dec = _st.get("decoder")
+            if dec:
+                dec.cleanup()
+        turns.clear()
         await voice_session_manager.detach_connection(session_id)

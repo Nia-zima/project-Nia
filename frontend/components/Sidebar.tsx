@@ -1,7 +1,7 @@
 "use client";
 import React from 'react';
 import { Settings, MessageSquare, Database, User, Mic, Moon, Sparkles, Eye, EyeOff, BarChart3, AlertTriangle, Brush, Gamepad2, Video } from 'lucide-react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 import { clsx } from 'clsx';
 import type { ActionIssue } from '@/lib/types';
 
@@ -12,17 +12,6 @@ interface SidebarProps {
 
 const SYSTEM_TOKEN = process.env.NEXT_PUBLIC_SYSTEM_TOKEN || "";
 
-const buildSystemHeaders = (withJson: boolean): Record<string, string> => {
-    const headers: Record<string, string> = {};
-    if (withJson) {
-        headers["Content-Type"] = "application/json";
-    }
-    if (SYSTEM_TOKEN) {
-        headers["x-system-token"] = SYSTEM_TOKEN;
-    }
-    return headers;
-};
-
 export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
     const tabs = [
         { id: 'chat', icon: MessageSquare, label: 'チャット' },
@@ -32,17 +21,24 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
         { id: 'draw_lab', icon: Brush, label: 'お絵描きPoC' },
         { id: 'game', icon: Gamepad2, label: 'ゲーム' },
         { id: 'video', icon: Video, label: '動画' },
-        // { id: 'profile', icon: User, label: 'プロフィール' },
+        { id: 'profile', icon: User, label: 'プロフィール' },
+        { id: 'identity', icon: User, label: 'アイデンティティ' },
         { id: 'settings', icon: Settings, label: '設定' },
     ];
 
 
     const [visionEnabled, setVisionEnabled] = React.useState(false);
     const [actionIssues, setActionIssues] = React.useState<ActionIssue[]>([]);
+    const [systemTokenInput, setSystemTokenInput] = React.useState("");
 
     React.useEffect(() => {
-        fetch(`${API_URL}/status`)
-            .then(res => { if (!res.ok) throw new Error(`status: ${res.status}`); return res.json(); })
+        const stored =
+            typeof window !== "undefined" ? window.localStorage.getItem("system_token") || "" : "";
+        const initialToken = (stored || SYSTEM_TOKEN || "").trim();
+        setSystemTokenInput(initialToken);
+        apiClient.setSystemToken(initialToken || null);
+
+        apiClient.fetchStatus()
             .then(data => {
                 if (typeof data.vision_enabled === 'boolean') {
                     setVisionEnabled(data.vision_enabled);
@@ -55,12 +51,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
         let cancelled = false;
         const fetchIssues = async () => {
             try {
-                const res = await fetch(
-                    `${API_URL}/actions/pending?thread_id=default_thread&status=ERROR,REJECTED&limit=5`,
-                    { cache: "no-store" }
-                );
-                if (!res.ok) return;
-                const data = await res.json();
+                const data = await apiClient.fetchActionIssues("default_thread", "ERROR,REJECTED", 20);
                 if (!cancelled) {
                     setActionIssues(Array.isArray(data?.items) ? data.items : []);
                 }
@@ -89,18 +80,31 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
         };
     }, []);
 
+    const saveSystemToken = () => {
+        const token = systemTokenInput.trim();
+        if (typeof window !== "undefined") {
+            if (token) {
+                window.localStorage.setItem("system_token", token);
+            } else {
+                window.localStorage.removeItem("system_token");
+            }
+        }
+        apiClient.setSystemToken(token || SYSTEM_TOKEN || null);
+    };
+
+    const clearSystemToken = () => {
+        if (typeof window !== "undefined") {
+            window.localStorage.removeItem("system_token");
+        }
+        setSystemTokenInput("");
+        apiClient.setSystemToken(SYSTEM_TOKEN || null);
+    };
+
     const toggleVision = async () => {
         const newState = !visionEnabled;
         setVisionEnabled(newState);
         try {
-            const res = await fetch(`${API_URL}/system/vision`, {
-                method: 'POST',
-                headers: buildSystemHeaders(true),
-                body: JSON.stringify({ enabled: newState })
-            });
-            if (!res.ok) {
-                throw new Error(`vision toggle failed: ${res.status}`);
-            }
+            await apiClient.systemVision(newState);
         } catch (e) {
             console.error(e);
             setVisionEnabled(!newState);
@@ -156,11 +160,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                     onClick={async () => {
                         if (!confirm("睡眠サイクル（記憶の整理）を開始しますか？\nしばらく応答できなくなります。")) return;
                         try {
-                            const res = await fetch(`${API_URL}/system/sleep`, {
-                                method: 'POST',
-                                headers: buildSystemHeaders(false),
-                            });
-                            if (!res.ok) throw new Error(`sleep failed: ${res.status}`);
+                            await apiClient.systemSleep();
                             alert("おやすみなさい。睡眠サイクルを開始しました。");
                         }
                         catch (e) { console.error(e); alert("失敗しました。"); }
@@ -190,11 +190,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                     onClick={async () => {
                         if (!confirm("週次定例（進化プロセス）を開始しますか？\n直近1週間のログを分析します。")) return;
                         try {
-                            const res = await fetch(`${API_URL}/system/reflect`, {
-                                method: 'POST',
-                                headers: buildSystemHeaders(false),
-                            });
-                            if (!res.ok) throw new Error(`reflect failed: ${res.status}`);
+                            await apiClient.systemReflect();
                             alert("振り返りを開始しました。ログを確認してください。");
                         }
                         catch (e) { console.error(e); alert("失敗しました。"); }
@@ -205,6 +201,33 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                     <Sparkles className="w-6 h-6 text-yellow-400" />
                     <span className="hidden lg:block font-medium">進化 (Evolve)</span>
                 </button>
+            </div>
+
+            <div className="hidden lg:block w-full px-3 mt-2">
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                    <div className="text-[10px] text-gray-400 mb-1">Admin Token</div>
+                    <input
+                        type="password"
+                        value={systemTokenInput}
+                        onChange={(e) => setSystemTokenInput(e.target.value)}
+                        placeholder="X-System-Token"
+                        className="w-full rounded-md bg-black/40 border border-white/10 px-2 py-1 text-[11px] text-gray-200 placeholder:text-gray-500"
+                    />
+                    <div className="mt-2 flex gap-1">
+                        <button
+                            onClick={saveSystemToken}
+                            className="flex-1 rounded-md border border-sky-400/30 bg-sky-500/20 px-2 py-1 text-[10px] text-sky-100 hover:bg-sky-500/30 transition"
+                        >
+                            保存
+                        </button>
+                        <button
+                            onClick={clearSystemToken}
+                            className="flex-1 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[10px] text-gray-300 hover:bg-white/10 transition"
+                        >
+                            クリア
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <div className="mt-auto p-4 text-xs text-gray-600 hidden lg:block text-center">

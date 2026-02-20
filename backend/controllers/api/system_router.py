@@ -1,8 +1,10 @@
 import time
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
+from backend.core.auth import verify_system_token
+from backend.core.config import settings
 from backend.core.logger import logger
 from backend.services.public_status import read_public_status, update_public_status
 from backend.scripts.sleep_cycle import integrated_sleep_cycle
@@ -19,18 +21,18 @@ class VisionRequest(BaseModel):
     enabled: bool
 
 
-@router.post("/system/sleep")
+@router.post("/system/sleep", dependencies=[Depends(verify_system_token)])
 async def trigger_sleep_cycle(background_tasks: BackgroundTasks):
     """手動で睡眠サイクル（記憶整理）を発火させる"""
-    logger.info("💤 Manual Sleep Cycle Triggered via API")
+    logger.info("Manual Sleep Cycle Triggered via API")
     background_tasks.add_task(integrated_sleep_cycle)
     return {"status": "ok", "message": "Sleep cycle initiated."}
 
 
-@router.post("/system/reflect")
+@router.post("/system/reflect", dependencies=[Depends(verify_system_token)])
 async def trigger_reflection(background_tasks: BackgroundTasks):
     """手動で週次振り返り（Reflection）を発火させる"""
-    logger.info("🧬 Manual Reflection Triggered via API")
+    logger.info("Manual Reflection Triggered via API")
     engine = ChapterEngine()
     background_tasks.add_task(engine.reflect, days=7)
     return {"status": "ok", "message": "Reflection started."}
@@ -63,9 +65,9 @@ async def get_public_status():
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/system/vision")
+@router.post("/system/vision", dependencies=[Depends(verify_system_token)])
 async def set_vision_status(req: VisionRequest):
     update_public_status({"vision_enabled": req.enabled})
 
-    logger.info(f"👁️ Vision Status Changed: {req.enabled}")
+    logger.info(f"Vision Status Changed: {req.enabled}")
     return {"status": "success", "vision_enabled": req.enabled}

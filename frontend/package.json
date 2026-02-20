@@ -6,22 +6,27 @@
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
+    "test:message-normalization": "node tests/messageNormalization.test.cjs",
+    "test:hooks-utils": "node tests/hookUtils.test.cjs",
     "lint": "eslint",
     "lint:priority": "node scripts/priority-lint-report.mjs",
     "lint:priority:update": "node scripts/priority-lint-report.mjs --update-baseline"
   },
   "dependencies": {
+    "@naari3/pixi-live2d-display": "^1.2.5",
     "@pixiv/three-vrm": "^3.4.4",
     "@ricky0123/vad-web": "^0.0.30",
     "clsx": "^2.1.1",
     "framer-motion": "^12.23.26",
     "lucide-react": "^0.562.0",
     "next": "16.1.1",
+    "pixi.js": "^8.16.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "swr": "^2.4.0",
     "tailwind-merge": "^3.4.0",
-    "three": "^0.182.0"
+    "three": "^0.182.0",
+    "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

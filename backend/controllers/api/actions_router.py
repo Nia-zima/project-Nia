@@ -1,7 +1,7 @@
 from typing import Any, Dict, Optional, List
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import json
 import time
 
@@ -310,3 +310,90 @@ async def reject_phase5_action(action_id: str, req: Phase5ActionDecisionRequest)
     # phase5_review node is not part of the graph; persist via an existing node.
     await app_instance.aupdate_state(config, update, as_node="action_processing")
     return {"ok": True}
+
+
+# =============================================================================
+# Twitter (X) Tweet Proposals (from Reflection Engine)
+# =============================================================================
+
+class TweetApproveRequest(BaseModel):
+    tweet_text: str = Field(..., min_length=1, max_length=280)
+    thread_id: str = "default_thread"
+
+
+class ManualTweetRequest(BaseModel):
+    style: str = Field("casual", pattern=r"^(casual|diary)$")
+    context: str = Field("", max_length=1000)
+    thread_id: str = "default_thread"
+
+
+@router.get("/actions/tweet/pending")
+async def get_pending_tweet() -> Dict[str, Any]:
+    """Get pending tweet proposal (from autonomous reflection)."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT v FROM telemetry_kv WHERE k = 'pending_tweet_proposal'"
+        ).fetchone()
+        if not row or not row[0]:
+            return {"proposal": None}
+        try:
+            proposal = json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return {"proposal": None}
+        return {"proposal": proposal}
+    finally:
+        conn.close()
+
+
+@router.post("/actions/tweet/approve")
+async def approve_tweet(req: TweetApproveRequest) -> Dict[str, Any]:
+    """Approve and post a tweet proposal."""
+    from backend.services.twitter_client import twitter_client
+    result = await twitter_client.post_tweet(req.tweet_text)
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error or "Tweet failed")
+    # Clear proposal only on success
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM telemetry_kv WHERE k = 'pending_tweet_proposal'")
+    finally:
+        conn.close()
+    await telemetry.event(req.thread_id, "tweet_posted", {
+        "tweet_id": result.tweet_id,
+        "tweet_text": result.tweet_text,
+        "source": "autonomous_reflection",
+    })
+    return {"ok": True, "tweet_id": result.tweet_id}
+
+
+@router.post("/actions/tweet/reject")
+async def reject_tweet() -> Dict[str, Any]:
+    """Reject a tweet proposal."""
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM telemetry_kv WHERE k = 'pending_tweet_proposal'")
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@router.post("/actions/tweet/generate")
+async def generate_tweet_manual(req: ManualTweetRequest) -> Dict[str, Any]:
+    """Manually trigger tweet generation (returns proposal, does NOT post)."""
+    from backend.services.twitter_client import twitter_client
+    if not twitter_client.enabled:
+        raise HTTPException(status_code=503, detail="Twitter integration disabled")
+    tweet = await twitter_client.generate_tweet(
+        style=req.style, context=req.context, thread_id=req.thread_id,
+    )
+    if not tweet:
+        raise HTTPException(status_code=500, detail="Tweet generation failed")
+    return {"tweet_text": tweet, "char_count": len(tweet)}
+
+
+@router.get("/actions/tweet/history")
+async def get_tweet_history(limit: int = Query(20, ge=1, le=100)) -> Dict[str, Any]:
+    """Get recently posted tweets."""
+    from backend.services.twitter_client import twitter_client
+    return {"items": twitter_client.get_recent_tweets(limit)}

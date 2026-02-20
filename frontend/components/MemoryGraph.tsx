@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 import { Loader2, ZoomIn, ZoomOut, RefreshCw } from 'lucide-react';
 
 type MemoryCategory = 'memory' | 'policy' | 'identity' | 'public' | 'decision' | 'other';
@@ -59,6 +59,113 @@ const categoryKeywords: Array<{ category: MemoryCategory; words: string[] }> = [
 ];
 const SIMULATION_DURATION_MS = 4500;
 
+// ── Barnes-Hut Quad-tree for O(n log n) repulsion ──
+
+interface QuadBody { x: number; y: number; mass: number }
+
+interface QuadNode {
+    x: number; y: number;          // center of mass
+    mass: number;
+    size: number;                   // side length of this cell
+    cx: number; cy: number;         // cell center
+    body: QuadBody | null;          // leaf body (null for internal)
+    nw: QuadNode | null;
+    ne: QuadNode | null;
+    sw: QuadNode | null;
+    se: QuadNode | null;
+}
+
+function createQuadNode(cx: number, cy: number, size: number): QuadNode {
+    return { x: 0, y: 0, mass: 0, size, cx, cy, body: null, nw: null, ne: null, sw: null, se: null };
+}
+
+const MAX_QUAD_DEPTH = 20;
+
+function insertBody(node: QuadNode, body: QuadBody, depth: number = 0): void {
+    if (node.mass === 0) {
+        // Empty leaf — place body here
+        node.body = body;
+        node.x = body.x;
+        node.y = body.y;
+        node.mass = body.mass;
+        return;
+    }
+
+    // 深さ上限: 同一座標のノードが無限再帰するのを防止
+    if (depth >= MAX_QUAD_DEPTH) {
+        const totalMass = node.mass + body.mass;
+        node.x = (node.x * node.mass + body.x * body.mass) / totalMass;
+        node.y = (node.y * node.mass + body.y * body.mass) / totalMass;
+        node.mass = totalMass;
+        return;
+    }
+
+    // If this is a leaf with one body, subdivide
+    if (node.body !== null) {
+        subdivide(node);
+        const old = node.body;
+        node.body = null;
+        insertIntoChild(node, old, depth);
+    }
+
+    // Insert new body into correct child
+    insertIntoChild(node, body, depth);
+
+    // Update center of mass
+    const totalMass = node.mass + body.mass;
+    node.x = (node.x * node.mass + body.x * body.mass) / totalMass;
+    node.y = (node.y * node.mass + body.y * body.mass) / totalMass;
+    node.mass = totalMass;
+}
+
+function subdivide(node: QuadNode): void {
+    const hs = node.size / 2;
+    const qs = node.size / 4;
+    node.nw = createQuadNode(node.cx - qs, node.cy - qs, hs);
+    node.ne = createQuadNode(node.cx + qs, node.cy - qs, hs);
+    node.sw = createQuadNode(node.cx - qs, node.cy + qs, hs);
+    node.se = createQuadNode(node.cx + qs, node.cy + qs, hs);
+}
+
+function insertIntoChild(node: QuadNode, body: QuadBody, depth: number = 0): void {
+    const west = body.x < node.cx;
+    const north = body.y < node.cy;
+    const child = north ? (west ? node.nw! : node.ne!) : (west ? node.sw! : node.se!);
+    insertBody(child, body, depth + 1);
+}
+
+const THETA = 0.8; // Barnes-Hut opening angle
+
+function computeRepulsion(
+    node: QuadNode,
+    body: QuadBody,
+    k: number,
+    outFx: { v: number },
+    outFy: { v: number },
+): void {
+    if (node.mass === 0) return;
+    const dx = body.x - node.x;
+    const dy = body.y - node.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    // If leaf with single body and it's the same body, skip
+    if (node.body !== null && dx === 0 && dy === 0) return;
+
+    // Barnes-Hut: if cell is far enough, treat as single body
+    if (node.body !== null || node.size / dist < THETA) {
+        const force = (k * k * node.mass) / dist;
+        outFx.v += (dx / dist) * force * 0.01;
+        outFy.v += (dy / dist) * force * 0.01;
+        return;
+    }
+
+    // Otherwise recurse into children
+    if (node.nw) computeRepulsion(node.nw, body, k, outFx, outFy);
+    if (node.ne) computeRepulsion(node.ne, body, k, outFx, outFy);
+    if (node.sw) computeRepulsion(node.sw, body, k, outFx, outFy);
+    if (node.se) computeRepulsion(node.se, body, k, outFx, outFy);
+}
+
 function inferCategory(node: GraphNode): MemoryCategory {
     const text = `${node.source || ''} ${node.full_text || ''}`.toLowerCase();
     for (const rule of categoryKeywords) {
@@ -85,9 +192,8 @@ export default function MemoryGraph() {
     const fetchData = async () => {
         setLoading(true);
         try {
-            const res = await fetch(`${API_URL}/stats/memory_graph?threshold=${threshold}&limit=100`);
-            if (res.ok) {
-                const graphData = await res.json();
+            const graphData = await apiClient.fetchMemoryGraph(threshold, 100) as unknown as GraphData;
+            {
                 const degreeMap: Record<string, number> = {};
                 (graphData.edges || []).forEach((edge: GraphEdge) => {
                     degreeMap[edge.source] = (degreeMap[edge.source] || 0) + 1;
@@ -163,35 +269,41 @@ export default function MemoryGraph() {
         let animationId: number;
         const startedAt = performance.now();
 
+        // Pre-build node lookup map for O(1) edge resolution
+        const nodeMap = new Map<string, GraphNode>();
+        nodes.forEach(n => nodeMap.set(n.id, n));
+
         const simulate = () => {
-            // Force simulation
             const k = 50; // Ideal spring length
             const gravity = 0.1;
             const centerX = canvas.width / 2;
             const centerY = canvas.height / 2;
 
+            // Build Quad-tree for Barnes-Hut repulsion (O(n log n))
+            const treeSize = Math.max(canvas.width, canvas.height) * 2;
+            const root = createQuadNode(centerX, centerY, treeSize);
+            nodes.forEach(node => {
+                insertBody(root, { x: node.x!, y: node.y!, mass: 1 });
+            });
+
             // Apply forces
-            nodes.forEach((node, i) => {
+            nodes.forEach((node) => {
                 // Center gravity
                 node.vx! += (centerX - node.x!) * gravity * 0.01;
                 node.vy! += (centerY - node.y!) * gravity * 0.01;
 
-                // Repulsion between all nodes
-                nodes.forEach((other, j) => {
-                    if (i === j) return;
-                    const dx = node.x! - other.x!;
-                    const dy = node.y! - other.y!;
-                    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                    const force = (k * k) / dist;
-                    node.vx! += (dx / dist) * force * 0.01;
-                    node.vy! += (dy / dist) * force * 0.01;
-                });
+                // Repulsion via Quad-tree (Barnes-Hut)
+                const fx = { v: 0 };
+                const fy = { v: 0 };
+                computeRepulsion(root, { x: node.x!, y: node.y!, mass: 1 }, k, fx, fy);
+                node.vx! += fx.v;
+                node.vy! += fy.v;
             });
 
-            // Attraction along edges
+            // Attraction along edges (O(E))
             edges.forEach(edge => {
-                const source = nodes.find(n => n.id === edge.source);
-                const target = nodes.find(n => n.id === edge.target);
+                const source = nodeMap.get(edge.source);
+                const target = nodeMap.get(edge.target);
                 if (!source || !target) return;
 
                 const dx = target.x! - source.x!;
@@ -211,7 +323,6 @@ export default function MemoryGraph() {
                 node.vy! *= 0.9;
                 node.x! += node.vx!;
                 node.y! += node.vy!;
-                // Boundary
                 node.x = Math.max(50, Math.min(canvas.width - 50, node.x!));
                 node.y = Math.max(50, Math.min(canvas.height - 50, node.y!));
             });
@@ -223,8 +334,8 @@ export default function MemoryGraph() {
 
             // Draw edges
             edges.forEach(edge => {
-                const source = nodes.find(n => n.id === edge.source);
-                const target = nodes.find(n => n.id === edge.target);
+                const source = nodeMap.get(edge.source);
+                const target = nodeMap.get(edge.target);
                 if (!source || !target) return;
 
                 ctx.beginPath();

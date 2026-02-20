@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User, Save, Plus, X, Hash, PenTool } from 'lucide-react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 
 interface UserProfile {
     user_name: string;
@@ -29,8 +29,7 @@ export default function ProfileEditor() {
 
     const fetchProfile = async () => {
         try {
-            const res = await fetch(`${API_URL}/profile`);
-            const data = await res.json();
+            const data = await apiClient.fetchProfile() as unknown as UserProfile;
             setProfile(data);
         } catch (e) {
             console.error("Failed to fetch profile", e);
@@ -42,11 +41,7 @@ export default function ProfileEditor() {
     const handleSave = async () => {
         setIsSaving(true);
         try {
-            await fetch(`${API_URL}/profile`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(profile)
-            });
+            await apiClient.updateProfile(profile as unknown as Record<string, unknown>);
             // Show success feedback (simple alert for now, toast ideal)
             alert("保存しました！");
         } catch (e) {

@@ -1,49 +1,49 @@
 "use client";
 import React, { useEffect, useState } from 'react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 import { Clock, Database, Brain } from 'lucide-react';
+
+interface MemoryDetails {
+    raw_text?: string;
+    state_tag?: string;
+    retention?: number;
+    stage?: string;
+    stream_id?: string;
+    message_id?: string;
+    origin_message_id?: string;
+    refs?: string[];
+    tags?: string[];
+}
 
 interface Memory {
     id: string;
     summary: string;
-    details: {
-        raw_text?: string;
-        state_tag?: string;
-        retention?: number;
-        stage?: string;
-        stream_id?: string;
-        message_id?: string;
-        origin_message_id?: string;
-        refs?: any;
-        tags?: any;
-    };
+    details: MemoryDetails;
     timestamp: string;
     thread_id: string;
 }
 
-interface LongTermMemory {
+interface SemanticMemory {
     id: string;
     summary: string;
     details: string;
     category: string;
     created_at: string;
-    metadata: any;
+    metadata: {
+        status?: string;
+        confidence?: number;
+        state_tag?: string;
+        note?: string;
+        seed_retention?: number;
+        thread_id?: string;
+        [key: string]: unknown;
+    };
 }
 
 interface PendingMemory {
     id: string;
     summary: string;
-    details: {
-        raw_text?: string;
-        state_tag?: string;
-        retention?: number;
-        stage?: string;
-        stream_id?: string;
-        message_id?: string;
-        origin_message_id?: string;
-        refs?: any;
-        tags?: any;
-    };
+    details: MemoryDetails;
     timestamp: string;
     thread_id: string;
     status?: string;
@@ -71,58 +71,65 @@ export default function MemoryExplorer() {
 
     const stageLabel = (stage?: string) => {
         switch ((stage || "").toLowerCase()) {
+            case "episode":
+                return "エピソード";
+            case "thought":
+                return "思考";
+            case "state":
+                return "状態";
             case "capture":
                 return "記憶（確定）";
             case "background":
                 return "記憶（保留）";
-            case "shadow":
-                return "未確定記憶";
-            case "long_term":
-                return "長期記憶";
             default:
                 return stage || "不明";
         }
     };
 
+    const semanticStatusLabel = (status?: string) => {
+        switch ((status || "").toLowerCase()) {
+            case "confirmed":
+                return "確定";
+            case "inferred":
+                return "推定";
+            case "revoked":
+                return "取消";
+            default:
+                return status || "不明";
+        }
+    };
+
     // Approved State
     const [memories, setMemories] = useState<Memory[]>([]);
-    const [longTermMemories, setLongTermMemories] = useState<LongTermMemory[]>([]);
+    const [semanticMemories, setSemanticMemories] = useState<SemanticMemory[]>([]);
 
     // Pending State
     const [pendingItems, setPendingItems] = useState<PendingMemory[]>([]);
     const [loading, setLoading] = useState(false);
 
     const deleteApproved = async (id: string) => {
-        const ok = confirm("この確定記憶を削除しますか？");
-        if (!ok) return;
+        const confirmed = confirm("この確定記憶を削除しますか？");
+        if (!confirmed) return;
         try {
-            const res = await fetch(`${API_URL}/memory/captures/${id}?thread_id=default_thread`, {
-                method: "DELETE",
-            });
-            if (res.ok || res.status === 404) {
+            const success = await apiClient.deleteCapture(id);
+            if (success) {
                 setMemories(prev => prev.filter(item => String(item.id) !== String(id)));
-            } else {
-                console.error("Delete approved failed status:", res.status);
             }
         } catch (e) {
-            console.error("Failed to delete long_term", e);
+            console.error("Failed to delete capture", e);
         }
     };
 
-    const deleteLongTerm = async (id: string) => {
-        const ok = confirm("この長期記憶を削除しますか？");
-        if (!ok) return;
+    const deleteSemantic = async (id: string) => {
+        const confirmed = confirm("このセマンティック記憶を削除しますか？");
+        if (!confirmed) return;
         try {
-            const res = await fetch(`${API_URL}/memory/long_term/${id}?thread_id=default_thread`, {
-                method: "DELETE",
-            });
-            if (res.ok || res.status === 404) {
-                setLongTermMemories(prev => prev.filter(item => String(item.id) !== String(id)));
-            } else {
-                console.error("Delete long_term failed status:", res.status);
+            const success = await apiClient.deleteLongTerm(id);
+            if (success) {
+                setSemanticMemories(prev => prev.filter(item => String(item.id) !== String(id)));
             }
         } catch (e) {
-            console.error("Failed to delete long_term", e);
+            console.error("Failed to delete semantic memory", e);
         }
     };
 
@@ -130,18 +137,8 @@ export default function MemoryExplorer() {
         const ok = confirm("この保留記憶を削除しますか？");
         if (!ok) return;
         try {
-            const res = await fetch(`${API_URL}/actions/${id}/reject`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ reason: "ui_delete" }),
-            });
-            if (res.ok || res.status === 404) {
-                setPendingItems(prev => prev.filter(item => item.id !== id));
-            } else {
-                console.error("Reject failed status:", res.status);
-            }
+            await apiClient.postAction(id, "reject", "ui_delete");
+            setPendingItems(prev => prev.filter(item => item.id !== id));
         } catch (e) {
             console.error("Failed to reject pending action", e);
         }
@@ -151,18 +148,8 @@ export default function MemoryExplorer() {
         const ok = confirm("この保留記憶を了承しますか？");
         if (!ok) return;
         try {
-            const res = await fetch(`${API_URL}/actions/${id}/approve`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ reason: "ui_approve" }),
-            });
-            if (res.ok) {
-                setPendingItems(prev => prev.filter(item => item.id !== id));
-            } else {
-                console.error("Approve failed status:", res.status);
-            }
+            await apiClient.postAction(id, "approve", "ui_approve");
+            setPendingItems(prev => prev.filter(item => item.id !== id));
         } catch (e) {
             console.error("Failed to approve pending action", e);
         }
@@ -174,11 +161,8 @@ export default function MemoryExplorer() {
         // Fetch Approved (episodic captures)
         if (activeTab === 'approved') {
             try {
-                const res = await fetch(`${API_URL}/memory/captures?limit=50&thread_id=default_thread&stage=capture`);
-                if (res.ok) {
-                    const items = await res.json();
-                    setMemories(items || []);
-                }
+                const items = await apiClient.fetchCaptures();
+                setMemories((items as unknown as Memory[]) || []);
             } catch (e) {
                 console.error("Failed to fetch memories", e);
             }
@@ -186,58 +170,47 @@ export default function MemoryExplorer() {
 
         if (activeTab === 'long_term') {
             try {
-                const res = await fetch(`${API_URL}/memory/long_term?limit=50&thread_id=default_thread`);
-                if (res.ok) {
-                    const items = await res.json();
-                    setLongTermMemories(items || []);
-                }
+                const items = await apiClient.fetchLongTerm();
+                setSemanticMemories((items as unknown as SemanticMemory[]) || []);
             } catch (e) {
-                console.error("Failed to fetch long_term memories", e);
+                console.error("Failed to fetch semantic memories", e);
             }
         }
 
         // Fetch Pending (Phase3 pending_actions)
         if (activeTab === 'pending') {
             try {
-                const res = await fetch(`${API_URL}/actions/pending?limit=50&thread_id=default_thread`);
-                if (res.ok) {
-                    const payload = await res.json();
-                    const rawItems = Array.isArray(payload?.items) ? payload.items : [];
-                    const mapped = rawItems.map((item: any) => {
-                        let parsed: any = {};
-                        try {
-                            parsed = item?.payload_json ? JSON.parse(item.payload_json) : {};
-                        } catch {
-                            parsed = {};
-                        }
-                        const rawText = String(parsed?.raw_text ?? "");
-                        const summary = rawText ? rawText.trim().split("\n")[0].slice(0, 120) : "(no text)";
-                        const createdAt = item?.created_at ? Number(item.created_at) : 0;
-                        const tsIso = createdAt ? new Date(createdAt * 1000).toISOString() : "";
-                        return {
-                            id: String(item?.id ?? ""),
-                            timestamp: tsIso,
-                            thread_id: String(item?.thread_id ?? ""),
-                            summary,
-                            details: {
-                                raw_text: rawText,
-                                state_tag: parsed?.state_tag,
-                                retention: parsed?.retention,
-                                stage: parsed?.stage,
-                                stream_id: parsed?.stream_id,
-                                message_id: parsed?.message_id,
-                                origin_message_id: parsed?.origin_message_id,
-                                refs: parsed?.refs,
-                                tags: parsed?.tags,
-                            },
-                            status: item?.status ? String(item.status) : undefined,
-                            reason: item?.reason ? String(item.reason) : undefined,
-                        };
-                    });
-                    setPendingItems(mapped);
-                } else {
-                    console.error("Pending fetch failed status:", res.status);
-                }
+                const payload = await apiClient.fetchPendingActions("default_thread");
+                const rawItems = Array.isArray(payload?.items) ? payload.items : [];
+                const mapped = rawItems.map((item: Record<string, unknown>) => {
+                    const parsed: Record<string, unknown> = item?.payload_json
+                        ? (() => { try { return JSON.parse(String(item.payload_json)); } catch { return {}; } })()
+                        : {};
+                    const rawText = String(parsed?.raw_text ?? "");
+                    const summary = rawText ? rawText.trim().split("\n")[0].slice(0, 120) : "(no text)";
+                    const createdAt = item?.created_at ? Number(item.created_at) : 0;
+                    const tsIso = createdAt ? new Date(createdAt * 1000).toISOString() : "";
+                    return {
+                        id: String(item?.id ?? ""),
+                        timestamp: tsIso,
+                        thread_id: String(item?.thread_id ?? ""),
+                        summary,
+                        details: {
+                            raw_text: rawText,
+                            state_tag: parsed?.state_tag as string | undefined,
+                            retention: parsed?.retention as number | undefined,
+                            stage: parsed?.stage as string | undefined,
+                            stream_id: parsed?.stream_id as string | undefined,
+                            message_id: parsed?.message_id as string | undefined,
+                            origin_message_id: parsed?.origin_message_id as string | undefined,
+                            refs: parsed?.refs as string[] | undefined,
+                            tags: parsed?.tags as string[] | undefined,
+                        },
+                        status: item?.status ? String(item.status) : undefined,
+                        reason: item?.reason ? String(item.reason) : undefined,
+                    };
+                });
+                setPendingItems(mapped);
             } catch (e) {
                 console.error("Failed to fetch pending_memories", e);
             }
@@ -250,7 +223,7 @@ export default function MemoryExplorer() {
         fetchData();
     }, [activeTab]);
 
-    if (loading && memories.length === 0 && pendingItems.length === 0) {
+    if (loading && memories.length === 0 && pendingItems.length === 0 && semanticMemories.length === 0) {
         return <div className="p-8 text-gray-400 animate-pulse font-mono">データ取得中...</div>;
     }
 
@@ -275,10 +248,10 @@ export default function MemoryExplorer() {
                                 承認待ち <span className="ml-1 text-cyan-200">{pendingItems.length}</span>
                             </div>
                             <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-2">
-                                記憶（確定） <span className="ml-1 text-emerald-200">{memories.length}</span>
+                                エピソード <span className="ml-1 text-emerald-200">{memories.length}</span>
                             </div>
                             <div className="rounded-2xl border border-sky-400/20 bg-sky-500/10 px-3 py-2">
-                                長期記憶 <span className="ml-1 text-sky-200">{longTermMemories.length}</span>
+                                セマンティック <span className="ml-1 text-sky-200">{semanticMemories.length}</span>
                             </div>
                         </div>
                     </div>
@@ -311,7 +284,7 @@ export default function MemoryExplorer() {
                     >
                         <div className="flex items-center justify-center gap-2">
                             <Database size={16} />
-                            記憶（確定）
+                            エピソード
                         </div>
                     </button>
                     <button
@@ -322,8 +295,8 @@ export default function MemoryExplorer() {
                             }`}
                     >
                         <div className="flex items-center justify-center gap-2">
-                            <Database size={16} />
-                            長期記憶
+                            <Brain size={16} />
+                            セマンティック
                         </div>
                     </button>
                 </div>
@@ -457,10 +430,10 @@ export default function MemoryExplorer() {
 
             {activeTab === 'long_term' && (
                 <div className="grid gap-4">
-                    {longTermMemories.length === 0 && (
-                        <div className="text-slate-400 italic">まだ長期記憶が記録されていません。</div>
+                    {semanticMemories.length === 0 && (
+                        <div className="text-slate-400 italic">まだセマンティック記憶が記録されていません。</div>
                     )}
-                    {longTermMemories.map((m, index) => (
+                    {semanticMemories.map((m, index) => (
                         <div
                             key={m.id}
                             className="relative overflow-hidden rounded-2xl border border-white/10 bg-[rgba(16,20,26,0.92)] p-5 transition-all duration-300 hover:border-sky-400/30 animate-rise"
@@ -471,16 +444,34 @@ export default function MemoryExplorer() {
                                     {m.created_at ? new Date(m.created_at).toLocaleString() : "--"}
                                 </span>
                                 <div className="flex items-center gap-2">
-                                    <span className="text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] bg-sky-500/20 text-sky-200 border border-sky-400/30">
-                                        長期記憶
+                                    <span className={`text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] border ${
+                                        m.metadata?.status === 'confirmed'
+                                            ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/30'
+                                            : 'bg-sky-500/20 text-sky-200 border-sky-400/30'
+                                    }`}>
+                                        {semanticStatusLabel(m.metadata?.status)}
                                     </span>
-                                    {m.metadata?.state_tag && (
-                                        <span className="text-[10px] px-2 py-1 rounded-md font-medium uppercase tracking-[0.2em] bg-slate-600/40 text-slate-300 border border-white/10">
-                                            {m.metadata.state_tag}
+                                    {typeof m.metadata?.confidence === "number" && (
+                                        <span className="text-[10px] font-mono bg-white/10 px-2 py-1 rounded text-slate-300">
+                                            conf: {Math.round(m.metadata.confidence * 100)}%
                                         </span>
                                     )}
+                                    {typeof m.metadata?.state_tag === "string" && (() => {
+                                        const tag = m.metadata.state_tag as string;
+                                        const catMap: Record<string, { label: string; cls: string }> = {
+                                            origin: { label: "Origin", cls: "bg-violet-500/20 text-violet-200 border-violet-400/30" },
+                                            nia:    { label: "Nia",    cls: "bg-pink-500/20 text-pink-200 border-pink-400/30" },
+                                            shared: { label: "共有",   cls: "bg-amber-500/20 text-amber-200 border-amber-400/30" },
+                                        };
+                                        const info = catMap[tag] || { label: tag, cls: "bg-slate-600/40 text-slate-300 border-white/10" };
+                                        return (
+                                            <span className={`text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] border ${info.cls}`}>
+                                                {info.label}
+                                            </span>
+                                        );
+                                    })()}
                                     <button
-                                        onClick={() => deleteLongTerm(String(m.id))}
+                                        onClick={() => deleteSemantic(String(m.id))}
                                         className="text-[10px] px-2 py-1 rounded-md font-medium uppercase tracking-[0.2em] bg-rose-500/20 text-rose-200 border border-rose-400/30 hover:bg-rose-500/30 transition"
                                     >
                                         削除

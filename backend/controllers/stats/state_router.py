@@ -42,6 +42,13 @@ def get_internal_state():
     return state
 
 
+@router.get("/checkpointer")
+async def get_checkpointer_stats():
+    """Checkpointer DB の統計情報を返す。"""
+    from backend.services.memory_manager import memory_manager
+    return await memory_manager.get_checkpointer_stats()
+
+
 @router.get("/inner_monologue")
 def get_inner_monologue(limit: int = 50):
     """

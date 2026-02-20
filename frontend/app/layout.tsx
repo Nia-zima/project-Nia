@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import "./globals.css";
 import ServiceWorkerRegistration from "@/components/ServiceWorkerRegistration";
 
@@ -29,6 +30,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <Script src="/live2d/live2dcubismcore.min.js" strategy="beforeInteractive" />
+      </head>
       <body className="antialiased">
         <ServiceWorkerRegistration />
         {children}

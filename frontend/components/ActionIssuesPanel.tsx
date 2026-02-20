@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { API_URL } from "@/lib/api";
+import { apiClient } from "@/lib/apiClient";
 
 type LegacyPendingIssue = {
   id?: string;
@@ -42,13 +42,8 @@ export default function ActionIssuesPanel({ threadId = "default_thread" }: Actio
     setError(null);
     try {
       const statusParam = showArchived ? "ERROR,REJECTED,ARCHIVED" : "ERROR,REJECTED";
-      const res = await fetch(
-        `${API_URL}/actions/pending?thread_id=${encodeURIComponent(threadId)}&status=${statusParam}&limit=100`,
-        { cache: "no-store" }
-      );
-      if (!res.ok) throw new Error(`issues fetch failed: ${res.status}`);
-      const data = await res.json();
-      setItems(Array.isArray(data?.items) ? data.items : []);
+      const data = await apiClient.fetchActionIssues(threadId, statusParam, 100);
+      setItems(Array.isArray(data?.items) ? data.items as LegacyPendingIssue[] : []);
     } catch (e) {
       console.error(e);
       setError("失敗/却下の取得に失敗しました");
@@ -67,14 +62,7 @@ export default function ActionIssuesPanel({ threadId = "default_thread" }: Actio
     if (!ok) return;
     setPendingDeleteId(id);
     try {
-      const res = await fetch(`${API_URL}/actions/${encodeURIComponent(id)}/archive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: "ui_delete" }),
-      });
-      if (!res.ok && res.status !== 404) {
-        throw new Error(`delete failed: ${res.status}`);
-      }
+      await apiClient.archiveAction(id);
       setItems((prev) => prev.filter((item) => item.id !== id));
     } catch (e) {
       console.error(e);

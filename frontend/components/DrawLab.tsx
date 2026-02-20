@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { API_URL } from "@/lib/api";
+import { apiClient } from "@/lib/apiClient";
 
 type DrawCommand =
   | { cmd: "fill"; color: string }
@@ -88,19 +88,14 @@ export default function DrawLab() {
       stopLoopTimers();
       setRunning(false);
       try {
-        await fetch(`${API_URL}/draw/session/stop`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, emergency }),
-        });
+        if (sessionId) await apiClient.drawSessionStop(sessionId, emergency);
       } catch (_e) {
         // noop
       }
-      const res = await fetch(`${API_URL}/draw/session/state`, { cache: "no-store" });
-      if (res.ok) {
-        const st = await res.json();
-        setStatus(st);
-      }
+      try {
+        const st = await apiClient.drawSessionState();
+        setStatus(st as SessionState);
+      } catch { /* ignore */ }
     },
     [sessionId, stopLoopTimers]
   );
@@ -111,11 +106,7 @@ export default function DrawLab() {
     if (!canvas) return;
     try {
       const imageData = canvas.toDataURL("image/jpeg", 0.55);
-      await fetch(`${API_URL}/draw/observe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, image_data: imageData }),
-      });
+      await apiClient.drawObserve(sessionId, imageData);
     } catch (_e) {
       // noop
     }
@@ -124,12 +115,7 @@ export default function DrawLab() {
   const pollCommands = useCallback(async () => {
     if (!sessionId) return;
     try {
-      const res = await fetch(
-        `${API_URL}/draw/commands?session_id=${encodeURIComponent(sessionId)}&since_seq=${sinceSeq}&limit=100`,
-        { cache: "no-store" }
-      );
-      if (!res.ok) return;
-      const payload = await res.json();
+      const payload = await apiClient.drawCommands(sessionId, sinceSeq, 100) as Record<string, any>;
       const items = Array.isArray(payload.items) ? payload.items : [];
       for (const item of items) {
         applyCommand((item?.command || {}) as DrawCommand);
@@ -141,9 +127,9 @@ export default function DrawLab() {
         ...prev,
         active: Boolean(payload.active),
         stop_reason: payload.stop_reason || null,
-        planned_count: payload.planned_count,
-        sent_count: payload.sent_count,
-        rejected_count: payload.rejected_count,
+        planned_count: payload.planned_count as number | undefined,
+        sent_count: payload.sent_count as number | undefined,
+        rejected_count: payload.rejected_count as number | undefined,
       }));
       if (payload.active === false) {
         stopLoopTimers();
@@ -160,20 +146,14 @@ export default function DrawLab() {
     setSinceSeq(0);
     clearCanvas();
     try {
-      const res = await fetch(`${API_URL}/draw/session/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          width: CANVAS_W,
-          height: CANVAS_H,
-          interval_sec: 1.2,
-          max_strokes: 48,
-          timeout_sec: 180,
-        }),
-      });
-      if (!res.ok) throw new Error(`start failed: ${res.status}`);
-      const state = (await res.json()) as SessionState;
+      const state = (await apiClient.drawSessionStart({
+        prompt,
+        width: CANVAS_W,
+        height: CANVAS_H,
+        interval_sec: 1.2,
+        max_strokes: 48,
+        timeout_sec: 180,
+      })) as SessionState;
       const sid = state.session_id ? String(state.session_id) : null;
       if (!sid) throw new Error("session_id missing");
       setSessionId(sid);

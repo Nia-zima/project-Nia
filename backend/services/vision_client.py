@@ -13,6 +13,7 @@ import httpx
 from PIL import Image, ImageOps
 
 from backend.core.config import settings
+from backend.services.public_status import read_public_status
 
 logger = logging.getLogger("AI_Buddy")
 
@@ -105,6 +106,7 @@ async def analyze_image(
     *,
     timeout_sec: float = VISION_TIMEOUT,
     num_ctx: int = VISION_NUM_CTX,
+    provider: Optional[str] = None,
 ) -> str:
     """
     Returns: Visionの説明テキスト（失敗時は短いフォールバック文）
@@ -132,10 +134,15 @@ async def analyze_image(
 
     resized_b64 = _b64encode_ascii(jpeg_bytes)
 
-    
-    provider = getattr(settings, "VISION_PROVIDER", "ollama").lower()
-    
-    if provider in ("openai", "lmstudio"):
+    effective_provider = (provider or getattr(settings, "VISION_PROVIDER", "ollama")).lower()
+
+    if effective_provider == "gemini":
+        return await analyze_image_gemini(
+            resized_b64,
+            prompt=prompt,
+            timeout_sec=timeout_sec,
+        )
+    elif effective_provider in ("openai", "lmstudio"):
         return await analyze_image_openai(
             resized_b64,
             prompt=prompt,
@@ -143,7 +150,6 @@ async def analyze_image(
         )
 
     # --- Default: Ollama ---
-    # 4) Ollamaへ
     payload: Dict[str, Any] = {
         "model": VISION_MODEL,
         "prompt": prompt,
@@ -156,6 +162,30 @@ async def analyze_image(
     }
 
     url = f"{OLLAMA_URL}/api/generate"
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.TimeoutException:
+        logger.warning("[VISION] Ollama timeout (%.1fs)", timeout_sec)
+        return "[画像の解析がタイムアウトしました。画像を軽くするか、もう一度試してください]"
+    except httpx.HTTPStatusError as e:
+        logger.error("[VISION] Ollama HTTP error: %s | body=%s", e, getattr(e.response, "text", ""))
+        return "[画像の解析に失敗しました（Vision APIエラー）]"
+    except Exception as e:
+        logger.exception("[VISION] Ollama unexpected error: %s", e)
+        return "[画像の解析に失敗しました（不明なエラー）]"
+
+    resp = (data.get("response") or "").strip()
+    dt = time.time() - t0
+    logger.info("[VISION] Ollama OK (%.2fs). response_len=%d", dt, len(resp))
+
+    if not resp:
+        return "[画像は受け取りましたが、内容の説明を生成できませんでした]"
+    return resp
+
 
 async def analyze_image_openai(
     base64_image: str,
@@ -220,28 +250,65 @@ async def analyze_image_openai(
         logger.exception("[VISION] OpenAI/LMStudio Error: %s", e)
         return "[画像の解析に失敗しました]"
 
+
+async def analyze_image_gemini(
+    base64_image: str,
+    prompt: str,
+    timeout_sec: float,
+) -> str:
+    """Google Gemini API 用"""
+    api_key = getattr(settings, "GOOGLE_API_KEY", "")
+    if not api_key:
+        logger.warning("[VISION] GOOGLE_API_KEY is not set")
+        return "[Gemini APIキーが設定されていません]"
+
+    model = getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash-lite")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+        f":generateContent?key={api_key}"
+    )
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}},
+            ]
+        }],
+        "generationConfig": {
+            "temperature": VISION_TEMPERATURE,
+            "maxOutputTokens": 500,
+        },
+    }
+
+    t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             r = await client.post(url, json=payload)
             r.raise_for_status()
             data = r.json()
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return "[Gemini: 応答が空でした]"
+
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
+        text = parts[0].get("text", "").strip() if parts else ""
+
+        dt = time.time() - t0
+        logger.info("[VISION] Gemini OK (%.2fs). response_len=%d", dt, len(text))
+        return text or "[Gemini: 説明を生成できませんでした]"
+
     except httpx.TimeoutException:
-        logger.warning("[VISION] Timeout while analyzing image (%.1fs)", timeout_sec)
-        return "[画像の解析がタイムアウトしました。画像を軽くするか、もう一度試してください]"
+        logger.warning("[VISION] Gemini Timeout (%.1fs)", timeout_sec)
+        return "[Gemini: 画像の解析がタイムアウトしました]"
     except httpx.HTTPStatusError as e:
-        logger.error("[VISION] HTTP error: %s | body=%s", e, getattr(e.response, "text", ""))
-        return "[画像の解析に失敗しました（Vision APIエラー）]"
+        logger.error("[VISION] Gemini HTTP error: %s", e)
+        return "[Gemini: APIエラーが発生しました]"
     except Exception as e:
-        logger.exception("[VISION] Unexpected error: %s", e)
-        return "[画像の解析に失敗しました（不明なエラー）]"
-
-    resp = (data.get("response") or "").strip()
-    dt = time.time() - t0
-    logger.info("[VISION] OK (%.2fs). response_len=%d", dt, len(resp))
-
-    if not resp:
-        return "[画像は受け取りましたが、内容の説明を生成できませんでした]"
-    return resp
+        logger.exception("[VISION] Gemini unexpected error: %s", e)
+        return "[Gemini: 画像の解析に失敗しました]"
 
 
 # ===== Helper for agent.py =====
@@ -254,6 +321,11 @@ async def build_user_input_with_image(user_text: str, image_data: Optional[str])
     
     if not image_data:
         return text
-    
+
+    status = read_public_status(default={})
+    if not bool(status.get("vision_enabled", False)):
+        logger.info("[VISION] Skipped image analysis because vision_enabled is false")
+        return text
+
     vision_text = await analyze_image(image_data)
     return f"{text}\n\n[画像の説明]\n{vision_text}"

@@ -213,8 +213,7 @@ async def get_diagnostics(thread_id: str = "live_stream") -> DiagnosticsResponse
         from backend.core.agent_graph.graph import workflow
         from backend.services.memory_manager import memory_manager
 
-        checkpointer = memory_manager.get_async_checkpointer()
-        if checkpointer:
+        async with memory_manager.get_async_checkpointer_conn() as checkpointer:
             app_instance = workflow.compile(checkpointer=checkpointer)
             config = {"configurable": {"thread_id": thread_id}}
             state = await app_instance.aget_state(config)

@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useMemo, useState } from 'react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 import {
     MessageSquare,
     Brain,
@@ -38,22 +38,32 @@ interface InternalState {
     mood: string;
 }
 
+interface CheckpointerStats {
+    size_mb: number;
+    threads: number;
+    checkpoints: number;
+    retention_days: number;
+}
+
 export default function StatsPanel() {
     const [stats, setStats] = useState<Stats | null>(null);
     const [internalState, setInternalState] = useState<InternalState | null>(null);
+    const [cpStats, setCpStats] = useState<CheckpointerStats | null>(null);
     const [loading, setLoading] = useState(true);
     const [view, setView] = useState<'stats' | 'graph' | 'timeline' | 'monologue' | 'observation'>('stats');
 
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const [statsRes, stateRes] = await Promise.all([
-                    fetch(`${API_URL}/stats/summary`),
-                    fetch(`${API_URL}/stats/internal_state`)
+                const [statsData, stateData, cpData] = await Promise.all([
+                    apiClient.fetchStatsSummary().catch(() => null),
+                    apiClient.fetchInternalState().catch(() => null),
+                    apiClient.fetchCheckpointerStats().catch(() => null),
                 ]);
 
-                if (statsRes.ok) setStats(await statsRes.json());
-                if (stateRes.ok) setInternalState(await stateRes.json());
+                if (statsData) setStats(statsData as unknown as Stats);
+                if (stateData) setInternalState(stateData as unknown as InternalState);
+                if (cpData) setCpStats(cpData);
             } catch (e) {
                 console.error('Failed to fetch stats:', e);
             }
@@ -282,6 +292,9 @@ export default function StatsPanel() {
                                     <StatCard icon={Database} label="ベクトル記憶" value={`${internalState?.vector_docs ?? 0} docs`} tone="purple" delay={0} />
                                     <StatCard icon={HeartPulse} label="現在の気分" value={internalState?.mood || 'neutral'} tone="pink" delay={40} />
                                     <StatCard icon={Clock} label="最後の睡眠" value={internalState?.last_sleep ?? '--'} tone="indigo" delay={80} />
+                                    <StatCard icon={Database} label="CP DB" value={`${cpStats?.size_mb ?? 0} MB`} tone="cyan" delay={120} />
+                                    <StatCard icon={Network} label="CP スレッド" value={cpStats?.threads ?? 0} tone="blue" delay={160} />
+                                    <StatCard icon={BarChart3} label="CP 数" value={cpStats?.checkpoints ?? 0} tone="yellow" delay={200} />
                                 </div>
                             </div>
 

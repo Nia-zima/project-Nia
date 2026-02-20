@@ -2,7 +2,7 @@
 
 import React from 'react';
 import useSWR from 'swr';
-import { API_URL } from '@/lib/api';
+import { API_URL } from '@/lib/apiClient';
 import { Activity, Radio, Database, ShieldAlert, ShieldCheck, Compass } from 'lucide-react';
 import { motion } from 'framer-motion';
 
@@ -53,16 +53,23 @@ function StatBox({ label, value, icon }: StatBoxProps) {
     );
 }
 
-export default function LivestreamDashboard() {
-    const { data, error } = useSWR(`${API_URL}/diagnostics`, fetcher, {
-        refreshInterval: 2000,
-        fallbackData: {
-            scalars: { steering_risk: 0, info_sufficiency: 0, question_clarity: 0 },
-            queue: { pending: 0, processed_last_minute: 0, rejected_last_minute: 0 },
-            depth: { current: 1 },
-            external: { used: false, confidence: 0, contradiction_flag: false, reason: null, surprise_score: 0 }
-        }
-    });
+interface LivestreamDashboardProps {
+    threadId?: string;
+}
+
+export default function LivestreamDashboard({ threadId = "default_thread" }: LivestreamDashboardProps) {
+    const { data, error } = useSWR(
+        `${API_URL}/diagnostics?thread_id=${encodeURIComponent(threadId)}`,
+        fetcher,
+        {
+            refreshInterval: 10_000,
+            fallbackData: {
+                scalars: { steering_risk: 0, info_sufficiency: 0, question_clarity: 0 },
+                queue: { pending: 0, processed_last_minute: 0, rejected_last_minute: 0 },
+                depth: { current: 1 },
+                external: { used: false, confidence: 0, contradiction_flag: false, reason: null, surprise_score: 0 }
+            }
+        });
 
     if (error) return <div className="text-red-500 text-xs">Connection Error</div>;
     if (!data) return <div className="text-gray-500 text-xs">Loading...</div>;
