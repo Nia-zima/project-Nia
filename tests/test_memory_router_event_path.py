@@ -1,159 +1,179 @@
+import json
 import sys
 import time
+import uuid
 from pathlib import Path
-from fastapi import HTTPException
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from backend.core.db import init_schema
-from backend.core.db import get_conn
-from backend.services.memory import memory_service
+from backend.core.db import init_schema, get_conn
 from backend.api import memory_router as mr
-from backend.core.config import settings
 
 
 def _thread(prefix: str = "mem_router") -> str:
     return f"{prefix}_{int(time.time() * 1000)}"
 
 
-def test_list_pending_captures_prefers_event_path():
+def test_list_episodic_events_from_memory_events():
     init_schema()
     tid = _thread("cap")
-    memory_service.append_event(
-        thread_id=tid,
-        event_type="thought_registered",
-        payload={
-            "text": "イベント経路で取得できる",
-            "scope": "general",
-            "state_tag": "CONSENT",
-            "tags": [{"t": "test", "v": "router"}],
-        },
-    )
-    items = mr.list_pending_captures(thread_id=tid, stage="capture", limit=10)
+    now = time.time()
+    event_id = uuid.uuid4().hex
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO memory_events
+            (event_id, thread_id, turn_id, message_id, event_type, payload_json, created_at, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                tid,
+                "turn_1",
+                "msg_1",
+                "thought_registered",
+                json.dumps({"text": "イベント経路で取得できる", "state_tag": "CONSENT"}, ensure_ascii=False),
+                now,
+                1,
+            ),
+        )
+    finally:
+        conn.close()
+
+    items = mr.list_episodic_events(thread_id=tid, limit=10)
     assert items
     assert any(str(i.get("summary", "")).startswith("イベント経路") for i in items)
+    assert items[0]["id"] == event_id
 
 
-def test_list_long_term_memories_prefers_event_path():
+def test_list_semantic_memories_from_semantic_table():
     init_schema()
-    tid = _thread("ltm")
-    memory_service.append_event(
-        thread_id=tid,
-        event_type="episode_added",
-        payload={
-            "summary": "長期メモリ相当のイベント",
-            "details": "details",
-            "scope": "episode",
-            "retention": 0.7,
-        },
-    )
-    items = mr.list_long_term_memories(thread_id=tid, limit=10)
+    tid = _thread("sem")
+    now = time.time()
+    sem_id = uuid.uuid4().hex
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO semantic_memories
+            (id, thread_id, content, status, confidence, state_tag,
+             valid_from, seed_retention, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sem_id,
+                tid,
+                "ユーザーは猫が好き",
+                "confirmed",
+                0.85,
+                "CONSENT",
+                now,
+                0.7,
+                now,
+                now,
+            ),
+        )
+    finally:
+        conn.close()
+
+    items = mr.list_semantic_memories(thread_id=tid, limit=10)
     assert items
-    assert any("長期メモリ相当" in str(i.get("summary", "")) for i in items)
+    assert any("猫が好き" in str(i.get("summary", "")) for i in items)
+    assert items[0]["metadata"]["status"] == "confirmed"
+    assert items[0]["metadata"]["confidence"] == 0.85
 
 
-def test_legacy_delete_endpoints_blocked_in_read_only_mode():
-    old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
-    settings.LEGACY_MEMORY_READ_ONLY = True
-    try:
-        try:
-            mr.delete_capture("dummy", thread_id="default_thread")
-            assert False, "delete_capture should be blocked when LEGACY_MEMORY_READ_ONLY=1"
-        except HTTPException as e:
-            assert e.status_code == 409
-
-        try:
-            mr.delete_long_term("dummy", thread_id="default_thread")
-            assert False, "delete_long_term should be blocked when LEGACY_MEMORY_READ_ONLY=1"
-        except HTTPException as e:
-            assert e.status_code == 409
-    finally:
-        settings.LEGACY_MEMORY_READ_ONLY = old
-
-
-def test_list_pending_captures_disables_legacy_fallback_in_read_only_mode():
-    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
-    settings.LEGACY_MEMORY_TABLES_ENABLED = True
+def test_list_semantic_memories_filters_by_status():
     init_schema()
-    tid = _thread("cap_ro")
+    tid = _thread("sem_filt")
+    now = time.time()
     conn = get_conn()
     try:
         conn.execute(
             """
-            INSERT INTO episodic_captures
-            (thread_id, created_at, raw_text, state_tag, retention, stage, stream_id, message_id, origin_message_id, refs, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO semantic_memories
+            (id, thread_id, content, status, confidence, valid_from,
+             seed_retention, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                tid,
-                float(time.time()),
-                "legacy pending row",
-                "CONSENT",
-                0.5,
-                "capture",
-                "s1",
-                "m1",
-                None,
-                None,
-                None,
-            ),
+            (uuid.uuid4().hex, tid, "推定記憶", "inferred", 0.5, now, 0.5, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO semantic_memories
+            (id, thread_id, content, status, confidence, valid_from,
+             seed_retention, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uuid.uuid4().hex, tid, "取消記憶", "revoked", 0.3, now, 0.3, now, now),
         )
     finally:
         conn.close()
 
-    old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
-    settings.LEGACY_MEMORY_READ_ONLY = True
-    try:
-        items = mr.list_pending_captures(thread_id=tid, stage="capture", limit=10)
-        assert items == []
-    finally:
-        settings.LEGACY_MEMORY_READ_ONLY = old
-        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
+    # Default: only confirmed + inferred
+    items = mr.list_semantic_memories(thread_id=tid, limit=10)
+    assert len(items) == 1
+    assert items[0]["metadata"]["status"] == "inferred"
+
+    # Explicit filter: revoked
+    items_revoked = mr.list_semantic_memories(thread_id=tid, limit=10, status="revoked")
+    assert len(items_revoked) == 1
+    assert items_revoked[0]["metadata"]["status"] == "revoked"
 
 
-def test_list_long_term_disables_legacy_fallback_in_read_only_mode():
-    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
-    settings.LEGACY_MEMORY_TABLES_ENABLED = True
+def test_delete_episodic_event():
     init_schema()
-    tid = _thread("ltm_ro")
-    cap_id = f"legacy_cap_{int(time.time() * 1000)}"
+    tid = _thread("del_ev")
+    now = time.time()
+    event_id = uuid.uuid4().hex
     conn = get_conn()
     try:
         conn.execute(
             """
-            INSERT INTO episodic_captures
-            (id, thread_id, created_at, raw_text, state_tag, retention, stage, stream_id, message_id, origin_message_id, refs, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memory_events
+            (event_id, thread_id, turn_id, message_id, event_type, payload_json, created_at, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                cap_id,
-                tid,
-                float(time.time()),
-                "legacy long-term row",
-                "CONSENT",
-                0.8,
-                "capture",
-                "s2",
-                "m2",
-                None,
-                None,
-                None,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO long_term_memories (capture_id, thread_id, created_at, retention) VALUES (?, ?, ?, ?)",
-            (cap_id, tid, float(time.time()), 0.8),
+            (event_id, tid, None, None, "episode", '{"text":"test"}', now, 1),
         )
     finally:
         conn.close()
 
-    old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
-    settings.LEGACY_MEMORY_READ_ONLY = True
+    result = mr.delete_episodic_event(event_id, thread_id=tid)
+    assert result["ok"]
+    assert result["deleted"] == event_id
+
+    # Verify deletion
+    items = mr.list_episodic_events(thread_id=tid, limit=10)
+    assert not any(i["id"] == event_id for i in items)
+
+
+def test_delete_semantic_memory():
+    init_schema()
+    tid = _thread("del_sem")
+    now = time.time()
+    sem_id = uuid.uuid4().hex
+    conn = get_conn()
     try:
-        items = mr.list_long_term_memories(thread_id=tid, limit=10)
-        assert items == []
+        conn.execute(
+            """
+            INSERT INTO semantic_memories
+            (id, thread_id, content, status, confidence, valid_from,
+             seed_retention, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (sem_id, tid, "削除対象", "inferred", 0.5, now, 0.5, now, now),
+        )
     finally:
-        settings.LEGACY_MEMORY_READ_ONLY = old
-        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
+        conn.close()
+
+    result = mr.delete_semantic_memory(sem_id, thread_id=tid)
+    assert result["ok"]
+    assert result["deleted"] == sem_id
+
+    # Verify deletion
+    items = mr.list_semantic_memories(thread_id=tid, limit=10)
+    assert not any(i["id"] == sem_id for i in items)

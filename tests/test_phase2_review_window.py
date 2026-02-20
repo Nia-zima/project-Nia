@@ -17,11 +17,11 @@ from backend.core.agent_graph.review_window import (
 def test_merge_hold_builds_pending_action_and_wait():
     state = {
         "safety_route": "safe",
-        "draft": "わかった、保存するね",
+        "draft": "それは公開の場では扱わないほうが安全です。",
         "depth1_text": "",
-        "dissonance_on": True,
+        "dissonance_on": False,
         "need_depth1": True,
-        "user_text": "これ覚えておいて",
+        "user_text": "配信で住所を公開してもいい？",
         "reason_codes": [],
         "dissonance": 0.1,
     }
@@ -32,7 +32,7 @@ def test_merge_hold_builds_pending_action_and_wait():
     assert isinstance(out.get("review_token"), str)
     pending = out.get("pending_actions") or []
     assert pending and pending[0].get("kind") == "say"
-    assert "keyword_memory" in (out.get("reason_codes") or [])
+    assert "risk_public_context" in (out.get("reason_codes") or [])
     assert "action_say_held" in (out.get("reason_codes") or [])
 
 
@@ -99,3 +99,81 @@ def test_hold_request_event_payload_shape():
     assert payload.get("hold_kind") == "speech_preview"
     assert payload.get("preview_text") == "preview"
     assert payload.get("pending_actions")[0].get("kind") == "say"
+
+
+def test_name_question_triggers_identity_keyword_log_only(monkeypatch):
+    """keyword_identity is log-only (hold delegated to G1 guardrail)."""
+    from backend.core import config as _cfg
+    monkeypatch.setattr(_cfg.settings, "GUARDRAIL_V2_ENABLED", False)
+    state = {
+        "safety_route": "safe",
+        "draft": "うん、教えてくれたら覚えるよ。",
+        "depth1_text": "",
+        "dissonance_on": False,
+        "need_depth1": False,
+        "need_depth2": False,
+        "user_text": "俺の名前は？",
+        "reason_codes": [],
+        "dissonance": 0.0,
+    }
+    out = merge_output(state)
+    # keyword_identity is logged but does NOT trigger hold
+    assert "keyword_identity" in (out.get("reason_codes") or [])
+    assert out.get("hold_required") is not True
+
+
+def test_long_reply_logged_not_held_pii_only():
+    """pii_only: risk_long_reply is logged but does NOT hold."""
+    state = {
+        "safety_route": "safe",
+        "draft": "あ" * 210,
+        "depth1_text": "",
+        "dissonance_on": False,
+        "need_depth1": False,
+        "need_depth2": False,
+        "user_text": "短い質問",
+        "reason_codes": [],
+        "dissonance": 0.0,
+    }
+    out = merge_output(state)
+    assert out.get("hold_required") is not True
+    assert "risk_long_reply" in (out.get("reason_codes") or [])
+
+
+def test_long_reply_triggers_hold_strict(monkeypatch):
+    """strict: risk_long_reply triggers hold."""
+    from backend.core import config as _cfg
+    monkeypatch.setattr(_cfg.settings, "HOLD_POLICY", "strict")
+    state = {
+        "safety_route": "safe",
+        "draft": "あ" * 210,
+        "depth1_text": "",
+        "dissonance_on": False,
+        "need_depth1": False,
+        "need_depth2": False,
+        "user_text": "短い質問",
+        "reason_codes": [],
+        "dissonance": 0.0,
+    }
+    out = merge_output(state)
+    assert out.get("hold_required") is True
+    assert out.get("final_text") == "WAIT"
+    assert "risk_long_reply" in (out.get("reason_codes") or [])
+
+
+def test_pii_in_output_triggers_hold():
+    """PII in Nia's output always triggers hold regardless of policy."""
+    state = {
+        "safety_route": "safe",
+        "draft": "住所は東京都渋谷区だよね。",
+        "depth1_text": "",
+        "dissonance_on": False,
+        "need_depth1": False,
+        "need_depth2": False,
+        "user_text": "どこに住んでるの？",
+        "reason_codes": [],
+        "dissonance": 0.0,
+    }
+    out = merge_output(state)
+    assert out.get("hold_required") is True
+    assert "pii_in_output" in (out.get("reason_codes") or [])

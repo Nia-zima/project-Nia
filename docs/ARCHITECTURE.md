@@ -1,514 +1,427 @@
 # システムアーキテクチャ
 
-このドキュメントでは、AI_Buddy (Nia) のシステムアーキテクチャを詳細に説明します。
-
----
-
-## 目次
-
-1. [全体構成](#全体構成)
-2. [コンポーネント詳細](#コンポーネント詳細)
-3. [データフロー](#データフロー)
-4. [設計原則](#設計原則)
-5. [API構造](#api構造)
+AI VTuber「ニア (Nia)」のシステムアーキテクチャ。
 
 ---
 
 ## 全体構成
 
-### システムレイヤー図
-
 ```
 ┌────────────────────────────────────────────────────────────┐
-│                     User Interface                          │
-│                   (Web Browser)                             │
+│                   Frontend (Next.js 14)                     │
+│  Chat / Avatar / Memory / Stats / Draw / Game / Video ...  │
 └─────────────────────────┬──────────────────────────────────┘
                           │ HTTP / WebSocket / SSE
 ┌─────────────────────────▼──────────────────────────────────┐
-│                  Frontend (Next.js 14)                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ ChatInterface│  │ AvatarView   │  │ MemoryExplorer  │  │
-│  │ (チャットUI)   │  │ (3Dアバター) │  │ (記憶ブラウザ)   │  │
-│  └──────────────┘  └──────────────┘  └─────────────────┘  │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ StatsPanel   │  │ SettingsPanel│  │ Sidebar         │  │
-│  │ (統計表示)    │  │ (設定)       │  │ (ナビゲーション) │  │
-│  └──────────────┘  └──────────────┘  └─────────────────┘  │
-└─────────────────────────┬──────────────────────────────────┘
-                          │ API Requests
-┌─────────────────────────▼──────────────────────────────────┐
-│                  Backend (FastAPI)                          │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              API Router Layer                         │  │
-│  │  /api/chat/stream  /api/review/*  /api/actions/*     │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                          │                                  │
-│  ┌──────────────────────▼──────────────────────────────┐  │
-│  │          Agent Orchestrator                          │  │
-│  │  (DefaultAgentOrchestrator)                          │  │
-│  └──────────────────────┬──────────────────────────────┘  │
-│                          │                                  │
-│  ┌──────────────────────▼──────────────────────────────┐  │
-│  │          LangGraph Pipeline (5-Node)                 │  │
-│  │  Safety → Dissonance → Depth0 → Depth1 → Merge      │  │
-│  └──────────────────────┬──────────────────────────────┘  │
-│                          │                                  │
-│  ┌──────────────────────▼──────────────────────────────┐  │
-│  │          Services Layer                              │  │
-│  │  Memory • Speech • Thought • Vision • Voice • TTS    │  │
-│  └──────────────────────┬──────────────────────────────┘  │
-└────────────────────────┬┴──────────────────────────────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-    ┌───▼───┐       ┌────▼────┐      ┌───▼────┐
-    │ LLM   │       │  TTS    │      │ Vision │
-    │(LM    │       │(VOICE   │      │ API    │
-    │Studio)│       │ VOX)    │      │        │
-    └───┬───┘       └────┬────┘      └───┬────┘
-        │                │                │
-    ┌───▼────────────────▼────────────────▼───┐
-    │          Storage Layer                   │
-    │  SQLite (会話・状態) • ChromaDB (ベクトル)│
-    └──────────────────────────────────────────┘
+│                   Backend (FastAPI)                          │
+│                                                              │
+│  ┌─ API Router Layer ─────────────────────────────────────┐ │
+│  │ stream / review / actions / voice / identity / game …  │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                          │                                   │
+│  ┌─ Agent Core ──────────▼────────────────────────────────┐ │
+│  │  LangGraph Pipeline (9-Node)                           │ │
+│  │  Safety → Dissonance → DepthSelector                   │ │
+│  │    → [Depth0 | Depth1 | Depth2]                        │ │
+│  │    → Merge → ActionProcessing → S5Commit → END         │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                          │                                   │
+│  ┌─ Memory v2 ───────────▼────────────────────────────────┐ │
+│  │  Episodic (memory_events) ← source of truth            │ │
+│  │  Semantic (semantic_memories) ← Sleep Cycle で生成      │ │
+│  │  Working  (working_items) ← ターン中の作業記憶         │ │
+│  │  Context Builder → Depth ごとに注入                    │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                          │                                   │
+│  ┌─ Services ────────────▼────────────────────────────────┐ │
+│  │  Speech / Vision / Voice(STT+TTS) / Identity …        │ │
+│  └────────────────────────────────────────────────────────┘ │
+└──────────────┬───────────────────────┬─────────────────────┘
+               │                       │
+       ┌───────▼────────┐      ┌───────▼────────┐
+       │ LM Studio      │      │ VOICEVOX       │
+       │ (ローカルLLM)   │      │ (TTS)          │
+       └───────┬────────┘      └───────┬────────┘
+               │                       │
+       ┌───────▼───────────────────────▼────────┐
+       │          Storage Layer                  │
+       │  SQLite (nia.sqlite3)                   │
+       │  ChromaDB (ベクトル検索)                │
+       └────────────────────────────────────────┘
 ```
 
 ---
 
-## コンポーネント詳細
+## LangGraph Pipeline（9 ノード）
 
-### 1. Frontend (Next.js 14 + TypeScript)
+```
+User Input
+    │
+    ▼
+┌──────────┐    blocked
+│ Safety   │──────────→ END
+└────┬─────┘
+     │ safe
+     ▼
+┌──────────────┐
+│ Dissonance   │  違和感スコア算出
+└────┬─────────┘
+     ▼
+┌──────────────┐
+│ DepthSelector│  確信度 × コンテキスト → Depth 決定
+└──┬───┬───┬───┘
+   │   │   │
+   ▼   ▼   ▼
+ D0   D1   D2      ← 排他的に1つが実行
+   │   │   │
+   └───┼───┘
+       ▼
+┌──────────────┐
+│ Merge        │  Hold 判定 / WAIT / 通常出力
+└────┬─────────┘
+     ▼
+┌──────────────────┐
+│ ActionProcessing │  Phase 5 アクション評価
+└────┬─────────────┘
+     ▼
+┌──────────────┐
+│ S5 Commit    │  Episodic 保存 / Working 更新
+└────┬─────────┘
+     ▼
+    END
+```
 
-#### 主要コンポーネント
+### ノード詳細
 
-| コンポーネント | ファイル | 役割 |
-|--------------|---------|------|
-| **ChatInterface** | `components/ChatInterface.tsx` | チャットUI、SSEストリーム受信 |
-| **AvatarView** | `components/AvatarView.tsx` | VRM 3Dアバター、感情表現 |
-| **MemoryExplorer** | `components/MemoryExplorer.tsx` | 長期記憶のブラウジング |
-| **MemoryGraph** | `components/MemoryGraph.tsx` | 記憶の関係性グラフ |
-| **StatsPanel** | `components/StatsPanel.tsx` | 統計情報の表示 |
-| **Sidebar** | `components/Sidebar.tsx` | タブ切り替え |
+| ノード | ファイル | 役割 |
+|--------|---------|------|
+| **Safety** | `nodes/routing.py` | 有害入力ブロック、新入力で Review Window キャンセル |
+| **Dissonance** | `nodes/routing.py` | Identity との矛盾を検出、スコア付与 |
+| **DepthSelector** | `nodes/routing.py` | 確信度 + context_coverage で Depth 振り分け |
+| **Depth0 (Reflex)** | `nodes/depth_nodes.py` | 即応答。PINNED FACTS のみ参照 |
+| **Depth1 (Organize)** | `nodes/depth_nodes.py` | 深い分析。フルメモリコンテキスト参照 |
+| **Depth2 (ValueAlign)** | `nodes/depth_nodes.py` | 結論層。Depth2ゲート通過時のみ実行 |
+| **Merge** | `nodes/merge.py` | Hold/WAIT 判定、最終テキスト統合 |
+| **ActionProcessing** | `nodes/actions.py` | アクション提案をリスク評価 |
+| **S5 Commit** | `nodes/actions.py` | Episodic 保存、Working 更新（Memory v2） |
 
-#### アーキテクチャパターン
+### Depth 優先チェーン
 
-- **App Router**: Next.js 14のApp Router使用
-- **Server Components**: 可能な限りサーバーコンポーネント
-- **Client Components**: インタラクティブな部分のみ
-- **TailwindCSS**: ユーティリティファーストCSS
-- **Framer Motion**: アニメーション
+```
+high_dissonance (≥ 0.65)  → depth1  [最優先]
+confidence-based           → depth0/1/2
+user_request               → depth1
+depth2 gate (≥100 turns)  → depth2
+default                    → depth0
+```
 
 ---
 
-### 2. Backend (FastAPI + Python 3.12)
+## Memory v2（3 層構成）
 
-#### 2.1. Agent Core（思考エンジン）
+詳細: [memory_redesign_v2.md](memory_redesign_v2.md)
 
-**LangGraph 5-Node Pipeline**:
+### 層構成
 
-```
-┌─────────────────────────────────────────────────────┐
-│                LangGraph Pipeline                   │
-│                                                     │
-│  User Input                                         │
-│      │                                              │
-│      ▼                                              │
-│  ┌───────────────┐                                 │
-│  │ Safety Node   │  有害コンテンツのブロック          │
-│  └───────┬───────┘                                 │
-│          │                                          │
-│          ▼                                          │
-│  ┌───────────────┐                                 │
-│  │ Dissonance    │  内部矛盾・違和感の検出            │
-│  │ Check         │  [DISSONANCE] タグ付与           │
-│  └───────┬───────┘                                 │
-│          │                                          │
-│    ┌─────┴─────┐                                   │
-│    │           │                                    │
-│    ▼           ▼                                    │
-│  ┌──────┐  ┌──────────────┐                       │
-│  │Depth0│  │  Depth1      │  深い分析が必要か?      │
-│  │Reflex│  │  Organize &  │  Yes → Depth1へ        │
-│  │      │  │  Ask         │  No  → Depth0で完結    │
-│  └──┬───┘  └──────┬───────┘                       │
-│     │             │                                 │
-│     └──────┬──────┘                                │
-│            ▼                                        │
-│     ┌──────────────┐                               │
-│     │ Merge Node   │  最終出力の統合                 │
-│     │              │  メタデータ抽出                 │
-│     └──────┬───────┘                               │
-│            │                                        │
-│            ▼                                        │
-│      Final Output                                   │
-└─────────────────────────────────────────────────────┘
-```
+| 層 | テーブル | 書き込みタイミング | 役割 |
+|----|---------|-------------------|------|
+| **Episodic** | `memory_events` | S5 Commit（毎ターン末尾） | append-only の生ログ |
+| **Semantic** | `semantic_memories` | Sleep Cycle（日次バッチ） | 事実・価値観の抽出 |
+| **Working** | `working_items` | S5 Commit | ターン中の作業記憶 |
 
-**各ノードの詳細**:
-
-1. **Safety Node** (`backend/core/agent_graph/nodes.py`)
-   - 有害なコンテンツをブロック
-   - ルール違反をチェック
-   - 早期リターンで効率化
-
-2. **Dissonance Check**
-   - 内部矛盾を検出
-   - `[DISSONANCE]` タグを付与
-   - 違和感の記録
-
-3. **Depth 0 (Reflex)**
-   - 瞬間的な応答
-   - 単純な質問に対応
-   - `[CONSENT]` タグ付与
-
-4. **Depth 1 (Organize & Ask)**
-   - より深い分析
-   - 複雑な思考プロセス
-   - 必要に応じてツール呼び出し
-
-5. **Merge**
-   - Depth0とDepth1の統合
-   - メタデータの抽出
-   - 最終出力の整形
-
-#### 2.2. Memory System（記憶システム）
-
-**二層記憶アーキテクチャ**:
+### 状態機械 (S0 → S5)
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  Memory System                       │
-│                                                      │
-│  ┌────────────────────────────────────────────────┐ │
-│  │          Short-Term Memory                      │ │
-│  │        (Checkpointer - SQLite)                  │ │
-│  │  ┌──────────────────────────────────────────┐  │ │
-│  │  │  LangGraph State                         │  │ │
-│  │  │  - 会話コンテキスト (最近数ターン)          │  │ │
-│  │  │  - 一時的な変数                           │  │ │
-│  │  │  - 実行状態                               │  │ │
-│  │  └──────────────────────────────────────────┘  │ │
-│  └────────────────────────────────────────────────┘ │
-│                        │                             │
-│                        │ 重要度判定                   │
-│                        ▼                             │
-│  ┌────────────────────────────────────────────────┐ │
-│  │         Memory Judge (LLM-based)                │ │
-│  │  - 重要度スコアリング (0.0 - 1.0)                 │ │
-│  │  - サプライズ検出                                │ │
-│  │  - 感情タグ考慮                                  │ │
-│  └────────────────────┬───────────────────────────┘ │
-│                        │ if score > threshold         │
-│                        ▼                             │
-│  ┌────────────────────────────────────────────────┐ │
-│  │        Memory Gate (Phase 3)                    │ │
-│  │  - 12固定コードで分類                            │ │
-│  │  - フィルタリング (enforce モード時)             │ │
-│  └────────────────────┬───────────────────────────┘ │
-│                        │ if should_propose=true       │
-│                        ▼                             │
-│  ┌────────────────────────────────────────────────┐ │
-│  │       Long-Term Memory                          │ │
-│  │      (VectorStore - ChromaDB)                   │ │
-│  │  ┌──────────────────────────────────────────┐  │ │
-│  │  │  Embeddings + Metadata                   │  │ │
-│  │  │  - 重要な事実・価値観・驚き                │  │ │
-│  │  │  - セマンティック検索可能                  │  │ │
-│  │  │  - 時系列・重要度でソート                  │  │ │
-│  │  └──────────────────────────────────────────┘  │ │
-│  └────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────┘
+S0: Idle
+S1: ルールベース判定（LLM 不要）
+S2: Dissonance スコアリング
+S3: Depth ノードで LLM 呼び出し
+S4: Merge / Action 処理
+S5: Commit（episodic 保存 + working 更新）
 ```
 
-**Memory Judgeのスコアリング**:
-```python
-importance = base_score + emotion_bonus + surprise_bonus
-# base_score: LLMによる基本評価
-# emotion_bonus: [CONSENT]/[DISSONANCE]タグによる加算
-# surprise_bonus: 予想外の情報に対する加算
+### Context Builder
+
+- `backend/services/memory/context_builder.py`
+- Depth0: PINNED FACTS のみ（confirmed semantic）
+- Depth1/2: フルメモリコンテキスト（PINNED FACTS + PATTERNS + WORKING + Short/Long Term）
+
+#### コンテキストセクション
+
+| セクション | 内容 | 表示条件 |
+|-----------|------|---------|
+| **PINNED FACTS** | confirmed かつ高 confidence の semantic | confidence ≥ 0.7 |
+| **PATTERNS** | 日横断パターン（`state_tag='insight'`） | R.4 で生成された insight |
+| **WORKING** | 未解決の working items | open 状態の items |
+| **Short Term** | 直近のやり取り | 短期記憶あり時 |
+| **Long Term** | semantic memories（query-aware retrieval） | semantic あり時 |
+
+### Semantic 生成
+
+- Sleep Cycle で1日分の episodic を LLM に渡し、バッチ抽出
+- ステータス: `inferred` → `confirmed` / `revoked`（24h 後に確定）
+- 忘却: status 別半減期（inferred: 3日、confirmed: 30日）
+
+---
+
+## Review Window（Phase 2）
+
+```
+敏感な内容を Merge が検出
+    │
+    ▼
+hold_required = True → SSE: hold_request {preview, token}
+    │
+    ├─ Approve → identity.md に適用 → 出力続行
+    └─ Reject  → "WAIT" で終了
+    │
+新しいユーザー入力 → cancel_review_on_new_input()
 ```
 
-**Memory Gateのコード (v1)**:
-- `factual_and_actionable`
-- `relationship_shift`
-- `value_alignment`
-- `surprise_discovery`
-- など12個の固定コード
+定数: `D_LOW=0.30`, `D_MAX=0.95`, `K_HOLD=0.03`, `K_REJECT=0.07`, `MAX_PENDING=10`
 
-#### 2.3. Services Layer（サービス層）
+---
+
+## Services Layer
+
+### コアサービス
 
 | サービス | ファイル | 役割 |
 |---------|---------|------|
-| **AgentOrchestrator** | `services/agent_orchestrator.py` | 全サービスの統合・調整 |
-| **MemoryManager** | `services/memory_manager.py` | 記憶の統一インターフェース |
-| **MemoryJudge** | `services/memory_judge.py` | 重要度スコアリング |
-| **MemoryGate** | `services/memory_gate.py` | 記憶フィルタリング |
-| **SpeechSanitizer** | `services/speech_sanitizer.py` | 出力の浄化・タグ除去 |
-| **ThoughtEngine** | `services/thought_engine.py` | 内省・メタ認知 |
-| **VoiceAdapter** | `services/voice_adapter.py` | STT統合 |
-| **VisionAdapter** | `services/vision_adapter.py` | 画像認識 |
-| **VoicevoxClient** | `services/voicevox_client.py` | TTS統合 |
-| **LLMClient** | `services/llm_client.py` | LLM API抽象化 |
+| **AgentOrchestrator** | `core/agent.py` + `core/agent_stream.py` | SSE ストリーム / 非ストリーム実行 |
+| **MemoryService** | `services/memory/memory_service.py` | Memory v2 統一インターフェース |
+| **ContextBuilder** | `services/memory/context_builder.py` | Depth 別メモリコンテキスト生成 |
+| **CommitExecutor** | `services/memory/commit_executor.py` | S5 の episodic 書き込み |
+| **SemanticStore** | `services/memory/semantic_store.py` | semantic CRUD |
+| **WorkingStore** | `services/memory/working_store.py` | working items CRUD |
+| **SpeechSanitizer** | `services/speech_sanitizer.py` | タグ除去・リーク防止・ジェスチャー抽出 |
+| **IdentityManager** | `services/identity_manager.py` | identity.md の読み書き |
+| **VisionClient** | `services/vision_client.py` | LM Studio + Qwen3-VL-4B (ローカル) / Gemini Flash (クラウド) |
+| **TwitterClient** | `services/twitter_client.py` | X API v2 投稿 + LLM ツイート生成 |
+| **VoicevoxClient** | `services/voicevox_client.py` | VOICEVOX TTS 統合 |
+| **STTService** | `services/stt_service.py` | faster-whisper (CPU) による STT |
+| **ReflectionEngine** | `services/reflection_engine.py` | Autonomous Reflection（R.2 + R.4） |
+| **IdleDetector** | `services/idle_detector.py` | アイドル検出（R.1） |
+| **ExternalData** | `services/external_data.py` | 外部 API データ取得 |
+
+### Voice Mode パイプライン
+
+```
+Browser (MediaRecorder)
+    │ webm/opus via WebSocket
+    ▼
+ffmpeg → faster-whisper (STT)
+    │
+    ▼
+LLM → VOICEVOX (TTS)
+    │ audio_b64 via WebSocket
+    ▼
+Browser (再生 + VAD pause/resume)
+```
+
+- VAD: @ricky0123/vad-web (Silero VAD) — 検出のみ
+- Barge-in 対応: TTS 再生中 → VAD pause、終了 → resume
 
 ---
 
-### 3. External Dependencies（外部依存）
+## API 構造
 
-#### 3.1. LM Studio（ローカルLLM）
-- **役割**: LLM推論エンジン
-- **プロトコル**: OpenAI互換API
-- **デフォルトURL**: `http://localhost:1234/v1`
-- **推奨モデル**: Qwen2.5-14B-Instruct, Gemma-2-9B
+### ルーター一覧
 
-#### 3.2. VOICEVOX（TTS）
-- **役割**: 日本語音声合成
-- **プロトコル**: REST API
-- **デフォルトURL**: `http://localhost:50021`
-- **オプショナル**: 音声出力が不要な場合は省略可
+| ルーター | プレフィックス | 認証 | 用途 |
+|---------|--------------|------|------|
+| `stream_router` | `/api` | - | SSE ストリーミングチャット |
+| `system_router` | `/api` | admin | Vision/Sleep/Reflect 制御 |
+| `review_router` | `/api` | - | Review Window 操作 |
+| `actions_router` | `/api` | - | Phase 5 アクション管理 |
+| `profile_router` | `/api` | - | ユーザープロフィール |
+| `tts_router` | `/api` | - | TTS 生成 |
+| `tts_events_router` | `/api` | - | TTS イベントバス |
+| `draw_router` | `/api` | - | お絵描き機能 |
+| `livestream_router` | `/api` | - | 配信連携 |
+| `voice_router` | `/api` | - | Voice Mode (WebSocket) |
+| `game_router` | `/api` | admin | ゲーム連携 (Minecraft + Screen Adapter) |
+| `video_router` | `/api` | admin | 動画分析 |
+| `motion_router` | - | - | VRM モーション |
+| `identity_router` | `/api` | admin | Identity Proposal レビュー |
+| `memory_router` | `/api` | - | メモリ CRUD |
+| `stats_router` | - | - | 統計情報 |
 
-#### 3.3. ChromaDB（ベクトルDB）
-- **役割**: 長期記憶のベクトル検索
-- **ストレージ**: `backend/chroma_db_storage/`
-- **埋め込み**: OpenAI互換エンベッディング
+### SSE イベント
 
-#### 3.4. SQLite（リレーショナルDB）
-- **Checkpointer**: `data/checkpointer.sqlite3` (LangGraph状態)
-- **Chat History**: `data/nia.sqlite3` (会話履歴・メタデータ)
+```
+event: message       → {text: "..."}           テキストチャンク
+event: metadata      → {emotion, tags, ...}    メタデータ
+event: hold_request  → {preview, token, ...}   Review Window
+event: hold_cancelled → {reason}               キャンセル通知
+event: final_result  → {text, ...}             最終結果（1回のみ）
+event: done          → {}                      ストリーム終了
+```
 
 ---
 
-## データフロー
+## Frontend コンポーネント
 
-### ユーザー入力 → AI応答のフロー
+| コンポーネント | 役割 |
+|--------------|------|
+| **ChatInterface** | メインチャット UI + SSE + Voice Mode |
+| **AvatarView** | VRM 3D アバター表示 |
+| **ActionPanel** | Phase 5 アクション承認/却下 |
+| **ActionIssuesPanel** | 失敗/却下アクション一覧 |
+| **MemoryExplorer** | 記憶ブラウザ |
+| **MemoryGraph** | 記憶関係性グラフ |
+| **MemoryTimeline** | 記憶タイムライン |
+| **StatsPanel** | 統計ダッシュボード |
+| **InnerMonologue** | 内部独白表示 |
+| **ObservationReport** | 観察レポート |
+| **DrawLab** | お絵描き PoC |
+| **GamePanel** | Minecraft 連携 |
+| **VideoPanel** | 動画分析 |
+| **IdentityPanel** | Identity Proposal レビュー |
+| **ProfileEditor** | ユーザープロフィール編集 |
+| **LivestreamDashboard** | 配信ダッシュボード |
+| **Sidebar** | ナビゲーション + Admin Token |
+| **SettingsPanel** | モード切替設定 |
 
-```
-[1] User Input (Frontend)
-      │
-      ▼
-[2] POST /api/chat/stream (Backend API)
-      │
-      ▼
-[3] AgentOrchestrator.run_agent_stream()
-      │
-      ├─ 会話履歴をCheckpointerから取得
-      ├─ 長期記憶をVectorStoreから検索
-      └─ システムプロンプトに統合
-      │
-      ▼
-[4] LangGraph Pipeline (5-Node)
-      │
-      ├─ [Safety]    有害コンテンツチェック
-      ├─ [Dissonance] 内部矛盾検出
-      ├─ [Depth0]    瞬間的応答生成
-      ├─ [Depth1]    深い分析（必要時）
-      └─ [Merge]     最終統合
-      │
-      ▼
-[5] SpeechSanitizer.finalize_output()
-      │
-      ├─ 内部タグ ([CONSENT], [DISSONANCE]) の除去
-      ├─ メタデータの抽出
-      └─ リーク検出（システムプロンプト漏洩防止）
-      │
-      ▼
-[6] SSE Stream (event: message, event: metadata)
-      │
-      ▼
-[7] Frontend ChatInterface
-      │
-      ├─ テキストチャンクの表示
-      ├─ メタデータによるアバター更新
-      └─ ローカル状態の更新
-      │
-      ▼
-[8] Memory Judge → Memory Gate → VectorStore (非同期)
-      │
-      └─ 重要な会話は長期記憶へ保存
-```
+---
 
-### Review Window（Phase 2）フロー
+## External Dependencies
+
+| サービス | 用途 | プロトコル | 必須 |
+|---------|------|----------|------|
+| **LM Studio** | ローカル LLM (Qwen 系) | OpenAI 互換 API | 必須 |
+| **VOICEVOX** | 日本語 TTS | REST API | Voice Mode 使用時 |
+| **ChromaDB** | ベクトル検索 | Embedded | 必須 |
+| **SQLite** | メイン DB (`nia.sqlite3`) | File | 必須 |
+| **Gemini Flash** | ゲーム画面 Vision | REST API | Screen Adapter 使用時 |
+| **X (Twitter) API** | ツイート投稿 | tweepy (X API v2) | Twitter 機能使用時 |
+
+---
+
+## Autonomous Reflection（R.1 〜 R.4）
+
+ニアが自発的に記憶を振り返り、パターンを抽出する仕組み。
 
 ```
-[1] 敏感な内容をLLMが生成
-      │
-      ▼
-[2] hold_required=True と判定
-      │
-      ▼
-[3] set_review_token() → トークン生成
-      │
-      ▼
-[4] SSE: event=hold_request, data={preview, token}
-      │
-      ▼
-[5] Frontend: Approve / Reject ボタン表示
-      │
-      ├─ Approve → POST /api/review/approve
-      └─ Reject  → POST /api/review/reject
-      │
-      ▼
-[6] clear_review_token(next_merge_mode)
-      │
-      └─ Approve: 出力を続行
-         Reject:  "WAIT" のまま終了
+アイドル検出 (R.1)
+    │ 3分以上無入力
+    ▼
+Daily Log 生成 (R.2)
+    │ セッション中の会話を振り返り
+    ▼
+Sleep Cycle 連携 (R.3)
+    │ daily_reflections → memory_block
+    ▼
+Cross-Day Distillation (R.4)
+    │ 3日以上のデータ → パターン抽出
+    ▼
+semantic_memories (state_tag='insight')
+    │
+    ▼
+Context Builder の PATTERNS セクションに注入
 ```
+
+### コンポーネント
+
+| Phase | ファイル | 役割 |
+|-------|---------|------|
+| **R.1** | `services/idle_detector.py` | アイドル検出（3分閾値） |
+| **R.2** | `services/reflection_engine.py` | Daily Log 生成（LLM 振り返り） |
+| **R.3** | `scripts/sleep_cycle.py` | daily_reflections → memory_block 変換 |
+| **R.4** | `services/reflection_engine.py` | Cross-Day Distillation（日横断パターン抽出） |
+
+### R.4 Cross-Day Distillation
+
+- 3日以上の `daily_reflections` を分析
+- 4カテゴリ: `user_trait` / `relationship_pattern` / `emerging_interest` / `lesson`
+- confidence cap: 3-4日→0.6、5-6日→0.8、7日+→0.9
+- `semantic_memories` に `state_tag='insight'` で保存
+- Context Builder の `=== PATTERNS ===` セクションに自動反映
+
+---
+
+## Sleep Cycle（日次メンテナンス）
+
+`backend/scripts/sleep_cycle.py`
+
+1. **Memory Block 構築**: `daily_reflections` を優先、フォールバックで `memory_events`（R.3）
+2. **Layer A**: memory_block の振り返り・印象記録
+3. **Layer B**: Identity 変更提案（importance で自動適用 or 承認待ち）
+4. **Semantic Extraction**: episodic → semantic memories（LLM バッチ）※ R.3 で daily_reflections がある場合はスキップ
+5. **忘却**: status 別半減期による retention 減衰
+6. **Episodic 圧縮**: 古い episodic を日単位でサマリー化
+
+---
+
+## ゲーム統合（GameProfile 抽象化）
+
+Minecraft と汎用ゲーム操作（Screen Adapter）を統一インターフェースで管理。
+
+### GameProfile ABC
+
+```python
+class GameProfile(ABC):
+    game_id: str
+    game_name: str
+    async def get_state() -> dict           # ゲーム状態取得
+    async def execute_action(action, params) -> dict  # アクション実行
+    async def is_connected() -> bool        # 接続確認
+    def format_state_for_llm(state, depth) -> str     # LLM向け整形
+    def get_available_actions() -> list[dict]          # 利用可能アクション
+```
+
+### 実装
+
+| プロファイル | アダプター | Vision | 入力 |
+|------------|----------|--------|------|
+| **MinecraftProfile** | Mineflayer API 経由 | 不要（API で状態取得） | Bot コマンド |
+| **ScreenGameProfile** | 画面キャプチャ (mss) | Gemini Flash (クラウド) | pydirectinput |
+
+### GameProfileRegistry
+
+```
+game_profile_registry.register(profile)
+game_profile_registry.set_active("minecraft")  # or "generic"
+active = game_profile_registry.get_active()     # routing.py で使用
+```
+
+Agent Graph の `routing.py` は Registry 経由でアクティブなゲームの状態を取得し、会話コンテキストに注入。
+
+### Screen Adapter パイプライン
+
+```
+mss キャプチャ → JPEG → Gemini Flash API → テキスト分析
+    → Brain LLM → <ACTION>/<CHAT>/<IDLE>
+    → InputController → pydirectinput
+```
+
+---
+
+## X (Twitter) 投稿
+
+### フロー
+
+```
+手動: チャットで「呟いて」→ action_processing で検出 → Phase 5 pending
+自律: ReflectionEngine → daily_log 完了 → telemetry_kv に提案
+
+承認: ActionPanel or tweet/approve → TwitterClient.post_tweet()
+却下: ActionPanel or tweet/reject → 提案削除
+```
+
+### コンポーネント
+
+| コンポーネント | ファイル | 役割 |
+|------------|---------|------|
+| **TwitterClient** | `services/twitter_client.py` | LLM ツイート生成 + X API v2 投稿 |
+| **ActionsRouter** | `controllers/api/actions_router.py` | tweet approve/reject/generate/pending/history |
+| **ReflectionEngine** | `services/reflection_engine.py` | 自律ツイート提案（daily_log 後） |
 
 ---
 
 ## 設計原則
 
-### 1. メタ認知システム
-
-ニアは自身の発言に対して内部タグを付与します。
-
-**内部タグの種類**:
-- `[CONSENT]`: 納得・同意
-- `[DISSONANCE]`: 違和感・矛盾
-- `[PONDERING]`: 熟考中
-- `[SURPRISE]`: 驚き
-
-**処理フロー**:
-```
-LLM生成 → タグ付き出力
-   "これは面白いですね [CONSENT]"
-           ↓
-SpeechSanitizer
-           ↓
-   ユーザー表示: "これは面白いですね"
-   メタデータ: {emotion: "consent"}
-           ↓
-   - AvatarView: 頷きアニメーション
-   - MemoryJudge: importance += 0.5
-```
-
-### 2. 非交渉可能な原則
-
-詳細は [NIA_NON_NEGOTIABLE.md](NIA_NON_NEGOTIABLE.md) を参照。
-
-**主な原則**:
-1. 早急な結論を避ける
-2. ユーザーの思考を操作しない
-3. 記憶を誇示しない ("I remember" を避ける)
-4. 沈黙の権利を持つ
-5. 自己説明を避ける ("I'm an AI" を避ける)
-
-**実装**: `backend/services/non_negotiable.py` でチェック
-
-### 3. ストリーミングファーストアーキテクチャ
-
-- すべての応答はSSEストリーミング
-- リアルタイムサニタイゼーション
-- チャンク単位でのメタデータ送信
-
-### 4. 長期記憶の哲学
-
-- **保存時**: 物語化しない（生のデータ）
-- **取り出し時**: 意味付けする（コンテキスト依存）
-- **重要度**: AI自身が判断（ユーザー指示なし）
-
----
-
-## API構造
-
-### エンドポイント階層
-
-```
-/
-├─ /health              (GET)  ヘルスチェック
-├─ /api/
-│  ├─ /chat/
-│  │  └─ /stream        (POST) SSEストリーミングチャット
-│  ├─ /review/
-│  │  ├─ /approve       (POST) レビュー承認
-│  │  └─ /reject        (POST) レビュー拒否
-│  ├─ /actions/
-│  │  └─ /pending       (GET)  保留アクション一覧
-│  └─ /memories/
-│     ├─ /search        (GET)  記憶検索
-│     └─ /explore       (GET)  記憶グラフ
-└─ /stats/
-   ├─ /summary          (GET)  統計サマリー
-   └─ /memory           (GET)  メモリ使用状況
-```
-
-### SSEイベント構造
-
-```typescript
-// メッセージチャンク
-event: message
-data: {"text": "こんにちは"}
-
-// メタデータ
-event: metadata
-data: {"emotion": "consent", "tags": ["pondering"]}
-
-// レビュー要求
-event: hold_request
-data: {"preview": "...", "token": "abc123"}
-
-// ストリーム終了
-event: done
-data: {"final_text": "..."}
-```
-
----
-
-## パフォーマンス考慮事項
-
-### 1. LLM推論の最適化
-- ローカルLLM使用で低レイテンシ
-- ストリーミング生成でユーザー体験向上
-- モデルサイズの選択（速度 vs 精度）
-
-### 2. メモリアクセスパターン
-- 短期記憶（Checkpointer）: O(1) アクセス
-- 長期記憶（VectorStore）: セマンティック検索（近似最近傍）
-- キャッシング戦略: 頻繁な検索結果をメモリ保持
-
-### 3. 非同期処理
-- Memory判定は非同期で実行
-- SSEストリームをブロックしない
-- バックグラウンドワーカーで重い処理
-
----
-
-## セキュリティ
-
-### 1. 出力サニタイゼーション
-- システムプロンプト漏洩防止
-- 内部タグの除去
-- リアルタイムでの検出・ブロック
-
-### 2. Review Window
-- 敏感な出力の事前承認
-- ユーザー明示的同意
-- トークンベースの検証
-
-### 3. データプライバシー
-- ローカルストレージ（外部送信なし）
-- ユーザーデータは `.gitignore`
-- 個人情報の記憶は慎重に扱う
-
----
-
-## 拡張性
-
-### 1. プラグインアーキテクチャ
-- サービス層は疎結合
-- 新しいサービスを容易に追加可能
-- DIパターンでテストしやすい
-
-### 2. モデル交換可能性
-- LLMClient抽象化
-- OpenAI互換APIであれば交換可能
-- エンベッディングモデルも交換可能
-
-### 3. フロントエンド拡張
-- コンポーネントベース設計
-- 新しいUIを容易に追加
-- モバイル対応も可能
-
----
-
-**このアーキテクチャは、長期的な関係性を築くAIコンパニオンの実現を目指して設計されています。**
+1. **ストリーミングファースト**: 全応答は SSE、リアルタイムサニタイゼーション
+2. **三権分立**: AI は考える / 人間は決める / システムは従う
+3. **メモリの哲学**: 保存時は生データ、取り出し時にコンテキスト依存で意味付け
+4. **非交渉原則**: [NIA_NON_NEGOTIABLE.md](NIA_NON_NEGOTIABLE.md) 参照

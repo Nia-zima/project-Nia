@@ -380,6 +380,7 @@ def test_merge_output_applies_external_pipeline_result(monkeypatch):
         selected_depth: int,
         surprise_signal: float,
         candidate_requests: list[dict] | None = None,
+        force_fetch: bool = False,
     ):
         assert say_candidate == "元の応答"
         assert selected_depth == 2
@@ -396,7 +397,7 @@ def test_merge_output_applies_external_pipeline_result(monkeypatch):
             "contradiction_flag": False,
         }
 
-    monkeypatch.setattr("backend.core.agent_graph.nodes._apply_external_data_pipeline", _fake_pipeline)
+    monkeypatch.setattr("backend.core.agent_graph.nodes.merge._apply_external_data_pipeline", _fake_pipeline)
 
     state = {
         "safety_route": "safe",
@@ -426,6 +427,7 @@ def test_merge_output_builds_external_candidate_requests(monkeypatch):
         selected_depth: int,
         surprise_signal: float,
         candidate_requests: list[dict] | None = None,
+        force_fetch: bool = False,
     ):
         captured["candidate_requests"] = list(candidate_requests or [])
         return say_candidate, None, {
@@ -438,7 +440,7 @@ def test_merge_output_builds_external_candidate_requests(monkeypatch):
             "contradiction_flag": None,
         }
 
-    monkeypatch.setattr("backend.core.agent_graph.nodes._apply_external_data_pipeline", _fake_pipeline)
+    monkeypatch.setattr("backend.core.agent_graph.nodes.merge._apply_external_data_pipeline", _fake_pipeline)
 
     state = {
         "safety_route": "safe",
@@ -465,7 +467,7 @@ def test_merge_output_emits_observation_record(monkeypatch):
     def _fake_log(payload: dict):
         calls.append(dict(payload))
 
-    monkeypatch.setattr("backend.core.agent_graph.nodes.log_turn_observation", _fake_log)
+    monkeypatch.setattr("backend.core.agent_graph.nodes.merge.log_turn_observation", _fake_log)
 
     state = {
         "thread_id": "t-observe",
@@ -544,3 +546,69 @@ def test_broker_auto_fallback_to_wikipedia(monkeypatch):
     assert out is not None
     assert "wikipedia" in out.source
     assert "<strong>" not in out.data
+
+
+# --- force_fetch (user explicit search) tests ---
+
+def test_detect_user_search_request():
+    from backend.core.agent_graph.nodes import _detect_user_search_request
+    assert _detect_user_search_request("プロジェクトAについてググって") is True
+    assert _detect_user_search_request("ネットで調べてみて") is True
+    assert _detect_user_search_request("検索してみて") is True
+    assert _detect_user_search_request("ウェブ検索して") is True
+    assert _detect_user_search_request("web検索して") is True
+    # ゲーム文脈の「調べて」は反応しない
+    assert _detect_user_search_request("周りを調べて") is False
+    assert _detect_user_search_request("こんにちは") is False
+    assert _detect_user_search_request("データを見せて") is False
+
+
+def test_force_fetch_bypasses_depth_and_surprise():
+    """force_fetch=True のとき depth/surprise ゲートをバイパスする。"""
+    from backend.core.agent_graph.nodes import _apply_external_data_pipeline
+
+    candidate = [{"category": "fact_check", "reason": "ユーザーが明示的に事実が不明な情報を確認したいと要求しました", "query": "テスト"}]
+    _, _, meta = _apply_external_data_pipeline(
+        say_candidate="テスト応答",
+        user_text="テストをググって",
+        selected_depth=0,  # depth0 = 通常はスキップ
+        surprise_signal=0.0,  # surprise 0 = 通常はスキップ
+        candidate_requests=candidate,
+        force_fetch=True,
+    )
+    # force_fetch 時はゲートを通過してパイプラインが実行される
+    assert meta.get("gate_a_pass") is True
+
+
+def test_build_candidate_with_user_search_trigger():
+    from backend.core.agent_graph.nodes import _build_external_candidate_requests
+    candidates = _build_external_candidate_requests(
+        user_text="東京タワーについてググって",
+        say_candidate="",
+    )
+    assert len(candidates) >= 1
+    assert candidates[0]["category"] == "fact_check"
+    assert "ユーザーが明示的" in candidates[0]["reason"]
+    # トリガーキーワードが除去されてクエリに含まれない
+    assert "ググって" not in candidates[0]["query"]
+    # 「について」も除去されてクリーンなクエリ
+    assert "東京タワー" in candidates[0]["query"]
+
+
+def test_extract_search_query_cleans_conversational_text():
+    from backend.core.agent_graph.nodes import _extract_search_query
+    # 会話文 + 検索要求 → 検索対象だけ抽出
+    assert "プロジェクトA" in _extract_search_query("あれー？おかしいな。プロジェクトAについてググって")
+    assert "あれー" not in _extract_search_query("あれー？おかしいな。プロジェクトAについてググって")
+    # シンプルなケース
+    assert "東京タワー" in _extract_search_query("東京タワーについてググって")
+    # フィラー + 依頼表現の除去
+    q = _extract_search_query("じゃあ、もう一度ジャッキーチェンとプロジェクトAについてググってみてくれる？")
+    assert "ジャッキーチェン" in q
+    assert "プロジェクトA" in q
+    assert "じゃあ" not in q
+    assert "もう一度" not in q
+    assert "してみてくれる" not in q
+    # トリガーだけの場合
+    q = _extract_search_query("ググって")
+    assert q == "" or len(q) < 3  # 空 or 非常に短い

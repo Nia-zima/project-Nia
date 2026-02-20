@@ -196,6 +196,39 @@ npm install
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
+### 3.3. Admin Token（管理操作用）
+
+`Vision / Sleep / Reflect / Identity` などの管理APIは `X-System-Token` が必要です。
+
+`backend/.env` ではなく、プロジェクトルートの `.env` に以下を設定してください。
+
+```env
+IDENTITY_SECRET_KEY=change-this-to-a-strong-random-token
+```
+
+#### この環境向け `.env` / `.env.local` の設定例
+
+```env
+# プロジェクトルート/.env
+IDENTITY_SECRET_KEY=replace-with-strong-random-token
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
+```env
+# frontend/.env.local
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+```
+
+#### 忘れないための3ステップ
+
+1. `.env` の `IDENTITY_SECRET_KEY` を確認（変更したらバックエンド再起動）
+2. フロントのサイドバー下 `Admin Token` に同じ値を入力して `保存`
+3. `401` が出たら `クリア` -> 再入力 -> `保存`
+
+補足:
+- `NEXT_PUBLIC_SYSTEM_TOKEN` はクライアント露出の可能性があるため、本番運用では固定埋め込みより都度入力を推奨
+- 合言葉は `401 = トークン不一致`
+
 ---
 
 ## 4. 起動
@@ -352,6 +385,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 ```
+
+### 5.7. 管理操作だけ 401 になる
+
+**症状**:
+- 通常API（例: `/api/status`）は通るが、`/api/system/*` や `/api/identity/*` だけ `401`
+
+**原因**:
+- `Admin Token` と `IDENTITY_SECRET_KEY` の不一致
+
+**3ステップ切り分け**:
+1. サーバー生存確認（通常API）
+2. 管理APIをトークンなしで確認（401になるか）
+3. 正しいトークンで管理APIを確認（200になるか）
+
+**PowerShell コピペ用**:
+```powershell
+# 1) 通常API確認（200期待）
+irm http://127.0.0.1:8000/api/status
+
+# 2) 管理API確認（トークンなし: 401期待）
+try { irm http://127.0.0.1:8000/api/identity/proposals?limit=1 } catch { $_.Exception.Message }
+
+# 3) 管理API確認（トークンあり: 200期待）
+$token = "YOUR_IDENTITY_SECRET_KEY"
+irm http://127.0.0.1:8000/api/identity/proposals?limit=1 -Headers @{ "X-System-Token" = $token }
+```
+
+**判定**:
+- 1が成功し、2が401、3が200なら設定は正常
+- 3が401のままなら、`Admin Token` と `IDENTITY_SECRET_KEY` が不一致
 
 ---
 

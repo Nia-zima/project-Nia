@@ -61,7 +61,7 @@ class TestDepthSelector:
             "dissonance": 0.3,
             "dissonance_on": False,
             "need_depth1": None,
-            "reason_codes": ["long_text"],
+            "reason_codes": ["risk_long_text"],
             "draft": None,
             "depth1_text": None,
             "merge_mode": None,
@@ -135,7 +135,7 @@ class TestDepthSelector:
         # 高dissonanceは強制的にDEPTH1
         assert result["need_depth1"] is True
         assert result["dissonance_on"] is True
-        assert "high_dissonance" in result["reason_codes"]
+        assert "risk_high_dissonance" in result["reason_codes"]
 
     @pytest.mark.asyncio
     async def test_confidence_metrics_are_recorded(self):

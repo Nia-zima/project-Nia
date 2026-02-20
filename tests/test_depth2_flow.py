@@ -13,25 +13,24 @@ def test_depth2_trigger_on_complex_policy_public_context():
     assert _should_use_depth2(user_text, dissonance=0.2, confidence=0.7) is True
 
 
-def test_merge_depth2_forces_hold():
+def test_merge_depth2_no_longer_forces_hold():
     state = {
         "safety_route": "safe",
         "draft": "",
         "depth1_text": "",
         "depth2_text": "1) いまの見立て: こう見てる\n2) 迷っている点: ここが不確実\n3) 暫定方針: まずは保留\n4) 確認したいこと: どこを優先する？",
-        "dissonance_on": True,
+        "dissonance_on": False,
         "need_depth1": True,
         "need_depth2": True,
-        "user_text": "配信で方針を決めたい",
+        "user_text": "この話題をもう少し深掘りしたい",
         "reason_codes": [],
         "dissonance": 0.2,
         "confidence": 0.6,
     }
     out = merge_output(state)
-    assert out.get("final_text") == "WAIT"
-    assert out.get("hold_required") is True
-    pending = out.get("pending_actions") or []
-    assert pending and pending[0].get("kind") == "say"
+    assert out.get("hold_required") is False
+    assert out.get("final_text") != "WAIT"
+    assert out.get("merge_mode") == "D2"
 
 
 def test_merge_ignores_stale_depth2_text_when_need_depth2_false():

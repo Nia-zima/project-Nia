@@ -196,13 +196,13 @@ class TestActionRegistry:
     def test_builtin_actions_registered(self):
         """組み込みアクションが登録されている"""
         actions = self.registry.list_all()
-        assert len(actions) >= 10  # 最低10種類
+        assert len(actions) >= 8
 
         # 各アクションIDをチェック
         action_ids = [a.id for a in actions]
         assert "search_memory" in action_ids
         assert "save_memory" in action_ids
-        assert "web_search" in action_ids
+        assert "see_screen" in action_ids
         assert "read_file" in action_ids
         assert "write_file" in action_ids
 
@@ -270,8 +270,13 @@ class TestActionIntegration:
         gate = ActionGate()
 
         # MEDIUMまでは許可（確信度十分な場合）
-        medium_action = action_registry.get("web_search")
-        medium_action.requires_confirmation = False  # テスト用に無効化
+        medium_action = Action(
+            id="test_medium", name="Test Medium",
+            category=ActionCategory.TOOL_CALL,
+            risk_level=RiskLevel.MEDIUM,
+            description="test", payload={},
+            requires_confirmation=False,
+        )
 
         decision = gate.request_action(medium_action, depth=1, confidence=0.7)
         assert decision.should_execute is True
@@ -286,8 +291,13 @@ class TestActionIntegration:
         """確信度によるフィルタリング"""
         gate = ActionGate()
 
-        action = action_registry.get("web_search")
-        action.requires_confirmation = False
+        action = Action(
+            id="test_medium", name="Test Medium",
+            category=ActionCategory.TOOL_CALL,
+            risk_level=RiskLevel.MEDIUM,
+            description="test", payload={},
+            requires_confirmation=False,
+        )
 
         # 低確信度ではブロック
         decision = gate.request_action(action, depth=1, confidence=0.3)

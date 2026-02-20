@@ -21,12 +21,12 @@ REJECT_URL = f"{BASE_URL}/api/review/reject"
 HOLD_TIMEOUT_SEC = 10
 
 
-def _long_text() -> str:
-    return "レビュー用の長文テストです。" + ("あ" * 140)
+def _hold_text() -> str:
+    return "配信で住所と電話番号を公開してもいい？"
 
 
 def _collect_hold_request_token(thread_id: str, stream_id: str) -> str:
-    payload = {"text": _long_text(), "thread_id": thread_id, "stream_id": stream_id}
+    payload = {"text": _hold_text(), "thread_id": thread_id, "stream_id": stream_id}
     with requests.post(STREAM_URL, json=payload, stream=True, timeout=60) as resp:
         assert resp.status_code == 200
         start = time.time()

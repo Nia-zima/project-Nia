@@ -1,6 +1,6 @@
-# 📂 ディレクトリマップ
+# ディレクトリマップ
 
-このドキュメントでは、AI_Buddy (Nia) プロジェクトの全体的なディレクトリ構造を説明します。
+AI_Buddy (Nia) プロジェクトのディレクトリ構造。
 
 ---
 
@@ -9,348 +9,282 @@
 ```
 AI_Buddy/
 ├── backend/              # バックエンド (Python/FastAPI)
-├── frontend/             # フロントエンド (Next.js/TypeScript)
-├── data/                 # データベース・ユーザーデータ
+├── frontend/             # フロントエンド (Next.js 16)
+├── tests/                # テスト (80+ ファイル)
 ├── docs/                 # ドキュメント
+├── data/                 # データベース（Git 管理外）
 ├── logs/                 # ログファイル
-├── scripts/              # ユーティリティスクリプト
-├── tests/                # テストファイル
+├── minecraft-bot/        # Minecraft Bot (mineflayer)
 ├── identity.md           # ニアのアイデンティティ定義
-├── README.md             # プロジェクト概要
-├── requirements.txt      # Python依存関係
-├── pyproject.toml        # Pythonプロジェクト設定
-└── .env                  # 環境変数（Git管理外）
+├── public_status.json    # 公開ステータス
+├── pyproject.toml        # Python プロジェクト設定
+├── requirements.txt      # Python 依存関係
+└── .env                  # 環境変数（Git 管理外）
 ```
 
 ---
 
-## Backend 構造
+## Backend
 
 ```
 backend/
-├── api/                      # API層（新規アーキテクチャ）
-│   └── memory_router.py      # メモリAPI
+├── server.py                     # FastAPI エントリポイント
 │
-├── controllers/              # ルーター・コントローラー
-│   ├── api/                  # API endpoints
-│   │   ├── __init__.py
-│   │   ├── actions_router.py     # アクション管理
+├── core/                         # コアロジック
+│   ├── agent.py                  # DefaultAgentOrchestrator
+│   ├── agent_stream.py           # SSE ストリーム実行
+│   ├── agent_helpers.py          # 共通ヘルパー
+│   ├── auth.py                   # Admin Token 認証
+│   ├── config.py                 # Settings クラス（.env 読み込み）
+│   ├── db.py                     # SQLite スキーマ初期化
+│   ├── embedding_model.py        # 埋め込みモデル
+│   ├── logger.py                 # ロギング設定
+│   ├── body_constitution_checker.py  # Body Constitution 検証
+│   │
+│   ├── agent_graph/              # LangGraph パイプライン
+│   │   ├── graph.py              # グラフ定義（9 ノード）
+│   │   ├── state.py              # AgentState TypedDict（59 フィールド）
+│   │   ├── review_window.py      # Review Window 関数群
+│   │   └── nodes/                # ノード実装（パッケージ）
+│   │       ├── routing.py        # safety / dissonance / depth_selector
+│   │       ├── depth_nodes.py    # depth0 / depth1 / depth2
+│   │       ├── merge.py          # merge_output
+│   │       ├── actions.py        # action_processing / s5_commit
+│   │       ├── helpers.py        # ノード共通ヘルパー
+│   │       ├── text_guards.py    # テキスト安全性チェック
+│   │       └── external_pipeline.py  # 外部パイプライン処理
+│   │
+│   └── constants/                # プロンプト定数
+│       ├── nia_spine_v10.py      # 背骨（全 Depth 共通基本指示）
+│       ├── depth0_prompt_v11.py  # Depth0 プロンプト（使用中）
+│       ├── depth1_prompt_v11.py  # Depth1 プロンプト（使用中）
+│       ├── game_prompt_fragment.py    # ゲームモード補助
+│       └── minecraft_brain_prompt.py  # Minecraft 用プロンプト
+│
+├── controllers/                  # API ルーター
+│   ├── api/                      # メイン API
+│   │   ├── stream_router.py      # SSE ストリーミングチャット
+│   │   ├── review_router.py      # Review Window
+│   │   ├── actions_router.py     # Phase 5 アクション
+│   │   ├── system_router.py      # Vision/Sleep/Reflect (admin)
 │   │   ├── profile_router.py     # ユーザープロフィール
-│   │   ├── review_router.py      # レビューウィンドウ
-│   │   ├── stream_router.py      # SSEストリーミングチャット
-│   │   ├── system_router.py      # システム情報
-│   │   ├── tts_events_router.py  # TTSイベント
-│   │   └── tts_router.py         # TTS制御
+│   │   ├── identity_router.py    # Identity Proposal レビュー (admin)
+│   │   ├── voice_router.py       # Voice Mode WebSocket
+│   │   ├── tts_router.py         # TTS 生成
+│   │   ├── tts_events_router.py  # TTS イベントバス
+│   │   ├── draw_router.py        # お絵描き機能
+│   │   ├── livestream_router.py  # 配信連携
+│   │   ├── game_router.py        # Minecraft (admin)
+│   │   ├── video_router.py       # 動画分析 (admin)
+│   │   └── motion_router.py      # VRM モーション
 │   │
-│   ├── stats/                # 統計API
-│   │   ├── __init__.py
+│   ├── stats/                    # 統計 API
+│   │   ├── summary_router.py     # サマリー
+│   │   ├── state_router.py       # 内部状態
 │   │   ├── memory_router.py      # メモリ統計
-│   │   ├── state_router.py       # 状態統計
-│   │   └── summary_router.py     # サマリー
+│   │   └── observation_router.py # 観察レポート
 │   │
-│   ├── pending_memory_router.py  # 保留メモリ
-│   └── stats_router.py           # 統計（レガシー）
+│   ├── stats_router.py           # 統計ルート集約
+│   └── pending_memory_router.py  # 保留メモリ
 │
-├── core/                     # コアロジック
-│   ├── agent_graph/          # LangGraph定義（Phase 1+）
-│   │   ├── __init__.py
-│   │   ├── graph.py          # グラフ定義
-│   │   ├── nodes.py          # 5ノード実装
-│   │   ├── review_window.py  # Phase 2: レビューウィンドウ
-│   │   ├── state.py          # 状態定義
-│   │   ├── tools.py          # ツール定義
-│   │   └── utils.py          # ユーティリティ
+├── services/                     # ビジネスロジック
+│   ├── memory/                   # Memory v2 サブパッケージ
+│   │   ├── memory_service.py     # 統一インターフェース
+│   │   ├── context_builder.py    # Depth 別コンテキスト生成（PINNED/PATTERNS/WORKING/MEMORY）
+│   │   ├── commit_executor.py    # S5 Commit 実行
+│   │   ├── semantic_store.py     # Semantic CRUD
+│   │   ├── working_store.py      # Working Items CRUD
+│   │   ├── retrieval.py          # Query-Aware Retrieval (M.1)
+│   │   ├── guardrail.py          # メモリ書き込み安全性
+│   │   ├── models.py             # Pydantic モデル
+│   │   └── vector_sync.py        # ベクトル同期
 │   │
-│   ├── constants/            # 定数定義
-│   │   └── nia_spine_v09.py  # システムプロンプト
+│   ├── gaming/                   # 汎用ゲーム操作 (Screen Adapter)
+│   │   ├── __init__.py           # init_screen_gaming / shutdown
+│   │   ├── screen_capture.py     # mss 画面キャプチャ → JPEG → base64
+│   │   ├── brain.py              # ゲーム意思決定 (THINK/ACTION/CHAT/IDLE)
+│   │   ├── game_loop.py          # GenericGameLoop (Perceive-Think-Act-Reflect)
+│   │   ├── input_controller.py   # pydirectinput 入力制御 + ActionMapping
+│   │   ├── screen_profile.py     # ScreenGameProfile (GameProfile 実装)
+│   │   └── game_configs.py       # ゲーム設定プリセット
 │   │
-│   ├── agent.py              # Agentオーケストレーション
-│   ├── config.py             # 設定管理
-│   ├── config_patch.py       # 設定パッチ
-│   ├── db.py                 # DB管理
-│   ├── logger.py             # ロギング設定
-│   ├── ports.py              # ポート定義
-│   └── state.py              # 状態管理
-│
-├── services/                 # ビジネスロジック
-│   ├── tts/                  # TTSサービス
-│   │   ├── __init__.py
-│   │   └── tts_event_bus.py  # TTSイベントバス
+│   ├── game_profiles/            # ゲームプロファイル抽象化
+│   │   ├── base.py               # GameProfile ABC
+│   │   ├── registry.py           # GameProfileRegistry (シングルトン)
+│   │   └── minecraft.py          # MinecraftProfile
 │   │
-│   ├── action_manager.py         # アクション管理
 │   ├── agent_orchestrator.py     # エージェント統合
-│   ├── audience_guard.py         # ストリーム視聴者保護
-│   ├── chat_history_store.py     # チャット履歴ストア
-│   ├── dream_store.py            # ドリームストア
-│   ├── gate_codes.py             # Phase 3: ゲートコード定義
-│   ├── hearing_adapter.py        # STT統合
-│   ├── identity_diff.py          # アイデンティティ差分
-│   ├── identity_manager.py       # アイデンティティ管理
-│   ├── image_store.py            # 画像ストア
-│   ├── inner_monologue_logger.py # 内部独白ログ
-│   ├── knowledge_graph.py        # 知識グラフ
-│   ├── lint_output.py            # 出力検証
-│   ├── llm_client.py             # LLM APIクライアント
-│   ├── llm_reflection.py         # LLM振り返り
-│   ├── memory_gate.py            # Phase 3: メモリゲート
-│   ├── memory_judge.py           # メモリ重要度判定
-│   ├── memory_manager.py         # メモリ管理統合
+│   ├── twitter_client.py         # X (Twitter) 投稿クライアント
+│   ├── reflection_engine.py     # Autonomous Reflection (R.2 + R.4)
+│   ├── idle_detector.py         # アイドル検出 (R.1)
+│   ├── speech_sanitizer.py       # 出力サニタイズ + ジェスチャー
+│   ├── identity_manager.py       # Identity 読み書き
+│   ├── identity_diff.py          # Identity 差分計算
+│   ├── vision_client.py          # 画像認識 (LM Studio / Gemini Flash)
+│   ├── voicevox_client.py        # VOICEVOX TTS
+│   ├── stt_service.py            # faster-whisper STT
+│   ├── voice_session_manager.py  # Voice セッション管理
+│   ├── voice_adapter.py          # ボイスアダプター
+│   ├── vector_store.py           # ChromaDB ベクトルストア
+│   ├── external_data.py          # 外部 API データ取得
+│   ├── memory_manager.py         # メモリ管理（レガシー互換）
+│   ├── memory_judge.py           # 重要度判定
+│   ├── memory_gate.py            # メモリゲート
 │   ├── memory_store.py           # メモリストア
-│   ├── non_negotiable.py         # 非交渉可能な原則チェック
+│   ├── chat_history_store.py     # チャット履歴
+│   ├── llm_client.py             # LLM API クライアント
+│   ├── action_manager.py         # アクション管理
 │   ├── pending_actions_repo.py   # 保留アクションリポジトリ
 │   ├── pending_actions_service.py # 保留アクションサービス
-│   ├── public_status.py          # 公開ステータス
-│   ├── retention_config.py       # 保持設定
 │   ├── retention_sweeper.py      # メモリ保持スイーパー
-│   ├── speech_sanitizer.py       # 出力サニタイザー
-│   ├── startup_tasks.py          # 起動タスク
-│   ├── telemetry_logger.py       # テレメトリログ
-│   ├── thought_engine.py         # 思考エンジン
-│   ├── tool_tag_parser.py        # ツールタグパーサー
-│   ├── tools.py                  # ツール定義
-│   ├── vector_store.py           # ベクトルストア
-│   ├── vision_adapter.py         # ビジョンアダプター
-│   ├── vision_client.py          # ビジョンクライアント
-│   ├── voice_adapter.py          # ボイスアダプター
-│   └── voicevox_client.py        # VOICEVOXクライアント
+│   ├── retention_config.py       # 保持設定
+│   ├── turn_observation_logger.py # ターン観察ログ
+│   ├── public_status.py          # 公開ステータス
+│   ├── audience_guard.py         # 配信視聴者保護
+│   ├── livestream_queue.py       # 配信コメントキュー
+│   ├── draw_agent_service.py     # お絵描きサービス
+│   ├── video_analyzer.py         # 動画分析
+│   ├── youtube_dl.py             # YouTube ダウンロード
+│   ├── motion_learner.py         # モーション学習
+│   ├── motion_library.py         # モーションプリセット
+│   └── (その他ユーティリティ)
 │
-├── scripts/                  # メンテナンススクリプト
-│   ├── backfill_origin_message_id.py  # Origin ID バックフィル
-│   ├── chapter_decision.py            # 章の決裁
-│   ├── chapter_reflection.py          # 章の振り返り
-│   ├── debug_check_db.py              # DB整合性チェック
-│   ├── dump_all.py                    # データダンプ
-│   ├── generate_docs.py               # ドキュメント生成
-│   ├── retention_full.py              # 保持処理フル実行
-│   ├── show_qr.py                     # QRコード表示
-│   ├── sleep_cycle.py                 # スリープサイクル
-│   ├── stream_digest.py               # ストリームダイジェスト
-│   ├── sync_vector_from_sql.py        # ベクトル同期
-│   └── vector_sync_status.py          # ベクトル同期ステータス
+├── scripts/                      # メンテナンススクリプト
+│   ├── sleep_cycle.py            # Sleep Cycle（日次メンテ）
+│   ├── observation_report.py     # 観察レポート生成
+│   ├── backfill_semantic.py      # Semantic バックフィル
+│   ├── cleanup_checkpoints.py    # チェックポイント GC
+│   └── (その他マイグレーション・デバッグ)
 │
-├── tests/                    # バックエンドテスト
-│   ├── __init__.py
-│   └── (テストファイル)
+├── api/                          # API 追加層
+│   └── memory_router.py          # メモリ CRUD API
 │
-├── static/                   # 静的ファイル
-│   └── audio/                # 生成されたオーディオ
-│       └── (*.wav ファイル - Git管理外)
-│
-├── chroma_db_storage/        # ChromaDBストレージ
-│   ├── chroma.sqlite3        # ChromaDB メタデータ
-│   └── (コレクションディレクトリ)
-│
-├── tools/                    # ツール
-│   └── judge_inspector.py    # Judge監査ツール
-│
-└── server.py                 # FastAPIエントリポイント
+└── tools/                        # ツール
+    └── judge_inspector.py        # Judge 監査
 ```
 
 ---
 
-## Frontend 構造
+## Frontend
 
 ```
 frontend/
-├── app/                      # Next.js App Router
-│   ├── globals.css           # グローバルスタイル
-│   ├── layout.tsx            # ルートレイアウト
-│   └── page.tsx              # メインページ
+├── app/                          # Next.js App Router
+│   ├── globals.css               # グローバルスタイル
+│   ├── layout.tsx                # ルートレイアウト
+│   └── page.tsx                  # メインページ（タブルーティング）
 │
-├── components/               # Reactコンポーネント
-│   ├── AvatarView.tsx        # 3Dアバター表示
-│   ├── ChatInterface.tsx     # チャットUI
-│   ├── InnerMonologue.tsx    # 内部独白表示
-│   ├── MemoryExplorer.tsx    # メモリエクスプローラー
-│   ├── MemoryGraph.tsx       # メモリグラフ
-│   ├── MemoryTimeline.tsx    # メモリタイムライン
-│   ├── ServiceWorkerRegistration.tsx  # PWA登録
-│   ├── SettingsPanel.tsx     # 設定パネル
-│   ├── Sidebar.tsx           # サイドバー
-│   └── StatsPanel.tsx        # 統計パネル
+├── components/                   # React コンポーネント
+│   ├── ChatInterface.tsx         # メインチャット UI + SSE + Voice
+│   ├── AvatarView.tsx            # VRM 3D アバター
+│   ├── Live2DView.tsx            # Live2D アバター (pixi-live2d-display)
+│   ├── ActionPanel.tsx           # Phase 5 アクション承認 + ツイート管理
+│   ├── ActionIssuesPanel.tsx     # 失敗/却下アクション
+│   ├── MemoryExplorer.tsx        # 記憶ブラウザ
+│   ├── MemoryGraph.tsx           # 記憶関係性グラフ
+│   ├── MemoryTimeline.tsx        # 記憶タイムライン
+│   ├── StatsPanel.tsx            # 統計ダッシュボード
+│   ├── InnerMonologue.tsx        # 内部独白
+│   ├── ObservationReport.tsx     # 観察レポート
+│   ├── DrawLab.tsx               # お絵描き PoC
+│   ├── GamePanel.tsx             # Minecraft 連携
+│   ├── VideoPanel.tsx            # 動画分析
+│   ├── IdentityPanel.tsx         # Identity Proposal レビュー
+│   ├── ProfileEditor.tsx         # プロフィール編集
+│   ├── LivestreamDashboard.tsx   # 配信ダッシュボード
+│   ├── Sidebar.tsx               # ナビゲーション + Admin Token
+│   ├── SettingsPanel.tsx         # モード切替
+│   └── chat/                     # チャットサブコンポーネント
+│       ├── ChatInput.tsx         # 入力エリア
+│       ├── ChatMessages.tsx      # メッセージ表示
+│       └── messageNormalization.ts  # メッセージ正規化
 │
-├── lib/                      # ライブラリ・ユーティリティ
-│   └── api.ts                # APIクライアント
+├── hooks/                        # カスタムフック
+│   ├── useVoiceMode.ts           # Voice Mode フック
+│   ├── useAudioPlayback.ts       # 音声再生フック
+│   ├── voiceModeUtils.ts         # Voice ユーティリティ
+│   └── audioPlaybackUtils.ts     # 再生ユーティリティ
 │
-├── public/                   # 公開ファイル
-│   └── (画像・アイコン等)
+├── lib/                          # ライブラリ
+│   ├── apiClient.ts              # 統一 API クライアント
+│   ├── types.ts                  # 共有型定義
+│   └── stores/
+│       └── chatStore.ts          # チャット状態管理
 │
-├── .next/                    # ビルド出力（Git管理外）
-├── node_modules/             # npm依存関係（Git管理外）
-├── package.json              # npm設定
-├── tsconfig.json             # TypeScript設定
-└── tailwind.config.js        # TailwindCSS設定
+└── public/
+    ├── vad/                      # Silero VAD アセット
+    │   ├── silero_vad_v5.onnx
+    │   ├── ort-wasm-simd.wasm
+    │   └── vad.worklet.bundle.min.js
+    └── live2d/                   # Live2D モデルアセット
+        └── hiyori/               # サンプルモデル (Hiyori)
 ```
 
 ---
 
-## Data 構造
+## Data（Git 管理外）
 
 ```
 data/
-├── nia.sqlite3               # メインデータベース
-│   ├── chat_messages         # チャット履歴
-│   ├── memories              # メモリメタデータ
-│   ├── pending_actions       # 保留アクション
-│   └── (その他テーブル)
-│
-├── checkpointer.sqlite3      # LangGraphチェックポインター
-│   └── checkpoints           # グラフ実行状態
-│
-├── user_profile.json         # ユーザープロフィール（Git管理外）
-│
-└── (*.sqlite3-wal, *.sqlite3-shm) # WALファイル（Git管理外）
+├── nia.sqlite3               # メイン DB（全テーブル）
+├── checkpointer.sqlite3      # LangGraph チェックポインター
+└── user_profile.json         # ユーザープロフィール
 ```
 
 ---
 
-## Logs 構造
-
-```
-logs/
-├── inner/                    # 内部ログ
-│   └── monologue.jsonl       # 内部独白ログ（Git管理外）
-│
-├── app.log                   # アプリケーションログ
-├── app.log.1                 # ローテーションログ（Git管理外）
-├── app.log.2                 # ローテーションログ（Git管理外）
-└── app.log.3                 # ローテーションログ（Git管理外）
-```
-
----
-
-## Docs 構造
+## Docs
 
 ```
 docs/
-├── adr/                      # Architecture Decision Records
-│   └── 001-phase3-pending-actions-review-request.md
+├── ARCHITECTURE.md               # システムアーキテクチャ
+├── SYSTEM_SPEC.md                # システム仕様書
+├── DIRECTORY_MAP.md              # このファイル
+├── NIA_NON_NEGOTIABLE.md         # 上位原則
+├── body_constitution.md          # Body Constitution
+├── constitution_mapping.md       # Constitution マッピング
+├── memory_redesign_v2.md         # Memory v2 設計仕様
+├── contracts.md                  # 10 状態遷移契約
+├── OPERATION_MANUAL.md           # 運用マニュアル
+├── SETUP.md                      # セットアップガイド
+├── improvement_plan.md           # 改善計画表
+├── livestream_design.md          # 配信機能設計
+├── pre_streaming_checklist.md    # 配信準備チェックリスト
+├── memory_legacy_deprecation_plan.md  # レガシー移行管理
+├── PHASE0_CONTRACTS.md           # Phase 0 契約
+├── PHASE1_CONFIDENCE.md          # Phase 1 確信度
+├── PHASE2_LANGGRAPH.md           # Phase 2 LangGraph
+├── PHASE5_ACTION_INTEGRATION.md  # Phase 5 アクション
+├── POST_PHASE5_REFACTORING.md    # Post-Phase5 リファクタ
+├── POST_PHASE5_ADJUSTMENT_PLAN.md # Post-Phase5 調整計画
 │
-├── A_safety_spec.md          # 安全性仕様
-├── ARCHITECTURE.md           # システムアーキテクチャ詳細
-├── DIRECTORY_MAP.md          # このファイル
-├── NIA_NON_NEGOTIABLE.md     # 非交渉可能な原則
-├── NIA_OVERVIEW.md           # Nia概要
-├── OPERATION_MANUAL.md       # 運用マニュアル
-├── project_overview.md       # プロジェクト概要
-├── SETUP.md                  # セットアップガイド
-└── source_code_bundle.md     # ソースコードバンドル説明
+└── archived/                     # アーカイブ済み
+    ├── PHASE3_POLICY_LEARNING.md
+    ├── PHASE4_DSPY.md
+    ├── ROADMAP_INTEGRATED.md
+    ├── NIA_OVERVIEW.md
+    ├── IMPLEMENTATION_SUMMARY.md
+    ├── A_safety_spec.md
+    ├── project_overview.md
+    ├── source_code_bundle.md
+    └── adr/
+        └── 001-phase3-pending-actions-review-request.md
 ```
 
 ---
 
-## Scripts 構造（プロジェクトルート）
+## 重要ファイル
 
-```
-scripts/
-├── __init__.py
-├── backup_project.py         # プロジェクトバックアップ
-├── bundle_sources.py         # ソースバンドル作成
-├── console_chat.py           # コンソールチャット
-├── diagnose_memory_pipeline.py  # メモリパイプライン診断
-├── qwen3_tts_smoke.py        # Qwen3 TTSスモークテスト
-├── recover_pending_actions.py   # 保留アクション復旧
-└── secure_memories.py        # メモリセキュリティ
-```
-
----
-
-## Tests 構造（プロジェクトルート）
-
-```
-tests/
-├── test_agent_direct.py      # エージェント直接テスト
-├── test_agent_persistence.py # エージェント永続化テスト
-├── test_api_integration.py   # API統合テスト
-├── test_dataset_builder.py   # データセットビルダーテスト
-├── test_gate_codes.py        # ゲートコードテスト
-├── test_history_api.py       # 履歴APIテスト
-├── test_lint_output.py       # 出力検証テスト
-├── test_memory.py            # メモリテスト
-├── test_pending_actions.py   # 保留アクションテスト
-├── test_phase1.py            # Phase 1テスト
-├── test_phase2.py            # Phase 2テスト
-├── test_review_e2e.py        # レビューE2Eテスト
-├── test_review_window.py     # レビューウィンドウテスト
-├── test_run.py               # 実行テスト
-├── test_safety_spec.py       # 安全性仕様テスト
-├── test_server_api.py        # サーバーAPIテスト
-└── test_server_connection.py # サーバー接続テスト
-```
-
----
-
-## 重要ファイル一覧
-
-| パス | 説明 | 重要度 | 変更頻度 |
-| :--- | :--- | :---: | :---: |
-| **identity.md** | ニアのアイデンティティ定義。性格・価値観の根幹 | ★★★ | 低 |
-| **backend/core/config.py** | 設定管理。API URL、パス、環境変数 | ★★★ | 中 |
-| **backend/core/agent_graph/** | LangGraphワークフロー。思考プロセスの中核 | ★★★ | 中 |
-| **backend/services/memory_manager.py** | メモリ管理統合。短期・長期記憶の橋渡し | ★★★ | 中 |
-| **backend/services/speech_sanitizer.py** | 出力浄化。内部タグ除去とリーク防止 | ★★★ | 低 |
-| **backend/server.py** | FastAPIエントリポイント。アプリケーション起動 | ★★★ | 低 |
-| **frontend/components/ChatInterface.tsx** | チャットUI。ユーザーとの主要インターフェース | ★★★ | 中 |
-| **data/nia.sqlite3** | メインデータベース。会話履歴と記憶 | ★★★ | 高 |
-| **backend/chroma_db_storage/** | ベクトルDB。長期記憶の実体 | ★★★ | 高 |
-| **backend/core/constants/nia_spine_v09.py** | システムプロンプト。AIの思考基盤 | ★★☆ | 低 |
-| **logs/inner/monologue.jsonl** | 内部独白ログ。デバッグと振り返り | ★★☆ | 高 |
-| **.env** | 環境変数。APIキー、URL設定 | ★★☆ | 低 |
-
----
-
-## Git管理外のファイル（.gitignoreに含まれる）
-
-以下のファイルは `.gitignore` で管理外にされています:
-
-### 生成ファイル
-- `backend/static/audio/**/*.wav` - 生成されたTTS音声
-- `data/*.sqlite3-wal`, `data/*.sqlite3-shm` - SQLite WALファイル
-- `backend/logs/*.log.*` - ローテーションログ
-
-### プライバシー関連
-- `data/user_profile.json` - ユーザープロフィール
-- `identity_snapshots/` - アイデンティティスナップショット
-- `sleep_outputs/*.jsonl` - スリープ出力
-
-### 開発環境
-- `.venv/` - Python仮想環境
-- `__pycache__/` - Pythonキャッシュ
-- `node_modules/` - npm依存関係
-- `.next/` - Next.jsビルド出力
-
-### レガシー
-- `faiss_index/` - 旧ベクトルインデックス
-- `backend/chroma_db/` - 旧ChromaDBディレクトリ
-
----
-
-## ディレクトリの役割マトリックス
-
-| ディレクトリ | 読み取り | 書き込み | Git管理 | 目的 |
-|------------|---------|---------|---------|------|
-| `backend/core/` | 高頻度 | 低頻度 | ✅ | システムコア |
-| `backend/services/` | 高頻度 | 中頻度 | ✅ | ビジネスロジック |
-| `backend/controllers/` | 中頻度 | 低頻度 | ✅ | APIルーティング |
-| `frontend/components/` | 高頻度 | 中頻度 | ✅ | UIコンポーネント |
-| `data/` | 高頻度 | 高頻度 | ⚠️ 部分的 | データ永続化 |
-| `logs/` | 中頻度 | 高頻度 | ❌ | ログ出力 |
-| `docs/` | 低頻度 | 低頻度 | ✅ | ドキュメント |
-| `tests/` | 中頻度 | 中頻度 | ✅ | テストコード |
-| `scripts/` | 低頻度 | 低頻度 | ✅ | ユーティリティ |
-
----
-
-## 追加の構造ファイル
-
-プロジェクトルートには、以下のドキュメント・設定ファイルも含まれています:
-
-- **AGENTS.md**: エージェント説明
-- **constraints.txt**: 制約条件
-- **dataset_builder.py**: データセットビルダー
-- **summarize_gate_logs.py**: ゲートログサマリー
-- **train_gate.py**: ゲートトレーニング
-
----
-
-**このディレクトリマップは、プロジェクトの全体像を理解するためのリファレンスです。詳細は各ファイルのドキュメントを参照してください。**
+| パス | 説明 | 重要度 |
+|------|------|:------:|
+| `identity.md` | ニアのアイデンティティ定義 | ★★★ |
+| `backend/core/config.py` | Settings（全設定集約） | ★★★ |
+| `backend/core/agent_graph/` | LangGraph パイプライン | ★★★ |
+| `backend/services/memory/` | Memory v2 サブパッケージ | ★★★ |
+| `backend/core/constants/nia_spine_v10.py` | 背骨プロンプト | ★★★ |
+| `backend/services/speech_sanitizer.py` | 出力サニタイザー | ★★★ |
+| `backend/server.py` | FastAPI エントリポイント | ★★★ |
+| `backend/scripts/sleep_cycle.py` | Sleep Cycle | ★★☆ |
+| `frontend/components/ChatInterface.tsx` | メインチャット UI | ★★☆ |
+| `frontend/lib/apiClient.ts` | 統一 API クライアント | ★★☆ |
+| `.env` | 環境変数 | ★★☆ |
