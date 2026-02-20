@@ -29,6 +29,7 @@ dependencies = [
     "watchdog",
     "dspy-ai>=2.5.0",
     "tweepy>=4.14",
+    "gymnasium>=1.0",
 ]
 
 
