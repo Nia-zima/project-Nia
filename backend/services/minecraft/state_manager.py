@@ -42,7 +42,7 @@ class MinecraftStateManager:
         lines = []
 
         # 基本情報 (全depth共通)
-        pos_str = f"({pos['x']}, {pos['y']}, {pos['z']})"
+        pos_str = f"({pos.get('x', 0)}, {pos.get('y', 0)}, {pos.get('z', 0)})"
         biome = state.get("biome", "unknown")
         time_info = state.get("time", {})
         period = time_info.get("period", "unknown")
@@ -63,19 +63,19 @@ class MinecraftStateManager:
             # インベントリ
             inventory = state.get("inventory", [])
             if inventory:
-                items = [f"{it['name']} x{it['count']}" for it in inventory[:10]]
+                items = [f"{it.get('name', '?')} x{it.get('count', 0)}" for it in inventory[:10]]
                 lines.append(f"Inventory: {', '.join(items)}")
 
             # 近接エンティティ
             entities = state.get("nearbyEntities", [])
             if entities:
-                ent_strs = [f"{e['name']} ({e['distance']}m)" for e in entities[:8]]
+                ent_strs = [f"{e.get('name', '?')} ({e.get('distance', '?')}m)" for e in entities[:8]]
                 lines.append(f"Nearby: {', '.join(ent_strs)}")
 
             # 注目ブロック
             blocks = state.get("nearbyBlocks", [])
             if blocks:
-                block_strs = [b["name"] for b in blocks[:5]]
+                block_strs = [b.get("name", "?") for b in blocks[:5]]
                 lines.append(f"Notable blocks: {', '.join(block_strs)}")
 
             # 最近のイベント

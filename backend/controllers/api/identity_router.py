@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.core.auth import verify_system_token
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 from backend.core.logger import logger
 from backend.services.identity_manager import identity_manager
 from backend.scripts.sleep_cycle import (
@@ -33,8 +33,7 @@ async def list_proposals(
     limit: int = Query(50, ge=1, le=200),
 ):
     """List identity proposals, optionally filtered by status."""
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         if status:
             statuses = [s.strip() for s in status.split(",")]
             placeholders = ",".join("?" * len(statuses))
@@ -57,8 +56,6 @@ async def list_proposals(
                 "SELECT COUNT(*) as c FROM identity_proposals",
             ).fetchone()
         return {"items": [dict(r) for r in rows], "total": total_row["c"]}
-    finally:
-        conn.close()
 
 
 @router.post(
@@ -67,8 +64,7 @@ async def list_proposals(
 )
 async def approve_proposal(proposal_id: str, req: ProposalDecisionRequest):
     """Approve a proposal and apply it to identity.md."""
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         row = conn.execute(
             "SELECT * FROM identity_proposals WHERE id = ?", (proposal_id,)
         ).fetchone()
@@ -77,8 +73,6 @@ async def approve_proposal(proposal_id: str, req: ProposalDecisionRequest):
         proposal = dict(row)
         if proposal["status"] != "pending":
             raise HTTPException(409, f"proposal_already_{proposal['status']}")
-    finally:
-        conn.close()
 
     # Apply to identity.md
     current_identity = identity_manager.get_identity()
@@ -97,8 +91,7 @@ async def approve_proposal(proposal_id: str, req: ProposalDecisionRequest):
         raise HTTPException(500, "identity_update_failed")
 
     # Update DB record
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         now = time.time()
         conn.execute(
             """UPDATE identity_proposals
@@ -107,8 +100,6 @@ async def approve_proposal(proposal_id: str, req: ProposalDecisionRequest):
             (req.review_note, now, proposal_id),
         )
         conn.commit()
-    finally:
-        conn.close()
     logger.info("[IDENTITY] Proposal %s approved and applied", proposal_id)
     return {"ok": True, "applied": True}
 
@@ -119,8 +110,7 @@ async def approve_proposal(proposal_id: str, req: ProposalDecisionRequest):
 )
 async def reject_proposal(proposal_id: str, req: ProposalDecisionRequest):
     """Reject a proposal without applying changes."""
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         row = conn.execute(
             "SELECT status FROM identity_proposals WHERE id = ?", (proposal_id,)
         ).fetchone()
@@ -137,7 +127,5 @@ async def reject_proposal(proposal_id: str, req: ProposalDecisionRequest):
             (req.review_note, now, proposal_id),
         )
         conn.commit()
-    finally:
-        conn.close()
     logger.info("[IDENTITY] Proposal %s rejected", proposal_id)
     return {"ok": True}

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Iterable, Optional
 
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 from backend.core.logger import logger
 from backend.services.memory.models import MemoryEvent, MemoryIndexEntry
 
@@ -66,55 +66,57 @@ class StorageDriver:
         )
 
     def append_event(self, event: MemoryEvent) -> str:
-        conn = get_conn()
-        try:
-            self._insert_event(conn, event)
-            return event.event_id
-        except sqlite3.IntegrityError:
-            logger.warning("[StorageDriver] append_event conflict event_id=%s", event.event_id)
-            raise
-        finally:
-            conn.close()
+        with managed_conn() as conn:
+            try:
+                self._insert_event(conn, event)
+                return event.event_id
+            except sqlite3.IntegrityError:
+                logger.warning("[StorageDriver] append_event conflict event_id=%s", event.event_id)
+                raise
 
     def append_event_and_index(self, event: MemoryEvent, index: Optional[MemoryIndexEntry] = None) -> str:
         """
         Atomic write for event + index.
         Prevents partial state if process crashes between operations.
         """
-        conn = get_conn()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            self._insert_event(conn, event)
-            if index is not None:
-                self._upsert_index_entry(conn, index)
-            conn.execute("COMMIT")
-            return event.event_id
-        except sqlite3.IntegrityError:
+        with managed_conn() as conn:
             try:
-                conn.execute("ROLLBACK")
+                conn.execute("BEGIN IMMEDIATE")
+                self._insert_event(conn, event)
+                if index is not None:
+                    self._upsert_index_entry(conn, index)
+                conn.execute("COMMIT")
+                return event.event_id
+            except sqlite3.IntegrityError:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                logger.warning("[StorageDriver] append_event_and_index conflict event_id=%s", event.event_id)
+                raise
             except Exception:
-                pass
-            logger.warning("[StorageDriver] append_event_and_index conflict event_id=%s", event.event_id)
-            raise
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
-        finally:
-            conn.close()
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
     def upsert_index_entries(self, items: Iterable[MemoryIndexEntry]) -> int:
-        conn = get_conn()
-        count = 0
-        try:
-            for it in items:
-                self._upsert_index_entry(conn, it)
-                count += 1
-            return count
-        finally:
-            conn.close()
+        with managed_conn() as conn:
+            count = 0
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for it in items:
+                    self._upsert_index_entry(conn, it)
+                    count += 1
+                conn.execute("COMMIT")
+                return count
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
     def query_index(
         self,
@@ -124,8 +126,7 @@ class StorageDriver:
         related_turn_id: Optional[str] = None,
         limit: int = 50,
     ) -> list[dict]:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             clauses = ["thread_id = ?"]
             params: list[object] = [thread_id]
             if scope:
@@ -147,14 +148,11 @@ class StorageDriver:
                 tuple(params),
             ).fetchall()
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     def load_events_by_ids(self, event_ids: list[str]) -> list[dict]:
         if not event_ids:
             return []
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             placeholders = ",".join(["?"] * len(event_ids))
             rows = conn.execute(
                 f"""
@@ -165,8 +163,6 @@ class StorageDriver:
                 tuple(event_ids),
             ).fetchall()
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     def list_events(
         self,
@@ -175,8 +171,7 @@ class StorageDriver:
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict]:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             if thread_id:
                 rows = conn.execute(
                     """
@@ -199,12 +194,7 @@ class StorageDriver:
                     (int(limit), int(offset)),
                 ).fetchall()
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     def clear_index_for_thread(self, thread_id: str) -> None:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             conn.execute("DELETE FROM memory_index WHERE thread_id = ?", (thread_id,))
-        finally:
-            conn.close()

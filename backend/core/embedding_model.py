@@ -2,20 +2,22 @@
 Shared embedding model singleton for semantic similarity calculations.
 
 Uses sentence-transformers (paraphrase-multilingual-MiniLM-L12-v2) for
-multilingual support. Lazy-loaded on first use.
+multilingual support. Lazy-loaded on first use with thread-safe initialization.
 """
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 _model: Optional[object] = None
 _load_failed = False
+_model_lock = threading.Lock()
 
 
 def _patch_torch_distributed():
@@ -36,16 +38,22 @@ def _get_model():
         return _model
     if _load_failed:
         return None
-    try:
-        _patch_torch_distributed()
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(_MODEL_NAME)
-        logger.info("[EmbeddingModel] loaded %s", _MODEL_NAME)
-        return _model
-    except Exception:
-        _load_failed = True
-        logger.warning("[EmbeddingModel] failed to load %s", _MODEL_NAME, exc_info=True)
-        return None
+    with _model_lock:
+        # Double-check after acquiring lock
+        if _model is not None:
+            return _model
+        if _load_failed:
+            return None
+        try:
+            _patch_torch_distributed()
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer(MODEL_NAME)
+            logger.info("[EmbeddingModel] loaded %s", MODEL_NAME)
+            return _model
+        except Exception:
+            _load_failed = True
+            logger.warning("[EmbeddingModel] failed to load %s", MODEL_NAME, exc_info=True)
+            return None
 
 
 def encode(texts: list[str]) -> Optional[np.ndarray]:

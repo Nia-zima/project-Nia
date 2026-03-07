@@ -5,8 +5,7 @@ import json
 import os
 import time
 import uuid
-
-os.environ.setdefault("RETENTION_PROFILE", "fast")
+from datetime import date, timedelta
 
 import pytest
 
@@ -450,14 +449,16 @@ class TestCrossDayExtractsPatterns:
         """3+ days of data → patterns extracted and saved to semantic_memories."""
         _insert_event("t1", "テスト", "回答")
 
-        # Insert 3 days of daily_reflections
-        _insert_daily_reflection("t1", "2026-02-15", 0, {
+        # Insert 3 days of daily_reflections (within 7-day lookback window)
+        from datetime import date, timedelta
+        _base = date.today()
+        _insert_daily_reflection("t1", (_base - timedelta(days=3)).isoformat(), 0, {
             "summary": "設計フェーズ開始", "key_topics": ["Architecture"], "emotional_moments": [], "unresolved": [],
         })
-        _insert_daily_reflection("t1", "2026-02-16", 0, {
+        _insert_daily_reflection("t1", (_base - timedelta(days=2)).isoformat(), 0, {
             "summary": "設計の継続", "key_topics": ["Design"], "emotional_moments": [], "unresolved": [],
         })
-        _insert_daily_reflection("t1", "2026-02-17", 0, {
+        _insert_daily_reflection("t1", (_base - timedelta(days=1)).isoformat(), 0, {
             "summary": "実装フェーズへ", "key_topics": ["Implementation"], "emotional_moments": [], "unresolved": [],
         })
 
@@ -502,10 +503,11 @@ class TestCrossDayConfidenceCap:
         """3 prior days + today = 4 days → confidence capped at 0.6."""
         _insert_event("t1", "テスト", "回答")
 
-        for day in range(16, 19):  # 3 prior days (+ today from Phase 1 = 4 total)
-            _insert_daily_reflection("t1", f"2026-02-{day:02d}", 0, {
-                "summary": f"Day {day} summary",
-                "key_topics": [f"topic{day}"],
+        for i in range(1, 4):  # 3 prior days (+ today from Phase 1 = 4 total)
+            day_str = (date.today() - timedelta(days=i)).isoformat()
+            _insert_daily_reflection("t1", day_str, 0, {
+                "summary": f"Day {i} summary",
+                "key_topics": [f"topic{i}"],
                 "emotional_moments": [],
                 "unresolved": [],
             })
@@ -551,10 +553,11 @@ class TestCrossDayConfidenceCap:
         """7 days → confidence capped at 0.9."""
         _insert_event("t1", "テスト", "回答")
 
-        for day in range(12, 19):  # 7 days
-            _insert_daily_reflection("t1", f"2026-02-{day:02d}", 0, {
-                "summary": f"Day {day} summary",
-                "key_topics": [f"topic{day}"],
+        for i in range(1, 8):  # 7 days
+            day_str = (date.today() - timedelta(days=i)).isoformat()
+            _insert_daily_reflection("t1", day_str, 0, {
+                "summary": f"Day {i} summary",
+                "key_topics": [f"topic{i}"],
                 "emotional_moments": [],
                 "unresolved": [],
             })
@@ -601,10 +604,11 @@ class TestCrossDayStateTag:
         """Cross-day insights are saved with state_tag='insight'."""
         _insert_event("t1", "テスト", "回答")
 
-        for day in range(16, 19):  # 3 days
-            _insert_daily_reflection("t1", f"2026-02-{day:02d}", 0, {
-                "summary": f"Day {day} summary",
-                "key_topics": [f"topic{day}"],
+        for i in range(1, 4):  # 3 prior days
+            day_str = (date.today() - timedelta(days=i)).isoformat()
+            _insert_daily_reflection("t1", day_str, 0, {
+                "summary": f"Day {i} summary",
+                "key_topics": [f"topic{i}"],
                 "emotional_moments": [],
                 "unresolved": [],
             })

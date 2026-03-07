@@ -16,15 +16,17 @@ import uuid
 from datetime import date
 
 from backend.core.config import settings
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 from backend.services.llm_client import call_llm
 from backend.services.memory import semantic_store
 from backend.services.memory.models import SemanticMemory
+from backend.services.pip.pip_scrap_collector import pip_scrap_collector
 
 logger = logging.getLogger("ReflectionEngine")
 
 _REFLECTION_LLM_TIMEOUT = 180
-_NO_THINK_SUFFIX = "\n/no_think"
+
+from backend.core.model_adapter import prompt_suffix as _no_think_suffix  # noqa: E402
 _CHUNK_TURNS = 25
 
 
@@ -50,8 +52,7 @@ async def run_reflection(thread_id: str) -> dict:
     today_str = date.today().isoformat()
 
     # 1. Determine event boundary (last reflection OR last sleep, whichever is later)
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         row = conn.execute(
             "SELECT MAX(created_at) as latest FROM daily_reflections WHERE thread_id = ?",
             (thread_id,),
@@ -61,15 +62,12 @@ async def run_reflection(thread_id: str) -> dict:
         row2 = conn.execute(
             "SELECT v FROM telemetry_kv WHERE k = 'last_sleep_completed_at'"
         ).fetchone()
-        last_sleep_at = float(row2[0]) if row2 else 0.0
+        last_sleep_at = float(row2["v"]) if row2 else 0.0
 
         since = max(last_reflection_at, last_sleep_at)
-    finally:
-        conn.close()
 
     # 2. Query memory_events since boundary
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         rows = conn.execute(
             """SELECT event_id, thread_id, payload_json, created_at
                FROM memory_events
@@ -79,8 +77,6 @@ async def run_reflection(thread_id: str) -> dict:
                ORDER BY created_at ASC""",
             (thread_id, since),
         ).fetchall()
-    finally:
-        conn.close()
 
     if not rows:
         logger.info("[ReflectionEngine] No new events since last reflection/sleep")
@@ -103,35 +99,33 @@ async def run_reflection(thread_id: str) -> dict:
         return result
 
     # Save daily_log to daily_reflections
-    conn = get_conn()
     try:
-        session_idx = _compute_session_index(conn, thread_id, today_str)
-        conn.execute(
-            """INSERT INTO daily_reflections
-               (id, thread_id, reflection_date, session_index, phase,
-                content_json, turn_count, token_count, created_at)
-               VALUES (?, ?, ?, ?, 'daily_log', ?, ?, 0, ?)""",
-            (
-                uuid.uuid4().hex,
-                thread_id,
-                today_str,
-                session_idx,
-                json.dumps(daily_log, ensure_ascii=False),
-                len(events),
-                now,
-            ),
-        )
-        result["daily_log_saved"] = True
-        logger.info(
-            "[ReflectionEngine] daily_log saved (session_index=%d, turns=%d)",
-            session_idx, len(events),
-        )
+        with managed_conn() as conn:
+            session_idx = _compute_session_index(conn, thread_id, today_str)
+            conn.execute(
+                """INSERT INTO daily_reflections
+                   (id, thread_id, reflection_date, session_index, phase,
+                    content_json, turn_count, token_count, created_at)
+                   VALUES (?, ?, ?, ?, 'daily_log', ?, ?, 0, ?)""",
+                (
+                    uuid.uuid4().hex,
+                    thread_id,
+                    today_str,
+                    session_idx,
+                    json.dumps(daily_log, ensure_ascii=False),
+                    len(events),
+                    now,
+                ),
+            )
+            result["daily_log_saved"] = True
+            logger.info(
+                "[ReflectionEngine] daily_log saved (session_index=%d, turns=%d)",
+                session_idx, len(events),
+            )
     except Exception as exc:
         logger.exception("[ReflectionEngine] daily_log DB save failed")
         result["errors"].append(f"daily_log_save: {exc}")
         return result
-    finally:
-        conn.close()
 
     # 4. Phase 2: Distillation
     try:
@@ -143,11 +137,28 @@ async def run_reflection(thread_id: str) -> dict:
         return result
 
     if insights:
-        unique_insights = _deduplicate_claims(insights)
+        # Separate Pip Scraps from Semantic Memories
+        scrap_candidates = [
+            i for i in insights 
+            if i.get("category") in ("orphaned_emotion", "fragmented_dialogue")
+        ]
+        semantic_candidates = [
+            i for i in insights 
+            if i.get("category") not in ("orphaned_emotion", "fragmented_dialogue")
+        ]
+
+        # 4a. Process Pip Scraps
+        if scrap_candidates:
+            try:
+                pip_scrap_collector.process_scrap_candidates(thread_id, scrap_candidates)
+            except Exception as e:
+                logger.warning(f"[ReflectionEngine] Scrap collection failed: {e}")
+
+        # 4b. Process Semantic Memories
+        unique_insights = _deduplicate_claims(semantic_candidates)
 
         # Save to semantic_memories
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             batch = []
             event_ids = [ev["event_id"] for ev in events[:10]]
             for insight in unique_insights:
@@ -177,33 +188,29 @@ async def run_reflection(thread_id: str) -> dict:
                 conn.commit()
                 result["insights_count"] = count
                 logger.info("[ReflectionEngine] saved %d insights to semantic_memories", count)
-        finally:
-            conn.close()
 
-        # Save distillation to daily_reflections
-        conn = get_conn()
+        # Save distillation to daily_reflections (log all extracted insights including scraps)
         try:
-            conn.execute(
-                """INSERT INTO daily_reflections
-                   (id, thread_id, reflection_date, session_index, phase,
-                    content_json, turn_count, token_count, created_at)
-                   VALUES (?, ?, ?, ?, 'distillation', ?, ?, 0, ?)""",
-                (
-                    uuid.uuid4().hex,
-                    thread_id,
-                    today_str,
-                    session_idx,
-                    json.dumps(unique_insights, ensure_ascii=False),
-                    len(events),
-                    now,
-                ),
-            )
-            result["distillation_saved"] = True
+            with managed_conn() as conn:
+                conn.execute(
+                    """INSERT INTO daily_reflections
+                       (id, thread_id, reflection_date, session_index, phase,
+                        content_json, turn_count, token_count, created_at)
+                       VALUES (?, ?, ?, ?, 'distillation', ?, ?, 0, ?)""",
+                    (
+                        uuid.uuid4().hex,
+                        thread_id,
+                        today_str,
+                        session_idx,
+                        json.dumps(insights, ensure_ascii=False),
+                        len(events),
+                        now,
+                    ),
+                )
+                result["distillation_saved"] = True
         except Exception as exc:
             logger.warning("[ReflectionEngine] distillation DB save failed: %s", exc)
             result["errors"].append(f"distillation_save: {exc}")
-        finally:
-            conn.close()
 
     # 5. Phase 3: Cross-day distillation (R.4)
     if result["daily_log_saved"]:
@@ -216,7 +223,7 @@ async def run_reflection(thread_id: str) -> dict:
             logger.warning("[ReflectionEngine] Phase 3 (cross-day) failed: %s", exc)
             result["errors"].append(f"cross_day: {exc}")
 
-    # Phase T: Auto-propose tweet after daily_log
+    # Phase T: Auto-post tweet after daily_log
     if result["daily_log_saved"] and getattr(settings, "TWITTER_AUTO_PROPOSE", False):
         try:
             from backend.services.twitter_client import twitter_client
@@ -228,11 +235,14 @@ async def run_reflection(thread_id: str) -> dict:
                     style="diary", context=context, thread_id=thread_id,
                 )
                 if tweet_text:
-                    _store_tweet_proposal(thread_id, tweet_text)
-                    result["tweet_proposed"] = True
-                    logger.info("[ReflectionEngine] tweet proposed: %s", tweet_text[:50])
+                    post_result = await twitter_client.post_tweet(tweet_text)
+                    if post_result.success:
+                        result["tweet_posted"] = True
+                        logger.info("[ReflectionEngine] tweet posted: %s (id=%s)", tweet_text[:50], post_result.tweet_id)
+                    else:
+                        logger.warning("[ReflectionEngine] tweet post failed: %s", post_result.error)
         except Exception as exc:
-            logger.warning("[ReflectionEngine] tweet proposal failed: %s", exc)
+            logger.warning("[ReflectionEngine] tweet failed: %s", exc)
 
     result["success"] = True
     return result
@@ -243,8 +253,7 @@ async def run_reflection(thread_id: str) -> dict:
 
 def _store_tweet_proposal(thread_id: str, tweet_text: str) -> None:
     """Store tweet proposal in telemetry_kv for frontend polling."""
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES (?, ?, ?)",
             (
@@ -261,8 +270,6 @@ def _store_tweet_proposal(thread_id: str, tweet_text: str) -> None:
                 int(time.time()),
             ),
         )
-    finally:
-        conn.close()
 
 
 def _compute_session_index(conn, thread_id: str, reflection_date: str) -> int:
@@ -282,6 +289,8 @@ def _category_to_state_tag(category: str) -> str:
         "origin_preference": "origin",
         "shared_event": "shared",
         "nia_commitment": "nia",
+        "self_observation": "nia",
+        "nero_observation": "nero",
     }.get(category, "origin")
 
 
@@ -292,9 +301,11 @@ async def _generate_daily_log(events: list[dict], thread_id: str) -> dict | None
     """Chunk events into segments, LLM-summarize each, combine into a daily log."""
     chunk_summaries: list[str] = []
 
+    is_nero = thread_id.startswith("nero_meeting")
+    speaker = "Nero" if is_nero else "Origin"
+
     for chunk_start in range(0, len(events), _CHUNK_TURNS):
         chunk = events[chunk_start:chunk_start + _CHUNK_TURNS]
-
         conversation_lines: list[str] = []
         for ev in chunk:
             try:
@@ -304,7 +315,7 @@ async def _generate_daily_log(events: list[dict], thread_id: str) -> dict | None
             user_text = payload.get("user_text", "")
             ai_response = payload.get("ai_response", "")
             if user_text:
-                conversation_lines.append(f"Origin: {user_text}")
+                conversation_lines.append(f"{speaker}: {user_text}")
             if ai_response:
                 conversation_lines.append(f"Nia: {ai_response}")
 
@@ -312,14 +323,16 @@ async def _generate_daily_log(events: list[dict], thread_id: str) -> dict | None
             continue
 
         conv_text = "\n".join(conversation_lines)
+        partner = "Nero（ニアのサポート役AIマネージャー）" if is_nero else "Origin"
 
         prompt = (
-            "以下はOriginとニアの会話ログです。\n"
+            f"以下は{partner}とニアの会話ログです。\n"
             "この会話の流れ・主要な話題・印象的なやり取りを要約してください。\n\n"
             "【ルール】\n"
-            "- 事実のみ記述し、感想や推測は含めない\n"
+            "- 起きた事実と、会話中に観察できた変化を記述する\n"
             "- 具体的な話題名を挙げる（「いろいろ話した」は不可）\n"
             "- 感情的に印象的だったやり取りがあれば記録する\n"
+            "- ニアの態度・表現・自己認識に変化があれば記録する\n"
             "- 未解決の話題があれば記録する\n\n"
             f"【会話】\n{conv_text}\n\n"
             "【出力形式】JSON:\n"
@@ -329,7 +342,7 @@ async def _generate_daily_log(events: list[dict], thread_id: str) -> dict | None
             '  "emotional_moments": ["印象的だったこと（あれば）"],\n'
             '  "unresolved": ["未解決の話題（あれば）"]\n'
             "}"
-        ) + _NO_THINK_SUFFIX
+        ) + _no_think_suffix()
 
         try:
             response = await call_llm(
@@ -368,7 +381,7 @@ async def _generate_daily_log(events: list[dict], thread_id: str) -> dict | None
         '  "emotional_moments": ["印象的だったこと（あれば）"],\n'
         '  "unresolved": ["未解決の話題（あれば）"]\n'
         "}"
-    ) + _NO_THINK_SUFFIX
+    ) + _no_think_suffix()
 
     try:
         response = await call_llm(
@@ -435,31 +448,37 @@ async def _extract_insights(daily_log: dict) -> list[dict]:
 
     prompt = (
         "あなたはAIVTuber「ニア」の記憶整理係です。\n"
-        "以下はニアとOrigin（ユーザー）の会話の要約です。\n\n"
+        "以下はニアとOriginまたはNero（ニアのサポート役AIマネージャー）の会話の要約です。\n\n"
         "この会話から「覚えておく価値のある情報」を抽出してください。\n\n"
         "【抽出対象】\n"
         "1. origin_fact — Originが明言した事実（「〜を使っている」「〜が好き」）\n"
         "2. origin_preference — Originの行動パターンや好み（「設計を先に固めたがる」）\n"
         "3. shared_event — 二人の間で起きた具体的な出来事（「〜を一緒に設計した」）\n"
-        "4. nia_commitment — ニアが表明した意見・約束（「〜するつもりだと伝えた」）\n\n"
+        "4. nia_commitment — ニアが表明した意見・約束（「〜するつもりだと伝えた」）\n"
+        "5. self_observation — ニア自身の気づき・内面の変化・言語化の試み（「〜がうまく言えなかった」「〜と感じた」）\n"
+        "6. nero_observation — Neroが述べた観察・問いかけ・分析（「Neroが〜について聞いた」「Neroが〜と指摘した」）\n\n"
+        "【Pip Scrap用追加抽出対象（不完全で言語化しきれなかったもの）】\n"
+        "7. orphaned_emotion — ニアが言葉にしきれなかった、行き場のない感情の破片\n"
+        "8. fragmented_dialogue — ニアが言い淀んだり、途中でやめた断片的な言葉\n\n"
         "【抽出しないもの】\n"
         "- 一般的な事実（「Pythonはプログラミング言語」など誰でも知ってること）\n"
-        "- 曖昧な推測（「たぶん〜だろう」レベル）\n"
         "- 一時的な状態（「今眠い」「今日は忙しい」）\n"
-        "- 表層的な要約（「技術の話をした」← 具体性がない）\n\n"
+        "- 表層的な要約（「技術の話をした」← 具体性がない）\n"
+        "- 話者の発言をそのままコピーしたもの（要約して1文にすること）\n\n"
         f"【会話要約】\n{log_text}\n\n"
         "【出力形式】JSON配列で返してください:\n"
         '[{"content": "抽出した情報（具体的に、1文で）", '
-        '"category": "origin_fact | origin_preference | shared_event | nia_commitment", '
+        '"category": "origin_fact | origin_preference | shared_event | nia_commitment | self_observation | nero_observation | orphaned_emotion | fragmented_dialogue", '
         '"confidence": 0.0〜1.0, '
         '"reasoning": "なぜこれを覚えておくべきか（1文で）"}]\n\n'
         "confidenceの基準:\n"
         "- 1.0: 明言された事実（「俺は〜だ」と直接述べた）\n"
         "- 0.7: 文脈から高確率で読み取れる\n"
-        "- 0.4: 示唆されたが明確ではない\n\n"
+        "- 0.4: 示唆されたが明確ではない\n"
+        "- 0.3: ニアの内面的な気づき（まだ形になっていなくても）\n\n"
         '何もなければ [] を返してください。\n'
         "「数を出すこと」より「本当に価値のあるもの」だけ出してください。"
-    ) + _NO_THINK_SUFFIX
+    ) + _no_think_suffix()
 
     try:
         response = await call_llm(
@@ -471,12 +490,8 @@ async def _extract_insights(daily_log: dict) -> list[dict]:
         if not response:
             return []
 
-        json_match = _re.search(r'\[.*\]', response, _re.DOTALL)
-        if not json_match:
-            return []
-
-        claims = json.loads(json_match.group())
-        if not isinstance(claims, list):
+        claims = _parse_json_list_tolerant(response)
+        if not claims:
             return []
 
         validated: list[dict] = []
@@ -488,10 +503,10 @@ async def _extract_insights(daily_log: dict) -> list[dict]:
                 continue
 
             conf = float(claim.get("confidence", 0.5))
-            conf = max(0.4, min(1.0, conf))
+            conf = max(0.3, min(1.0, conf))
 
             category = claim.get("category", "origin_fact")
-            if category not in ("origin_fact", "origin_preference", "shared_event", "nia_commitment"):
+            if category not in ("origin_fact", "origin_preference", "shared_event", "nia_commitment", "self_observation", "nero_observation", "orphaned_emotion", "fragmented_dialogue"):
                 category = "origin_fact"
 
             validated.append({
@@ -545,6 +560,7 @@ def _deduplicate_claims(claims: list[dict]) -> list[dict]:
 
 _CROSS_DAY_CATEGORIES = frozenset({
     "user_trait", "relationship_pattern", "emerging_interest", "lesson",
+    "self_reflection",
 })
 
 
@@ -558,8 +574,7 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
     lookback = getattr(settings, "REFLECTION_LOOKBACK_DAYS", 7)
     min_days = getattr(settings, "REFLECTION_CROSS_MIN_DAYS", 3)
 
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         rows = conn.execute(
             """SELECT reflection_date, content_json
                FROM daily_reflections
@@ -568,8 +583,6 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
                ORDER BY reflection_date ASC""",
             (thread_id, today_str, str(lookback)),
         ).fetchall()
-    finally:
-        conn.close()
 
     unique_dates = {r["reflection_date"] for r in rows}
     if len(unique_dates) < min_days:
@@ -586,10 +599,17 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
             data = json.loads(row["content_json"])
             summary = data.get("summary", "")
             topics = ", ".join(data.get("key_topics", []))
-            if summary:
-                day_summaries.append(
-                    f"[{row['reflection_date']}] {summary} (話題: {topics})"
-                )
+            if not summary:
+                continue
+            parts = [f"[{row['reflection_date']}] {summary} (話題: {topics})"]
+            # Include emotional moments and unresolved topics for deeper insight
+            emotional = data.get("emotional_moments", [])
+            if emotional:
+                parts.append(f"  感情的瞬間: {'; '.join(emotional)}")
+            unresolved = data.get("unresolved", [])
+            if unresolved:
+                parts.append(f"  未解決: {'; '.join(unresolved)}")
+            day_summaries.append("\n".join(parts))
         except (ValueError, TypeError):
             continue
 
@@ -617,7 +637,8 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
         "1. user_trait — Originの一貫した特性（「常に設計を先にする」）\n"
         "2. relationship_pattern — 二人の関係性の傾向（「技術の話で盛り上がりやすい」）\n"
         "3. emerging_interest — 最近現れた関心（「〜に興味を持ち始めた」）\n"
-        "4. lesson — 経験から得た教訓（「〜のアプローチがうまくいった」）\n\n"
+        "4. lesson — 経験から得た教訓（「〜のアプローチがうまくいった」）\n"
+        "5. self_reflection — ニア自身の内面の変化（「自分の表現に対する向き合い方が変わった」「不確かさをそのまま出せるようになった」）\n\n"
         "【抽出しないもの】\n"
         "- 1日だけの出来事（パターンではない）\n"
         "- 推測や希望的観測\n\n"
@@ -628,7 +649,7 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
         f'"confidence": 0.4〜{conf_cap}, '
         '"reasoning": "どの日のデータから読み取れるか"}]\n\n'
         '何もなければ [] を返してください。'
-    ) + _NO_THINK_SUFFIX
+    ) + _no_think_suffix()
 
     response = await call_llm(
         [{"role": "system", "content": prompt}],
@@ -637,21 +658,8 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
         timeout_seconds=_REFLECTION_LLM_TIMEOUT,
     )
 
-    if not response:
-        return []
-
-    # Parse response
-    json_match = _re.search(r'\[.*\]', response, _re.DOTALL)
-    if not json_match:
-        return []
-
-    try:
-        claims = json.loads(json_match.group())
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("[ReflectionEngine] cross-day: JSON parse failed")
-        return []
-
-    if not isinstance(claims, list):
+    claims = _parse_json_list_tolerant(response)
+    if not claims:
         return []
 
     # Validate
@@ -685,8 +693,7 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
 
     # Save to semantic_memories
     now = time.time()
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         batch = []
         for insight in unique:
             conf = insight["confidence"]
@@ -715,7 +722,35 @@ async def _cross_day_distillation(thread_id: str, today_str: str) -> list[dict]:
                 "[ReflectionEngine] cross-day: saved %d patterns to semantic_memories",
                 count,
             )
-    finally:
-        conn.close()
 
     return unique
+
+
+def _parse_json_list_tolerant(response: str) -> list[dict]:
+    """Extract and parse a JSON array from an LLM response string."""
+    if not response:
+        return []
+
+    json_match = _re.search(r'\[.*\]', response, _re.DOTALL)
+    if not json_match:
+        return []
+
+    json_str = json_match.group()
+    try:
+        claims = json.loads(json_str)
+        if isinstance(claims, list):
+            return claims
+        return []
+    except json.JSONDecodeError as jde:
+        if jde.pos > 0:
+            try:
+                claims = json.loads(json_str[: jde.pos])
+                if isinstance(claims, list):
+                    return claims
+            except (json.JSONDecodeError, ValueError):
+                pass
+        logger.warning("[ReflectionEngine] tolerant JSON list parse failed", exc_info=True)
+        return []
+    except Exception as exc:
+        logger.warning(f"[ReflectionEngine] JSON list parse unexpected error: {exc}")
+        return []

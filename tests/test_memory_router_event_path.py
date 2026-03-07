@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from backend.core.db import init_schema, get_conn
-from backend.api import memory_router as mr
+from backend.controllers.api import memory_query_router as mr
 
 
 def _thread(prefix: str = "mem_router") -> str:

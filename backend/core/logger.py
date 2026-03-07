@@ -11,7 +11,16 @@ from backend.core.config import LOG_DIR
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = Path(LOG_DIR) / "app.log"
 
-_HANDLER_MARKER = "_ai_buddy_handler"
+_HANDLER_MARKER = "_nia_handler"
+
+
+class RequestIDFilter(logging.Filter):
+    """Inject the current request correlation ID into every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from backend.core.correlation import get_request_id
+        record.request_id = get_request_id() or "-"
+        return True
 
 
 class RateLimitFilter(logging.Filter):
@@ -55,7 +64,7 @@ def attach_debug_suppress_filter(target: logging.Filterer) -> None:
     高頻度デバッグログだけ間引くフィルタを logger/handler に付与。
     """
 
-    if getattr(target, "_ai_buddy_rate_limit", False):
+    if getattr(target, "_nia_rate_limit", False):
         return
 
     def key_fn(rec: logging.LogRecord) -> str:
@@ -76,7 +85,7 @@ def attach_debug_suppress_filter(target: logging.Filterer) -> None:
 
     f = RateLimitFilter(window_sec=1.0, max_events=5, key_fn=key_fn)
     target.addFilter(f)
-    setattr(target, "_ai_buddy_rate_limit", True)
+    setattr(target, "_nia_rate_limit", True)
 
 
 def setup_logging(
@@ -128,10 +137,12 @@ def setup_logging(
         handlers.append(file_handler)
 
     formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        "%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s"
     )
+    rid_filter = RequestIDFilter()
     for h in handlers:
         h.setFormatter(formatter)
+        h.addFilter(rid_filter)
 
     root.setLevel(lvl)
     for h in handlers:
@@ -153,7 +164,7 @@ def setup_logging(
 
 
 class CustomLogger:
-    def __init__(self, name: str = "AI_Buddy"):
+    def __init__(self, name: str = "nia"):
         try:
             if hasattr(sys.stdout, "reconfigure"):
                 sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -169,8 +180,9 @@ class CustomLogger:
         
         # Formatter
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            '%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s'
         )
+        rid_filter = RequestIDFilter()
 
         # Clear existing handlers to prevent duplicates
         if self.logger.hasHandlers():
@@ -179,6 +191,7 @@ class CustomLogger:
         # 1. Console Handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
+        console_handler.addFilter(rid_filter)
         setattr(console_handler, _HANDLER_MARKER, True)
         self.logger.addHandler(console_handler)
 
@@ -193,6 +206,7 @@ class CustomLogger:
             errors="backslashreplace",
         )
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(rid_filter)
         setattr(file_handler, _HANDLER_MARKER, True)
         self.logger.addHandler(file_handler)
 

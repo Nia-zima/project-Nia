@@ -1,11 +1,21 @@
 """Action processing and S5 commit nodes."""
-import logging
+import asyncio
 import time
 
 from backend.core.config import settings
 from backend.core.agent_graph.state import AgentState
+from backend.core.logger import logger
 
-logger = logging.getLogger(__name__)
+from .commit_helpers import (
+    _update_awareness_stats,
+    _update_metacog_stats,
+    _upsert_kv,
+    _record_somatic_feedback,
+    _infer_emotional_state,
+    _update_pip_interaction,
+    _record_niacore_experience,
+    _record_skeleton,
+)
 
 
 # =============================================================================
@@ -58,8 +68,16 @@ async def action_processing(state: AgentState) -> dict:
             from backend.services.twitter_client import twitter_client
             if twitter_client.enabled:
                 style = "diary" if any(w in user_text for w in ["振り返", "今日", "日記"]) else "casual"
+                # Task detection from user input
+                task = ""
+                if any(w in user_text for w in ["自己紹介", "挨拶", "初めまして"]):
+                    task = "self_introduction"
+                elif any(w in user_text for w in ["感想", "レビュー", "見た", "聴いた"]):
+                    task = "reaction"
+                elif any(w in user_text for w in ["告知", "お知らせ", "宣伝"]):
+                    task = "announcement"
                 tweet_text = await twitter_client.generate_tweet(
-                    style=style, context=user_text[:200],
+                    style=style, task=task, context=user_text[:200],
                 )
                 if tweet_text:
                     proposed_actions.append({
@@ -67,7 +85,7 @@ async def action_processing(state: AgentState) -> dict:
                         "payload": {"tweet_text": tweet_text},
                     })
         except Exception as exc:
-            logger.warning("[ACTION] tweet generation failed: %s", exc)
+            logger.warning("[ACTION] tweet generation failed: %s", exc, exc_info=True)
 
     if not proposed_actions:
         return {
@@ -205,17 +223,17 @@ async def action_processing(state: AgentState) -> dict:
 # Phase F: S5 Commit Node
 # =============================================================================
 
-def s5_commit(state: AgentState) -> dict:
+async def s5_commit(state: AgentState) -> dict:
     """Phase F / S5: Single-transaction memory commit at end of graph.
 
     Saves episodic events only. Semantic extraction is deferred to Sleep Cycle.
-    Gated by ORCHESTRATOR_S5_ENABLED (default False).
+    Gated by ORCHESTRATOR_S5_ENABLED (default True).
     Skips when hold_required or final_text == "WAIT".
     """
     import uuid as _uuid
     from backend.services.memory.commit_executor import CommitPlan, execute as _commit_execute
 
-    if not getattr(settings, "ORCHESTRATOR_S5_ENABLED", False):
+    if not getattr(settings, "ORCHESTRATOR_S5_ENABLED", True):
         return {"orchestrator_stage": "S5", "commit_result": None}
 
     hold_required = bool(state.get("hold_required"))
@@ -234,16 +252,84 @@ def s5_commit(state: AgentState) -> dict:
     plan = CommitPlan()
 
     # Episodic: save user input + AI response
+    event_payload = {
+        "user_text": user_text[:2000],
+        "ai_response": final_text[:2000],
+        "merge_mode": state.get("merge_mode"),
+        "selected_depth": state.get("selected_depth"),
+        "confidence": state.get("confidence"),
+    }
+
+    # N.0: Awareness Core — tag episodic event if awareness is significant
+    awareness_dict = None
+    if getattr(settings, "AWARENESS_CORE_ENABLED", True):
+        try:
+            from backend.services.memory.metacognition import (
+                compute_awareness, MetaCogResult, SankaiFlags,
+            )
+
+            # Reconstruct MetaCogResult from state dict
+            metacog_raw = state.get("metacog_result")
+            metacog = None
+            if metacog_raw and isinstance(metacog_raw, dict):
+                metacog = MetaCogResult(
+                    raw_confidence=metacog_raw.get("raw_confidence", 0.5),
+                    adjusted_confidence=metacog_raw.get("adjusted_confidence", 0.5),
+                    grounding_score=metacog_raw.get("grounding_score", 0.0),
+                    grounding_hits=metacog_raw.get("grounding_hits", 0),
+                    contradiction_detected=metacog_raw.get("contradiction_detected", False),
+                    sankai_flags=SankaiFlags(
+                        fabrication_risk=metacog_raw.get("fabrication_risk", False),
+                        false_memory_risk=metacog_raw.get("false_memory_risk", False),
+                    ),
+                )
+
+            awareness = compute_awareness(
+                user_response=user_text,
+                nia_previous=final_text,
+                metacog=metacog,
+                dissonance_on=bool(state.get("dissonance_on")),
+            )
+
+            awareness_dict = {
+                "relational_surprise": awareness.relational_surprise,
+                "growth_signal": awareness.growth_signal,
+                "authenticity": awareness.authenticity,
+                "composite": awareness.composite,
+                "trigger_reasons": awareness.trigger_reasons,
+            }
+
+            threshold = getattr(settings, "AWARENESS_SIGNAL_THRESHOLD", 0.3)
+            if awareness.composite > threshold:
+                event_payload["awareness_signal"] = "high"
+                event_payload["awareness_reasons"] = awareness.trigger_reasons
+
+            # Accumulate awareness stats in telemetry_kv (ring buffer for N.4)
+            _update_awareness_stats(awareness.composite, now)
+
+            # N.5: Generate self-narrative for next turn's context
+            try:
+                from backend.services.memory.metacognition import generate_self_narrative
+                narrative = generate_self_narrative(
+                    metacog=metacog,
+                    awareness=awareness,
+                    dissonance_on=bool(state.get("dissonance_on")),
+                )
+                if narrative:
+                    from backend.core.db import managed_conn as _managed_conn_n5
+                    with _managed_conn_n5() as _conn_n5:
+                        _upsert_kv(_conn_n5, "self_narrative", narrative, now)
+                    logger.debug("[S5_COMMIT] self_narrative saved: %s", narrative[:40])
+            except Exception:
+                logger.debug("[S5_COMMIT] self-narrative generation failed", exc_info=True)
+
+        except Exception:
+            logger.warning("[S5_COMMIT] awareness core failed", exc_info=True)
+
     plan.episodic.append({
         "event_id": _uuid.uuid4().hex,
         "event_type": "conversation_turn",
-        "payload": {
-            "user_text": user_text[:2000],
-            "ai_response": final_text[:2000],
-            "merge_mode": state.get("merge_mode"),
-            "selected_depth": state.get("selected_depth"),
-            "confidence": state.get("confidence"),
-        },
+        "payload": event_payload,
         "created_at": now,
     })
 
@@ -280,9 +366,8 @@ def s5_commit(state: AgentState) -> dict:
             if result.success:
                 # Phase R.1: Increment daily turn counter & check threshold
                 try:
-                    from backend.core.db import get_conn as _get_conn
-                    _conn = _get_conn()
-                    try:
+                    from backend.core.db import managed_conn as _managed_conn
+                    with _managed_conn() as _conn:
                         _conn.execute(
                             "INSERT INTO telemetry_kv (k, v, updated_at) VALUES ('daily_turn_count', '1', ?)"
                             " ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(v AS INTEGER) + 1 AS TEXT), updated_at = ?",
@@ -296,26 +381,73 @@ def s5_commit(state: AgentState) -> dict:
                                 (int(now),),
                             )
                             logger.info("[S5_COMMIT] reflection_pending=1 (turns=%d)", turn_count)
-                    finally:
-                        _conn.close()
                 except Exception:
-                    logger.debug("[S5_COMMIT] turn counter update failed", exc_info=True)
+                    logger.warning("[S5_COMMIT] turn counter update failed", exc_info=True)
+
+                # N.2: Expire contradiction holds past TTL
+                try:
+                    from backend.services.memory.contradiction import expire_contradiction_holds
+                    expired = expire_contradiction_holds(thread_id)
+                    if expired:
+                        logger.info("[S5_COMMIT] expired %d contradiction holds", expired)
+                except Exception:
+                    logger.debug("[S5_COMMIT] contradiction TTL check failed", exc_info=True)
+
+                # N.4: Update metacog stats for state-driven triggers
+                try:
+                    _update_metacog_stats(state, now)
+                except Exception:
+                    logger.debug("[S5_COMMIT] metacog stats update failed", exc_info=True)
+
+                # S.1b: Somatic feedback recording
+                if getattr(settings, "SOMATIC_FEEDBACK_ENABLED", False):
+                    try:
+                        _record_somatic_feedback(state, thread_id, turn_id, now)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] somatic feedback failed", exc_info=True)
+
+                # P.1: Pip interaction update
+                if getattr(settings, "PIP_ENABLED", False):
+                    try:
+                        _update_pip_interaction(state, final_text, now)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] pip interaction update failed", exc_info=True)
+
+                # NiaCore: Record experience for offline batch learning
+                if getattr(settings, "NIACORE_EXPERIENCE_ENABLED", False):
+                    try:
+                        _record_niacore_experience(state, thread_id, turn_id, user_text, now)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] niacore experience failed", exc_info=True)
+
+                # SkeletonCore: Record conversation skeleton labels
+                if getattr(settings, "SKELETON_RECORD_ENABLED", False):
+                    try:
+                        _record_skeleton(state, thread_id, turn_id)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] skeleton record failed", exc_info=True)
+
                 break
             if attempt < max_retries - 1:
                 logger.warning("[S5_COMMIT] attempt %d/%d failed: %s", attempt + 1, max_retries, result.errors)
-                time.sleep(0.5 * (2 ** attempt))
+                await asyncio.sleep(0.5 * (2 ** attempt))
             else:
                 logger.warning("[S5_COMMIT] all %d attempts failed: %s", max_retries, result.errors)
         except Exception as e:
             if attempt < max_retries - 1:
                 logger.warning("[S5_COMMIT] attempt %d/%d exception: %s", attempt + 1, max_retries, e)
-                time.sleep(0.5 * (2 ** attempt))
+                await asyncio.sleep(0.5 * (2 ** attempt))
             else:
                 logger.exception("[S5_COMMIT] all %d attempts failed: %s", max_retries, e)
                 commit_summary = {"success": False, "errors": [str(e)]}
 
     logger.info("[S5_COMMIT] result=%s", commit_summary)
-    return {
+    result: dict = {
         "orchestrator_stage": "S5",
         "commit_result": commit_summary,
     }
+    if awareness_dict is not None:
+        result["awareness_signal"] = awareness_dict
+    return result
+
+

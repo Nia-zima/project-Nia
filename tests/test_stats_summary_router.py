@@ -6,12 +6,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from backend.core.db import init_schema, get_conn
+from backend.core.db import init_schema, managed_conn
 from backend.controllers.stats import summary_router as sr
 
 
 def _seed_chat_event(thread_id: str):
-    with get_conn() as conn:
+    with managed_conn() as conn:
         conn.execute(
             "INSERT INTO events (thread_id, event_type, payload_json) VALUES (?, ?, ?)",
             (thread_id, "chat_received", "{}"),
@@ -19,7 +19,7 @@ def _seed_chat_event(thread_id: str):
 
 
 def _seed_memory_event(thread_id: str, event_type: str, payload_json: str = "{}", event_id: str | None = None):
-    with get_conn() as conn:
+    with managed_conn() as conn:
         if event_id:
             conn.execute(
                 "INSERT INTO memory_events (event_id, thread_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",

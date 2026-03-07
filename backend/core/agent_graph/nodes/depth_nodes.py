@@ -1,26 +1,26 @@
 """Depth processing nodes: depth0 (reflex), depth1 (organize), depth2 (value-align)."""
 import asyncio
-import logging
 import re
-
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.core.agent_graph.state import AgentState
 from backend.core.config import settings
 from backend.core.contracts import Depth0Contract, Depth1Contract
+from backend.core.logger import logger
+from backend.core.model_adapter import ThinkMode, parse_response_content, prompt_suffix
 from backend.services.inner_monologue_logger import log_inner_thought
 
 from .helpers import (
-    _TONE_ANCHOR,
     _get_user_text_from_state,
     _normalize_whitespace,
     _recent_history,
-    extract_section,
+    _repetition_count,
+    _strip_think_blocks,
+    build_context_suffix,
     get_depth_llm,
 )
 from .text_guards import _final_text_guard
 
-logger = logging.getLogger(__name__)
 
 
 async def depth0_reflex(state: AgentState) -> dict:
@@ -29,23 +29,12 @@ async def depth0_reflex(state: AgentState) -> dict:
     from backend.core.constants.depth0_prompt_v11 import DEPTH0_SYSTEM_PROMPT_V11
     system_prompt = DEPTH0_SYSTEM_PROMPT_V11
 
-    # Phase G: pinned facts only (minimal context for quick reflex)
-    memory_context = state.get("memory_context") or ""
-    pinned = extract_section(memory_context, "PINNED FACTS")
-    if pinned:
-        system_prompt += f"\n\n=== PINNED FACTS ===\n{pinned}"
+    # Phase G: pinned facts only + game + TONE (minimal context for quick reflex)
+    system_prompt += build_context_suffix(state, memory_mode="pinned_only")
+    system_prompt += prompt_suffix(ThinkMode.NO_THINK)
 
-    # Minecraft: game context (minimal for depth0)
-    game_ctx = state.get("game_context") or ""
-    if game_ctx:
-        system_prompt += f"\n\n=== GAME STATE ===\n{game_ctx}"
-
-    # TONE アンカーを末尾に配置（LLMが最後に読む位置）
-    system_prompt += _TONE_ANCHOR
-    # Qwen3: depth0 は non-thinking モード（速度優先）
-    system_prompt += "\n/no_think"
-
-    llm = get_depth_llm(temperature=0.6, max_tokens=160)
+    rep_boost = max(_repetition_count(state) - 2, 0)  # 3回目から効き始める
+    llm = get_depth_llm(temperature=0.6, max_tokens=300, reasoning_effort="low", repetition_boost=rep_boost)
     # 会話履歴を含める（depth0 は即応なので直近15ターン）
     llm_messages = [SystemMessage(content=system_prompt)]
     llm_messages.extend(_recent_history(state, max_pairs=15))
@@ -55,15 +44,20 @@ async def depth0_reflex(state: AgentState) -> dict:
             llm.ainvoke(llm_messages),
             timeout=30.0,
         )
-        raw = getattr(resp, "content", "") or ""
-        # Qwen3: /no_think でも空の <think></think> が出ることがある
-        raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
+        raw = parse_response_content(getattr(resp, "content", None))
+        if not raw:
+            _extra = getattr(resp, "additional_kwargs", {}) or {}
+            logger.warning(
+                "[DEPTH0] content empty — has_reasoning=%s",
+                bool(_extra.get("reasoning")),
+            )
+        raw = _strip_think_blocks(raw)
         draft = _normalize_whitespace(raw)
     except asyncio.TimeoutError:
         logger.warning("[DEPTH0] LLM timeout (30s)")
         return {"draft": "WAIT"}
     except Exception as e:
-        logger.warning("[DEPTH0] LLM error: %s", e)
+        logger.warning("[DEPTH0] LLM error: %s", e, exc_info=True)
         return {"draft": "WAIT"}
 
     # Phase 0: Depth0 契約検証
@@ -164,19 +158,11 @@ async def depth1_organize_and_ask(state: AgentState) -> dict:
                 "- 次に『未確定な点』を1文で述べる\n"
                 "- 必要な場合のみ、確認したい問いを1つだけ述べる"
             )
-        # Phase G: full memory context for depth1
-        memory_context = state.get("memory_context") or ""
-        if memory_context:
-            system_prompt += f"\n\n{memory_context}"
-        # Minecraft: game context (full for depth1)
-        game_ctx = state.get("game_context") or ""
-        if game_ctx:
-            system_prompt += f"\n\n=== GAME STATE ===\n{game_ctx}"
-        # TONE アンカーを末尾に配置（LLMが最後に読む位置）
-        system_prompt += _TONE_ANCHOR
-        # Qwen3: depth1 は non-thinking モード（速度優先）
-        system_prompt += "\n/no_think"
-        llm = get_depth_llm(temperature=0.4, max_tokens=240)
+        # Phase G: full memory + game + TONE context for depth1
+        system_prompt += build_context_suffix(state, memory_mode="full")
+        system_prompt += prompt_suffix(ThinkMode.NO_THINK)
+        rep_boost = max(_repetition_count(state) - 2, 0)
+        llm = get_depth_llm(temperature=0.4, max_tokens=500, reasoning_effort="low", repetition_boost=rep_boost)
         llm_messages = [SystemMessage(content=system_prompt)]
         llm_messages.extend(_recent_history(state, max_pairs=30))
         llm_messages.append(HumanMessage(content=user_text))
@@ -185,16 +171,29 @@ async def depth1_organize_and_ask(state: AgentState) -> dict:
                 llm.ainvoke(llm_messages),
                 timeout=30.0,
             )
-            raw = getattr(resp, "content", "") or ""
-            # Qwen3: /no_think でも空の <think></think> が出ることがある
-            raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
+            raw = parse_response_content(getattr(resp, "content", None))
+            if not raw:
+                # GPT-OSS 等: reasoning フィールドに思考が入り content が空になる
+                # reasoning は内部 chain-of-thought なので返答として使わない
+                _extra = getattr(resp, "additional_kwargs", {}) or {}
+                _has_reasoning = bool(_extra.get("reasoning"))
+                _finish = (_extra.get("finish_reason") or
+                           (getattr(resp, "response_metadata", {}) or {}).get("finish_reason") or "")
+                logger.warning(
+                    "[DEPTH1] content empty — has_reasoning=%s finish_reason=%s",
+                    _has_reasoning, _finish,
+                )
+            raw = _strip_think_blocks(raw)
             depth1_text = _normalize_whitespace(raw)
+            if not depth1_text:
+                depth1_text = "まだ少し整理しきれていない。要点を一つだけ言い直してくれる？"
+                logger.warning("[DEPTH1] empty response; using deterministic clarification")
         except asyncio.TimeoutError:
             logger.warning("[DEPTH1] LLM timeout (30s)")
-            return {"depth1_text": ""}
+            depth1_text = "ちょっと考えるのに時間がかかってる……もう一回言ってくれる？"
         except Exception as e:
-            logger.warning("[DEPTH1] LLM error: %s", e)
-            return {"depth1_text": ""}
+            logger.warning("[DEPTH1] LLM error: %s", e, exc_info=True)
+            depth1_text = "うまく考えがまとまらなかった。もう少しシンプルに聞いてくれる？"
 
     # Phase 0: Depth1 契約検証
     if depth1_text:
@@ -218,7 +217,7 @@ async def depth1_organize_and_ask(state: AgentState) -> dict:
     return {"depth1_text": depth1_text}
 
 
-def _build_followup_ab_question(*, user_text: str, self_scope: bool) -> str:
+def _build_followup_ab_question(*, self_scope: bool) -> str:
     if self_scope:
         return (
             "ここを一つだけ確認したい。"
@@ -261,19 +260,11 @@ async def depth2_value_align_and_preview(state: AgentState) -> dict:
         f"dissonance: {dissonance:.2f}"
     )
 
-    # Phase G: full memory context for depth2
-    memory_context = state.get("memory_context") or ""
-    if memory_context:
-        system_prompt += f"\n\n{memory_context}"
-    # Minecraft: game context (full for depth2)
-    game_ctx = state.get("game_context") or ""
-    if game_ctx:
-        system_prompt += f"\n\n=== GAME STATE ===\n{game_ctx}"
-    # TONE アンカーを末尾に配置（LLMが最後に読む位置）
-    system_prompt += _TONE_ANCHOR
-    # Qwen3: depth2 は thinking モード（深い推論が必要な場面）
-    system_prompt += "\n/think"
-    llm = get_depth_llm(temperature=0.35, max_tokens=800)
+    # Phase G: full memory + game + TONE context for depth2
+    system_prompt += build_context_suffix(state, memory_mode="full")
+    system_prompt += prompt_suffix(ThinkMode.THINK)
+    rep_boost = max(_repetition_count(state) - 2, 0)
+    llm = get_depth_llm(temperature=0.35, max_tokens=800, reasoning_effort="medium", repetition_boost=rep_boost)
     llm_messages = [SystemMessage(content=system_prompt)]
     llm_messages.extend(_recent_history(state, max_pairs=30))
     llm_messages.append(HumanMessage(content=user_text))
@@ -282,15 +273,14 @@ async def depth2_value_align_and_preview(state: AgentState) -> dict:
             llm.ainvoke(llm_messages),
             timeout=60.0,
         )
-        raw_text = getattr(resp, "content", "") or ""
-        # Strip <think>...</think> block from output
-        depth2_text = re.sub(r"<think>.*?</think>\s*", "", raw_text, flags=re.DOTALL)
+        raw_text = parse_response_content(getattr(resp, "content", None))
+        depth2_text = _strip_think_blocks(raw_text)
         depth2_text = _normalize_whitespace(depth2_text)
         depth2_text = _final_text_guard(depth2_text, max_sentences=5, max_chars=500)
     except asyncio.TimeoutError:
         logger.warning("[DEPTH2] LLM timeout (60s)")
         return {"depth2_text": ""}
     except Exception as e:
-        logger.warning("[DEPTH2] LLM error: %s", e)
+        logger.warning("[DEPTH2] LLM error: %s", e, exc_info=True)
         return {"depth2_text": ""}
     return {"depth2_text": depth2_text}

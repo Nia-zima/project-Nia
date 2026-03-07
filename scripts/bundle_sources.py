@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 # Configuration
-PROJECT_ROOT = Path(r"C:\Users\jk023\Desktop\AI_Buddy")
+PROJECT_ROOT = Path(r"C:\Users\jk023\Desktop\project-nia")
 OUTPUT_DIR = Path(r"C:\Users\jk023\.gemini\antigravity\brain\d6f7ce6c-4ae0-4f0e-91e8-4b5f900355ab")
 OUTPUT_FILE = OUTPUT_DIR / "source_code_bundle.md"
 

@@ -7,8 +7,6 @@ import uuid
 
 import pytest
 
-os.environ.setdefault("RETENTION_PROFILE", "fast")
-
 from backend.core.db import get_conn, init_schema
 from backend.services.memory.commit_executor import CommitPlan, execute
 
@@ -60,54 +58,59 @@ def _state(
 class TestS5CommitSkipConditions:
     """S5 should skip when disabled, hold, or WAIT."""
 
-    def test_skip_when_disabled(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_skip_when_disabled(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", False
         )
         from backend.core.agent_graph.nodes import s5_commit
 
-        result = s5_commit(_state())
+        result = await s5_commit(_state())
         assert result["orchestrator_stage"] == "S5"
         assert result["commit_result"] is None
 
-    def test_skip_when_hold_required(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_skip_when_hold_required(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
         )
         from backend.core.agent_graph.nodes import s5_commit
 
-        result = s5_commit(_state(hold_required=True))
+        result = await s5_commit(_state(hold_required=True))
         assert result["commit_result"]["skipped"] is True
 
-    def test_skip_when_wait(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_skip_when_wait(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
         )
         from backend.core.agent_graph.nodes import s5_commit
 
-        result = s5_commit(_state(final_text="WAIT"))
+        result = await s5_commit(_state(final_text="WAIT"))
         assert result["commit_result"]["skipped"] is True
 
-    def test_skip_when_empty_final_text(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_skip_when_empty_final_text(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
         )
         from backend.core.agent_graph.nodes import s5_commit
 
-        result = s5_commit(_state(final_text=""))
+        result = await s5_commit(_state(final_text=""))
         assert result["commit_result"]["skipped"] is True
 
 
 class TestS5CommitEpisodic:
     """S5 should save episodic events."""
 
-    def test_saves_episodic_event(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_saves_episodic_event(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
         )
         from backend.core.agent_graph.nodes import s5_commit
 
-        result = s5_commit(_state(user_text="テスト入力", final_text="テスト応答"))
+        result = await s5_commit(_state(user_text="テスト入力", final_text="テスト応答"))
 
         assert result["commit_result"]["success"] is True
         assert result["commit_result"]["episodic"] == 1
@@ -126,13 +129,14 @@ class TestS5CommitEpisodic:
 class TestS5CommitNoSemantic:
     """S5 should NOT generate semantic memories (deferred to Sleep Cycle)."""
 
-    def test_no_semantic_even_with_fact_claims(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_no_semantic_even_with_fact_claims(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
         )
         from backend.core.agent_graph.nodes import s5_commit
 
-        result = s5_commit(_state(
+        result = await s5_commit(_state(
             user_text="Originはコーヒーが好きだよね",
             final_text="了解した",
         ))
@@ -153,7 +157,8 @@ class TestS5CommitNoSemantic:
 class TestS5CommitError:
     """S5 should handle errors gracefully."""
 
-    def test_commit_exception_returns_error(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_commit_exception_returns_error(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
         )
@@ -169,7 +174,7 @@ class TestS5CommitError:
         )
 
         from backend.core.agent_graph.nodes import s5_commit
-        result = s5_commit(_state(final_text="テスト"))
+        result = await s5_commit(_state(final_text="テスト"))
 
         assert result["commit_result"]["success"] is False
         assert len(result["commit_result"]["errors"]) > 0
@@ -178,7 +183,8 @@ class TestS5CommitError:
 class TestS5CommitIntegration:
     """Integration: S5 commit + working store stale counts."""
 
-    def test_stale_counts_incremented(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_stale_counts_incremented(self, monkeypatch):
         """S5 commit increments stale_turn_count via commit_executor."""
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.settings.ORCHESTRATOR_S5_ENABLED", True
@@ -205,7 +211,7 @@ class TestS5CommitIntegration:
             conn.close()
 
         from backend.core.agent_graph.nodes import s5_commit
-        s5_commit(_state())
+        await s5_commit(_state())
 
         # Check stale count incremented
         wi = working_store.get_by_id("wi_test")

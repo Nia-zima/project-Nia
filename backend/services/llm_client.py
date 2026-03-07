@@ -4,19 +4,12 @@ import aiohttp
 import asyncio
 import logging
 import random
-import re
 from typing import Any, Dict, List, Optional
 
 from backend.core.config import settings
+from backend.core.model_adapter import strip_think_blocks as _strip_think_blocks
 
 logger = logging.getLogger("LLMClient")
-
-_THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.DOTALL)
-
-
-def _strip_think_blocks(text: str) -> str:
-    """Remove <think>...</think> blocks (Qwen3 reasoning traces)."""
-    return _THINK_RE.sub("", text).strip()
 
 
 def _chat_completions_url() -> str:

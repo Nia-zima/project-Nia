@@ -65,32 +65,6 @@ def test_memory_manager_register_thought_appends_memory_event():
     assert any(r.get("event_id") for r in rows), "register_thought should append memory event"
 
 
-def test_memory_manager_get_memory_context_uses_event_index():
-    init_schema()
-    thread_id = _unique_thread("ctx")
-    memory_service.append_event(
-        thread_id=thread_id,
-        event_type="thought_registered",
-        payload={
-            "text": "ニアはりんごの話をした",
-            "scope": "general",
-            "state_tag": "CONSENT",
-            "refs": {"k": "v"},
-        },
-    )
-
-    ctx = asyncio.run(
-        memory_manager.get_memory_context_by_query(
-            query="りんご",
-            thread_id=thread_id,
-            limit=5,
-        )
-    )
-    assert isinstance(ctx, dict)
-    long_term = ctx.get("long_term") or []
-    assert long_term, "event-index path should return matched long_term items"
-
-
 def test_memory_service_schema_v2_payload_is_indexed():
     init_schema()
     thread_id = _unique_thread("v2")
@@ -132,7 +106,7 @@ def test_rebuild_index_paginates_beyond_default_batch():
     finally:
         conn.close()
 
-    indexed = memory_manager.rebuild_memory_index(thread_id=thread_id, limit=0)
+    indexed = memory_service.rebuild_index(thread_id=thread_id, limit=0)
     assert indexed >= total
 
 

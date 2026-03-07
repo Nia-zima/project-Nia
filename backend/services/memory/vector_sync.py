@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from backend.core.logger import logger
 from backend.services.memory import semantic_store
+from backend.services.memory.semantic_store import embedding_to_numpy
 
 
 def process_semantic_vector_sync(*, limit: int = 100) -> int:
@@ -27,6 +28,12 @@ def process_semantic_vector_sync(*, limit: int = 100) -> int:
             if mem.status == "revoked":
                 vs.delete_by_ids([mem.id])
             else:
+                # Use pre-computed embedding if available to avoid
+                # redundant re-encoding inside ChromaDB.
+                emb_list = None
+                vec = embedding_to_numpy(mem.embedding)
+                if vec is not None:
+                    emb_list = vec.tolist()
                 vs.upsert_long_term(
                     capture_id=mem.id,
                     raw_text=mem.content,
@@ -38,6 +45,7 @@ def process_semantic_vector_sync(*, limit: int = 100) -> int:
                         "thread_id": mem.thread_id,
                     },
                     collection_type="episodic",
+                    embedding=emb_list,
                 )
             synced_ids.append(mem.id)
         except Exception:

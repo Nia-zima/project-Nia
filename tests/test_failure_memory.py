@@ -62,7 +62,7 @@ class TestFailureMemory:
     def test_sql_recent_failures(self, tmp_path):
         conn, db_path = self._setup_db(tmp_path)
 
-        with patch("backend.services.minecraft.failure_memory.get_conn", return_value=conn):
+        with patch("backend.services.minecraft.failure_memory.managed_conn", return_value=MagicMock(__enter__=lambda s: conn, __exit__=lambda s, *a: None)):
             from backend.services.minecraft.failure_memory import _sql_recent_failures
             results = _sql_recent_failures(limit=5)
             # Should only return failures (state_tag=game_skill_failure), not success
@@ -73,7 +73,7 @@ class TestFailureMemory:
     def test_search_failures_fallback(self, tmp_path):
         conn, db_path = self._setup_db(tmp_path)
 
-        with patch("backend.services.minecraft.failure_memory.get_conn", return_value=conn):
+        with patch("backend.services.minecraft.failure_memory.managed_conn", return_value=MagicMock(__enter__=lambda s: conn, __exit__=lambda s, *a: None)):
             from backend.services.minecraft.failure_memory import search_failures
             results = search_failures(query="", limit=5)
             assert len(results) == 2
@@ -112,13 +112,14 @@ class TestContextBuilderMinecraft:
         """With include_minecraft=True, minecraft section should attempt to build."""
         with patch("backend.services.memory.context_builder.semantic_store") as mock_ss, \
              patch("backend.services.memory.context_builder.working_store") as mock_ws, \
-             patch("backend.services.minecraft.failure_memory.get_conn") as mock_conn:
+             patch("backend.services.minecraft.failure_memory.managed_conn") as mock_conn:
             mock_ss.search_active.return_value = []
             mock_ws.list_open.return_value = []
             # Mock failure memory to return empty (no DB)
             mock_db = MagicMock()
             mock_db.execute.return_value.fetchall.return_value = []
-            mock_conn.return_value = mock_db
+            mock_conn.return_value.__enter__ = MagicMock(return_value=mock_db)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
 
             from backend.services.memory.context_builder import build_memory_context
             result = build_memory_context(

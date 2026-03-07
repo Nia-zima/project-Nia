@@ -9,7 +9,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.core.config import settings
 from backend.services.chat_history_store import chat_history_store
-from backend.services.memory_manager import memory_manager
 
 
 def test_chat_history_store_legacy_disabled_paths_are_safe():
@@ -33,13 +32,4 @@ def test_chat_history_store_legacy_disabled_paths_are_safe():
         settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
 
 
-def test_memory_manager_integrity_skips_when_legacy_disabled():
-    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
-    settings.LEGACY_MEMORY_TABLES_ENABLED = False
-    try:
-        result = asyncio.run(memory_manager.run_integrity_check(force=True, client_host="127.0.0.1"))
-        assert result.get("ok") is True
-        assert result.get("skipped") is True
-    finally:
-        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
 

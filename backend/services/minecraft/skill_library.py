@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Optional
 
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,7 @@ class SkillLibrary:
         """Save or update a skill. Returns the record."""
         code_hash = hashlib.sha256(code.encode()).hexdigest()
         now = time.time()
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             existing = conn.execute(
                 "SELECT id, code_hash FROM minecraft_skills WHERE name = ?",
                 (name,),
@@ -54,24 +53,18 @@ class SkillLibrary:
 
             logger.info("[SkillLibrary] Saved skill: %s (%s)", name, code_hash[:8])
             return {"id": skill_id, "name": name, "updated": True}
-        finally:
-            conn.close()
 
     def get(self, name: str) -> Optional[dict]:
         """Get a skill by name."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             row = conn.execute(
                 "SELECT * FROM minecraft_skills WHERE name = ?", (name,)
             ).fetchone()
             return dict(row) if row else None
-        finally:
-            conn.close()
 
     def list_all(self) -> list[dict]:
         """List all skills with metadata."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             rows = conn.execute(
                 """SELECT id, name, description, code_hash,
                           success_count, failure_count, tags,
@@ -90,37 +83,26 @@ class SkillLibrary:
                 )
                 result.append(d)
             return result
-        finally:
-            conn.close()
 
     def record_result(self, name: str, success: bool) -> None:
         """Increment success or failure counter."""
         col = "success_count" if success else "failure_count"
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             conn.execute(
                 f"UPDATE minecraft_skills SET {col} = {col} + 1, updated_at = ? WHERE name = ?",
                 (time.time(), name),
             )
-        finally:
-            conn.close()
 
     def delete(self, name: str) -> bool:
         """Delete a skill by name."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             cur = conn.execute("DELETE FROM minecraft_skills WHERE name = ?", (name,))
             return cur.rowcount > 0
-        finally:
-            conn.close()
 
     def get_code(self, name: str) -> Optional[str]:
         """Get just the JS code for a skill."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             row = conn.execute(
                 "SELECT code FROM minecraft_skills WHERE name = ?", (name,)
             ).fetchone()
             return row["code"] if row else None
-        finally:
-            conn.close()

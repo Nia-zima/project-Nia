@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState, startTransition } from "react";
+import React, { useEffect, useMemo, useRef, useState, startTransition } from "react";
 import { apiClient } from "@/lib/apiClient";
 import { Check, X, RefreshCw } from "lucide-react";
 import type { PendingAction, ActionResult } from "@/lib/types";
@@ -94,8 +94,12 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
     setLoading(false);
   };
 
+  // Keep a stable ref so event listeners always call the latest refreshAll
+  const refreshAllRef = useRef(refreshAll);
+  refreshAllRef.current = refreshAll;
+
   useEffect(() => {
-    startTransition(() => { refreshAll(); });
+    startTransition(() => { refreshAllRef.current(); });
   }, [threadId]);
 
   // Poll for autonomous tweet proposals (from Reflection Engine)
@@ -132,7 +136,7 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
       const detail = (ev as CustomEvent).detail || {};
       if (!detail?.name) return;
       // action_proposed / action_approved / action_blocked
-      refreshAll();
+      refreshAllRef.current();
     };
     if (typeof window !== "undefined") {
       window.addEventListener("phase5-action-event", handler as EventListener);

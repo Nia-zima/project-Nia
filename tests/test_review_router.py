@@ -50,7 +50,7 @@ def test_apply_review_approve_runs_s5_commit(monkeypatch):
     values = {
         "merge_mode": "review:tok",
         "review_token": "tok",
-        "pending_actions": [{"kind": "say", "text": "承認後の発話", "risk": "med"}],
+        "review_pending_actions": [{"kind": "say", "text": "承認後の発話", "risk": "med"}],
         "reason_codes": ["keyword_memory"],
         "dissonance": 0.10,
         "user_text": "Originはコーヒーが好き",
@@ -62,12 +62,12 @@ def test_apply_review_approve_runs_s5_commit(monkeypatch):
     async def _noop_emit_commit_log(thread_id: str, line: str, **kwargs):
         return None
 
-    def _fake_s5_commit(state):
+    async def _fake_s5_commit(state):
         captured["state"] = state
         return {"orchestrator_stage": "S5", "commit_result": {"success": True}}
 
     monkeypatch.setattr(review_router.workflow, "compile", lambda checkpointer: dummy_app)
-    monkeypatch.setattr(review_router.memory_manager, "get_async_checkpointer_conn", lambda: _DummyCtx())
+    monkeypatch.setattr(review_router.checkpointer_service, "get_async_checkpointer_conn", lambda: _DummyCtx())
     monkeypatch.setattr(review_router, "emit_commit_log", _noop_emit_commit_log)
     monkeypatch.setattr(review_router, "s5_commit", _fake_s5_commit)
 
@@ -86,7 +86,7 @@ def test_apply_review_approve_persists_memory_events(monkeypatch):
     values = {
         "merge_mode": "review:tok",
         "review_token": "tok",
-        "pending_actions": [{"kind": "say", "text": "承認後の発話", "risk": "med"}],
+        "review_pending_actions": [{"kind": "say", "text": "承認後の発話", "risk": "med"}],
         "reason_codes": ["keyword_memory"],
         "dissonance": 0.10,
         "user_text": "Originはコーヒーが好き",
@@ -103,7 +103,7 @@ def test_apply_review_approve_persists_memory_events(monkeypatch):
         True,
     )
     monkeypatch.setattr(review_router.workflow, "compile", lambda checkpointer: dummy_app)
-    monkeypatch.setattr(review_router.memory_manager, "get_async_checkpointer_conn", lambda: _DummyCtx())
+    monkeypatch.setattr(review_router.checkpointer_service, "get_async_checkpointer_conn", lambda: _DummyCtx())
     monkeypatch.setattr(review_router, "emit_commit_log", _noop_emit_commit_log)
 
     res = asyncio.run(review_router._apply_review("t1", "tok", "approve"))

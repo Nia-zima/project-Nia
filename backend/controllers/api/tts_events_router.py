@@ -37,7 +37,7 @@ async def tts_events(thread_id: str, request: Request):
             try:
                 await agen.aclose()
             except Exception:
-                pass
+                logger.debug("[TTS_EVENTS] agen.aclose() error (normal on disconnect)", exc_info=True)
             logger.info("[TTS_EVENTS] disconnect thread_id=%s", thread_id)
 
     return StreamingResponse(

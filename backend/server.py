@@ -22,6 +22,7 @@ ensure_dirs()
 # --- Startup Event ---
 _retention_task: asyncio.Task | None = None
 _idle_task: asyncio.Task | None = None
+_room_update_task: asyncio.Task | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,10 +46,10 @@ async def lifespan(app: FastAPI):
     # 4. Service Init
     from backend.services.telemetry_logger import telemetry
     from backend.services.chat_history_store import chat_history_store
-    from backend.services.memory_manager import memory_manager
+    from backend.services.checkpointer import checkpointer_service
     await telemetry.init_db()
     await chat_history_store.init_db()
-    await memory_manager.init_checkpointer()
+    await checkpointer_service.init_checkpointer()
     
     # 5. Minecraft Bot Integration
     from backend.services.minecraft import init_minecraft
@@ -68,7 +69,9 @@ async def lifespan(app: FastAPI):
         logger.exception("[RETENTION_FULL] failed to start background sweeper")
 
     # 起動時フルスイープ（ON時のみ）
-    asyncio.create_task(_boot_retention_full())
+    from backend.core.agent_graph.utils import _log_task_exception
+    _boot_task = asyncio.create_task(_boot_retention_full(), name="boot_retention_full")
+    _boot_task.add_done_callback(_log_task_exception)
 
     # 7. Idle Detector (Phase R.1 — Autonomous Reflection)
     global _idle_task
@@ -79,9 +82,35 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("[IDLE_DETECTOR] failed to start")
 
+    # 8. Chat Bridge (YouTube / Twitch)
+    if getattr(settings, "CHAT_BRIDGE_ENABLED", False):
+        try:
+            from backend.services.chat_bridge import chat_bridge
+            if getattr(settings, "YOUTUBE_LIVE_ENABLED", False) and getattr(settings, "YOUTUBE_VIDEO_ID", ""):
+                await chat_bridge.start_youtube()
+            if getattr(settings, "TWITCH_LIVE_ENABLED", False) and getattr(settings, "TWITCH_CHANNEL", ""):
+                await chat_bridge.start_twitch()
+        except Exception:
+            logger.exception("[CHAT_BRIDGE] failed to start")
+
+    # 9. Room Update Loop (Phase P.2)
+    global _room_update_task
+    try:
+        if getattr(settings, "ROOM_UPDATE_ENABLED", False):
+            from backend.services.room.update_loop import room_update_loop
+            _room_update_task = asyncio.create_task(room_update_loop(), name="room_update")
+    except Exception:
+        logger.exception("[ROOM] failed to start update loop")
+
     try:
         yield
     finally:
+        if _room_update_task:
+            _room_update_task.cancel()
+            try:
+                await _room_update_task
+            except asyncio.CancelledError:
+                pass
         if _idle_task:
             _idle_task.cancel()
             try:
@@ -95,13 +124,24 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         try:
-            from backend.services.memory_manager import memory_manager
-            await memory_manager.close_checkpointer()
+            from backend.services.chat_bridge import chat_bridge
+            await chat_bridge.stop_all()
+        except Exception:
+            pass
+        try:
+            from backend.services.checkpointer import checkpointer_service
+            await checkpointer_service.close_checkpointer()
         except Exception:
             logger.exception("[CHECKPOINTER] close failed")
 
 # Defines the single FastAPI application instance
-app = FastAPI(title="Nia API", lifespan=lifespan)
+app = FastAPI(
+    title="Nia API",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if settings.API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if settings.API_DOCS_ENABLED else None,
+)
 
 # Middleware — CORS
 _cors_raw = getattr(settings, "CORS_ALLOWED_ORIGINS", "*")
@@ -124,6 +164,14 @@ else:
         allow_headers=["*"],
     )
 
+# Rate Limiting
+from backend.core.rate_limit import limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Block invalid static paths to avoid OS path errors (e.g., "<wav>")
 @app.middleware("http")
 async def block_bad_static_path(request: Request, call_next):
@@ -131,6 +179,29 @@ async def block_bad_static_path(request: Request, call_next):
     if p.startswith("/static/") and ("<" in p or ">" in p):
         return PlainTextResponse("Bad static path", status_code=400)
     return await call_next(request)
+
+# Request Correlation ID
+from backend.core.correlation import set_request_id, get_request_id
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    incoming = request.headers.get("x-request-id")
+    rid = set_request_id(incoming if incoming else None)
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+# Unhandled exception handler (includes request_id for tracing)
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    rid = get_request_id()
+    logger.exception("[UNHANDLED] request_id=%s path=%s", rid, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "request_id": rid},
+    )
 
 # --- Initializers (Phase 2: Centralized DB) ---
 
@@ -163,9 +234,13 @@ from backend.controllers.api.game_router import router as game_router
 from backend.controllers.api.video_router import router as video_router
 from backend.controllers.api.motion_router import router as motion_router
 from backend.controllers.api.identity_router import router as identity_router
+from backend.controllers.api.manager_router import router as manager_router
 from backend.controllers.pending_memory_router import router as pending_router
 from backend.controllers.stats_router import router as stats_router
-from backend.api.memory_router import router as memory_router
+from backend.controllers.api.memory_query_router import router as memory_router
+from backend.controllers.api.room_router import router as room_router
+from backend.controllers.api.pip_router import router as pip_router
+from backend.controllers.ws_room import router as ws_room_router
 
 app.include_router(stream_router, prefix="/api", tags=["api"])
 app.include_router(system_router, prefix="/api", tags=["api"])
@@ -181,9 +256,13 @@ app.include_router(game_router, prefix="/api", tags=["game"])
 app.include_router(video_router, prefix="/api", tags=["video"])
 app.include_router(motion_router)
 app.include_router(identity_router, prefix="/api", tags=["api"])
+app.include_router(manager_router, prefix="/api", tags=["manager"])
 app.include_router(pending_router)
 app.include_router(stats_router)
 app.include_router(memory_router, prefix="/api")
+app.include_router(room_router)
+app.include_router(pip_router)
+app.include_router(ws_room_router, tags=["room-ws"])
 
 # --- Static Mounts ---
 (settings.STATIC_DIR / "audio").mkdir(parents=True, exist_ok=True)
@@ -195,9 +274,31 @@ app.mount("/static/images", StaticFiles(directory=str(settings.STATIC_DIR / "ima
 # --- Endpoints ---
 
 @app.get("/health")
-def health():
-    """Health Check showing DB status"""
-    return health_check()
+async def health():
+    """Health Check showing DB + dependency status"""
+    db = health_check()
+    llm_ok = await _check_llm_reachable()
+    return {
+        **db,
+        "dependencies": {
+            "llm": "ok" if llm_ok else "unreachable",
+            "db": db.get("status", "unknown"),
+        },
+    }
+
+
+async def _check_llm_reachable() -> bool:
+    """Quick LLM ping with 3s timeout."""
+    try:
+        import aiohttp
+        url = settings.OPENAI_BASE_URL.rstrip("/")
+        if not url.endswith("/v1"):
+            url += "/v1"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
+            async with s.get(f"{url}/models") as r:
+                return r.status == 200
+    except Exception:
+        return False
 
 
 # --- Frontend Mount (Last Priority) ---

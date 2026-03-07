@@ -23,11 +23,6 @@ HEARING_QUERY_RE = re.compile(r"(聞こえ|聞こえる|声|マイク|音声)", 
 UNCERTAIN_RE = re.compile(r"(わからない|分からない|不明|判断できない|難しい|確信がない)")
 _PUNCT_ONLY_RE = re.compile(r"^[\s\.\,。．、!！?？…・\-—～〜ー「」『』（）\(\)\[\]【】]+$")
 
-TOOL_BLOCK_RE = re.compile(
-    r"\[(SEARCH_MEMORY|MEMORY_JSON|INTERNAL_LOG)\].*?\[END_\1\]\s*",
-    re.DOTALL | re.IGNORECASE
-)
-
 _KEYWORD_SPLIT_RE = re.compile(r"[^\w\u3040-\u30ff\u4e00-\u9fff]+")
 _KEYWORD_STOP = {
     "こと", "これ", "それ", "あれ", "よう", "ため", "ので", "から", "けど", "でも",
@@ -72,9 +67,6 @@ def _current_voice_id(voice_id: str) -> Optional[str]:
 
 # ── Silence handling ──────────────────────────────────────────
 
-def _fallback_for_silence(input_text: str) -> str:
-    return SILENCE_DEFAULT
-
 def _handle_silence(
     sanitized: str,
     *,
@@ -111,11 +103,6 @@ def _get_final_message(result: dict) -> str:
 def _strip_speaker_prefix(text: str) -> str:
     return re.sub(r"^(応答|ニア|Response|A|Speech|Layer\s*3)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
 
-def _strip_tool_blocks(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = TOOL_BLOCK_RE.sub("", text).strip()
-    return cleaned
 
 def _strip_hearing_ack(text: str, user_text: str) -> str:
     """Strip '聞こえます' responses only when user asked a hearing-related question."""

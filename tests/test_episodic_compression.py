@@ -8,8 +8,6 @@ import uuid
 
 import pytest
 
-os.environ.setdefault("RETENTION_PROFILE", "fast")
-
 from backend.core.db import get_conn, init_schema
 
 
@@ -83,10 +81,10 @@ class TestCompressOldEpisodic:
 
         monkeypatch.setattr("backend.core.config.settings.EPISODIC_ARCHIVE_AFTER_DAYS", 7)
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             return "この日はいろいろ話した。主にテストに関する内容だった。"
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.call_llm", mock_llm)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.compression.call_llm", mock_llm)
 
         from backend.scripts.sleep_cycle import _compress_old_episodic
 
@@ -115,10 +113,10 @@ class TestCompressOldEpisodic:
 
         monkeypatch.setattr("backend.core.config.settings.EPISODIC_ARCHIVE_AFTER_DAYS", 7)
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             raise AssertionError("LLM should not be called for recent events")
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.call_llm", mock_llm)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.compression.call_llm", mock_llm)
 
         from backend.scripts.sleep_cycle import _compress_old_episodic
 
@@ -136,12 +134,12 @@ class TestCompressOldEpisodic:
 
         call_count = 0
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             nonlocal call_count
             call_count += 1
             return "この日は古い会話について話した。テストに関する内容だった。"
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.call_llm", mock_llm)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.compression.call_llm", mock_llm)
 
         from backend.scripts.sleep_cycle import _compress_old_episodic
 
@@ -174,10 +172,10 @@ class TestCompressOldEpisodic:
 
         monkeypatch.setattr("backend.core.config.settings.EPISODIC_ARCHIVE_AFTER_DAYS", 7)
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             return "保存テストについての会話。データの保全性を確認するやりとりだった。"
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.call_llm", mock_llm)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.compression.call_llm", mock_llm)
 
         from backend.scripts.sleep_cycle import _compress_old_episodic
 

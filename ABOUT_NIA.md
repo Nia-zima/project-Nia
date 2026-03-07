@@ -1,4 +1,4 @@
-# Nia (ニア) — AI Buddy Project
+# Nia (ニア) — project-nia
 
 ## ニアとは
 
@@ -87,6 +87,21 @@ Context Builder が Depth ごとにメモリコンテキストを制御:
 | R.4 | Cross-Day Distillation | 3日以上のデータから日横断パターンを抽出 |
 
 R.4 で抽出されたパターン（`user_trait` / `relationship_pattern` / `emerging_interest` / `lesson`）はセマンティック記憶に保存され、Context Builder の PATTERNS セクションとして会話に自動反映されます。
+
+### メタ認知パイプライン（Metacognition N.0〜N.5）
+
+ニアは自分の応答に対して「どれくらい確かか」「根拠はあるか」を内省する仕組みを持っています。LLM 呼び出しなし、ルールベース＋埋め込み類似度で動作し、レイテンシは 5〜30ms です。
+
+| Phase | 名前 | 内容 |
+|:---:|:---|:---|
+| N.1 | Metacognitive Check | 確信度調整 + 三戒チェック（捏造・偽記憶リスク検出） |
+| N.0 | Awareness Core | 関係的驚き・成長シグナル・真正性の 3軸で R_nia を算出 |
+| N.2 | Contradiction Detection | セマンティック記憶間の矛盾を検出（defeaters 付き） |
+| N.3 | Self-Model | ニアの知識境界・成長エッジ・会話傾向の自己モデル |
+| N.4 | State-Driven Trigger | メタ認知統計の蓄積→反射トリガー（awareness 高、confidence 分散大、etc.） |
+| N.5 | Self-Narrative | 内部状態の言語化テンプレート（「内心: よく分からない感じがする」等） |
+
+N.5 の出力は `（内心: ...）` 形式で Context Builder の WORKING セクションに注入され、ニアの応答に内省的なニュアンスを加えます。
 
 ### Sleep Cycle（日次の記憶整理）
 
@@ -221,6 +236,7 @@ VRM モデルまたは Live2D モデルでニアを表示。Settings UI で切�
 │  💤 Sleep Cycle (夢生成・記憶整理・Identity 提案)  │
 │  🔄 Autonomous Reflection (日次振り返り・パターン抽出) │
 │  📊 Context Builder (Depth 別メモリ注入)          │
+│  🧠 Metacognition (確信度調整・矛盾検出・自己内省)  │
 ├─────────────────────────────────────────────────┤
 │              ゲーム・動画・SNS 層                   │
 │  🎮 Minecraft 自律ループ (Perceive→Think→Act)    │
@@ -261,7 +277,7 @@ VRM モデルまたは Live2D モデルでニアを表示。Settings UI で切�
 ## プロジェクト構成
 
 ```
-AI_Buddy/
+project-nia/
 ├── backend/
 │   ├── core/              # エージェントグラフ、確信度、方策学習、プロンプト定義
 │   │   ├── agent_graph/   # LangGraph ノード群 (Safety, Depth0/1/2, Merge, S5)
@@ -269,7 +285,7 @@ AI_Buddy/
 │   │   ├── constants/     # Spine, Depth プロンプト定義
 │   │   └── config.py      # 全設定の集約 (.env → Settings)
 │   ├── services/          # 各種サービス
-│   │   ├── memory/        # 3層記憶システム (Episodic/Semantic/Working)
+│   │   ├── memory/        # 3層記憶システム + メタ認知 (Episodic/Semantic/Working/Metacognition)
 │   │   ├── reflection_engine.py  # Autonomous Reflection (R.2 + R.4)
 │   │   ├── idle_detector.py      # アイドル検出 (R.1)
 │   │   ├── minecraft/     # Minecraft 自律エージェント
@@ -306,7 +322,7 @@ AI_Buddy/
 │   └── lib/               # API クライアント、ユーティリティ
 ├── data/                  # SQLite DB, チェックポイント
 ├── identity.md            # ニアの人格定義 (ランタイムで読み込み)
-├── tests/                 # pytest テストスイート (630+)
+├── tests/                 # pytest テストスイート (950+)
 └── docs/                  # 設計ドキュメント
 ```
 

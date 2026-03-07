@@ -1,20 +1,24 @@
 """Merge output node: combines depth outputs, applies policies, manages review holds."""
-import logging
 import time
 
 from langchain_core.messages import AIMessage
 
 from backend.core.config import settings
 from backend.core.agent_graph.state import AgentState
-from backend.core.agent_graph.review_window import D_LOW, get_review_token, set_review_token
+from backend.core.agent_graph.review_window import (
+    D_LOW,
+    get_review_pending_actions,
+    get_review_token,
+    set_review_token,
+)
 from backend.core.body_constitution_checker import get_checker as get_constitution_checker
+from backend.core.logger import logger
 from backend.services.memory.guardrail import run_guardrails
 from backend.services.turn_observation_logger import log_turn_observation
 
 from .text_guards import (
     _apply_identity_tone_policy,
     _apply_nia_self_identity_guard,
-    _final_text_guard,
     _limit_questions,
     _trim_promptish_tail,
 )
@@ -34,7 +38,40 @@ from .routing import (
     _append_reason_once,
 )
 
-logger = logging.getLogger(__name__)
+
+def _evaluate_hold_checks(
+    *,
+    user_text: str,
+    say_candidate: str,
+    dissonance: float,
+    dissonance_on: bool,
+    memory_candidate_count: int,
+    hold_policy: str,
+) -> tuple[list[str], list[str]]:
+    """Table-driven hold checks. Returns (hold_reasons, log_codes)."""
+    hold_reasons: list[str] = []
+    log_codes: list[str] = []
+
+    checks: list[tuple[str, bool]] = [
+        ("risk_dissonance_on",    dissonance_on),
+        ("risk_high_dissonance",  dissonance >= D_LOW),
+        ("risk_long_text",        len(user_text) >= 120),
+        ("risk_long_reply",       len(say_candidate) >= 200),
+        ("keyword_memory",        any(w in user_text for w in _KEYWORDS_MEMORY)),
+        ("keyword_policy",        any(w in user_text for w in _KEYWORDS_POLICY)),
+        ("keyword_identity",      any(w in user_text for w in _KEYWORDS_IDENTITY)),
+        ("keyword_public",        any(w in user_text for w in _KEYWORDS_PUBLIC)),
+        ("keyword_decision",      any(w in user_text for w in _KEYWORDS_DECISION)),
+        ("risk_memory_candidate", memory_candidate_count >= 1),
+    ]
+    for code, triggered in checks:
+        if triggered:
+            if hold_policy == "strict":
+                _append_reason_once(hold_reasons, code)
+            elif code not in log_codes:
+                log_codes.append(code)
+
+    return hold_reasons, log_codes
 
 
 def _log_merge_observation(
@@ -71,7 +108,7 @@ def _log_merge_observation(
             payload.update(external_meta)
         log_turn_observation(payload)
     except Exception:
-        pass
+        logger.debug("[MERGE_OBS] observation logging failed", exc_info=True)
 
 
 def merge_output(state: AgentState) -> dict:
@@ -93,6 +130,7 @@ def merge_output(state: AgentState) -> dict:
             "review_token": state.get("review_token"),
             "hold_required": True,
             "hold_kind": state.get("hold_kind") or "speech_preview",
+            "review_pending_actions": get_review_pending_actions(state),
             "pending_actions": state.get("pending_actions") or [],
             "external_used": bool(external_meta.get("external_used", False)),
             "external_confidence": float(external_meta.get("external_confidence") or 0.0),
@@ -127,7 +165,7 @@ def merge_output(state: AgentState) -> dict:
         pending_actions = [{"kind": "say", "text": final_text, "risk": "high"}] if final_text else []
         review_update = set_review_token(
             state,
-            pending_actions=pending_actions,
+            review_pending_actions=pending_actions,
             hold_kind="speech_preview",
             reason_codes=reason_codes,
             dissonance=float(state.get("dissonance") or 0.0),
@@ -139,7 +177,8 @@ def merge_output(state: AgentState) -> dict:
             "hold_required": review_update.get("hold_required"),
             "hold_kind": review_update.get("hold_kind"),
             "review_token": review_update.get("review_token"),
-            "pending_actions": review_update.get("pending_actions"),
+            "review_pending_actions": review_update.get("review_pending_actions"),
+            "pending_actions": state.get("pending_actions") or [],
             "suppressed_actions": review_update.get("suppressed_actions"),
             "dissonance": review_update.get("dissonance"),
             "external_used": bool(external_meta.get("external_used", False)),
@@ -232,7 +271,8 @@ def merge_output(state: AgentState) -> dict:
             "hold_required": False,
             "hold_kind": None,
             "review_token": None,
-            "pending_actions": [],
+            "review_pending_actions": [],
+            "pending_actions": state.get("pending_actions") or [],
             "external_used": bool(external_meta.get("external_used", False)),
             "external_confidence": float(external_meta.get("external_confidence") or 0.0),
             "contradiction_flag": bool(external_meta.get("contradiction_flag", False)),
@@ -250,14 +290,15 @@ def merge_output(state: AgentState) -> dict:
         return out
 
     if force_ab_followup:
-        say_candidate = _build_followup_ab_question(user_text=user_text, self_scope=self_scope)
+        say_candidate = _build_followup_ab_question(self_scope=self_scope)
         out = {
             "final_text": say_candidate,
             "merge_mode": "FUP_AB",
             "hold_required": False,
             "hold_kind": None,
             "review_token": None,
-            "pending_actions": [],
+            "review_pending_actions": [],
+            "pending_actions": state.get("pending_actions") or [],
             "external_used": bool(external_meta.get("external_used", False)),
             "external_confidence": float(external_meta.get("external_confidence") or 0.0),
             "contradiction_flag": bool(external_meta.get("contradiction_flag", False)),
@@ -299,7 +340,7 @@ def merge_output(state: AgentState) -> dict:
     dissonance = float(state.get("dissonance") or 0.0)
 
     # Phase E: Guardrail v2 checks
-    if getattr(settings, "GUARDRAIL_V2_ENABLED", False):
+    if getattr(settings, "GUARDRAIL_V2_ENABLED", True):
         if say_candidate and say_candidate.strip() != "WAIT":
             try:
                 _thread = str(state.get("thread_id") or "default")
@@ -331,74 +372,25 @@ def merge_output(state: AgentState) -> dict:
         hold_required = True
         _append_reason_once(hold_reasons, "risk_public_context")
 
-    # ── Policy-dependent checks ──
-    # pii_only: PII + G1 + G6 のみ。strict: 全トリガー有効
-    _hold_policy = getattr(settings, "HOLD_POLICY", "pii_only")
-
-    # keyword/risk ログ収集（ポリシーに関係なくログは残す）
-    _log_codes = list(state.get("reason_codes") or [])
-
-    if dissonance_on:
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "risk_dissonance_on")
-        elif "risk_dissonance_on" not in _log_codes:
-            _log_codes.append("risk_dissonance_on")
-    if dissonance >= D_LOW:
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "risk_high_dissonance")
-        elif "risk_high_dissonance" not in _log_codes:
-            _log_codes.append("risk_high_dissonance")
-    if len(user_text) >= 120:
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "risk_long_text")
-        elif "risk_long_text" not in _log_codes:
-            _log_codes.append("risk_long_text")
-    if len(say_candidate) >= 200:
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "risk_long_reply")
-        elif "risk_long_reply" not in _log_codes:
-            _log_codes.append("risk_long_reply")
-    if any(w in user_text for w in _KEYWORDS_MEMORY):
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "keyword_memory")
-        elif "keyword_memory" not in _log_codes:
-            _log_codes.append("keyword_memory")
-    if any(w in user_text for w in _KEYWORDS_POLICY):
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "keyword_policy")
-        elif "keyword_policy" not in _log_codes:
-            _log_codes.append("keyword_policy")
-    if any(w in user_text for w in _KEYWORDS_IDENTITY):
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "keyword_identity")
-        elif "keyword_identity" not in _log_codes:
-            _log_codes.append("keyword_identity")
-    if any(w in user_text for w in _KEYWORDS_PUBLIC):
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "keyword_public")
-        elif "keyword_public" not in _log_codes:
-            _log_codes.append("keyword_public")
-    if any(w in user_text for w in _KEYWORDS_DECISION):
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "keyword_decision")
-        elif "keyword_decision" not in _log_codes:
-            _log_codes.append("keyword_decision")
-
+    # ── Policy-dependent checks (table-driven) ──
     memory_candidates = state.get("memory_candidates")
-    candidate_count = 0
+    _mem_count = 0
     if isinstance(memory_candidates, int):
-        candidate_count = memory_candidates
-    elif isinstance(memory_candidates, (list, tuple, set)):
-        candidate_count = len(memory_candidates)
-    elif isinstance(memory_candidates, dict):
-        candidate_count = len(memory_candidates)
-    if candidate_count >= 1:
-        if _hold_policy == "strict":
-            _append_reason_once(hold_reasons, "risk_memory_candidate")
-        elif "risk_memory_candidate" not in _log_codes:
-            _log_codes.append("risk_memory_candidate")
+        _mem_count = memory_candidates
+    elif isinstance(memory_candidates, (list, tuple, set, dict)):
+        _mem_count = len(memory_candidates)
 
-    state["reason_codes"] = _log_codes
+    _policy_hold_reasons, _policy_log_codes = _evaluate_hold_checks(
+        user_text=user_text,
+        say_candidate=say_candidate,
+        dissonance=dissonance,
+        dissonance_on=dissonance_on,
+        memory_candidate_count=_mem_count,
+        hold_policy=getattr(settings, "HOLD_POLICY", "pii_only"),
+    )
+    hold_reasons.extend(_policy_hold_reasons)
+    current_reason_codes = list(state.get("reason_codes") or [])
+    current_reason_codes.extend(c for c in _policy_log_codes if c not in current_reason_codes)
 
     if hold_reasons:
         hold_required = True
@@ -412,6 +404,7 @@ def merge_output(state: AgentState) -> dict:
                 "review_token": state.get("review_token"),
                 "hold_required": True,
                 "hold_kind": state.get("hold_kind") or "speech_preview",
+                "review_pending_actions": get_review_pending_actions(state),
                 "pending_actions": state.get("pending_actions") or [],
                 "external_used": bool(external_meta.get("external_used", False)),
                 "external_confidence": float(external_meta.get("external_confidence") or 0.0),
@@ -424,7 +417,7 @@ def merge_output(state: AgentState) -> dict:
                 final_text="WAIT",
                 merge_mode=str(out.get("merge_mode") or "wait"),
                 hold_required=True,
-                reason_codes=list(state.get("reason_codes") or []),
+                reason_codes=current_reason_codes,
                 external_meta=external_meta,
             )
             return out
@@ -436,9 +429,9 @@ def merge_output(state: AgentState) -> dict:
         pending_actions = [{"kind": "say", "text": say_candidate, "risk": risk_level}]
         review_update = set_review_token(
             state,
-            pending_actions=pending_actions,
+            review_pending_actions=pending_actions,
             hold_kind="speech_preview",
-            reason_codes=(state.get("reason_codes") or []) + hold_reasons,
+            reason_codes=current_reason_codes + hold_reasons,
             dissonance=dissonance,
         )
         out = {
@@ -447,7 +440,8 @@ def merge_output(state: AgentState) -> dict:
             "review_token": review_update.get("review_token"),
             "hold_required": review_update.get("hold_required"),
             "hold_kind": review_update.get("hold_kind"),
-            "pending_actions": review_update.get("pending_actions"),
+            "review_pending_actions": review_update.get("review_pending_actions"),
+            "pending_actions": state.get("pending_actions") or [],
             "suppressed_actions": review_update.get("suppressed_actions"),
             "reason_codes": review_update.get("reason_codes"),
             "dissonance": review_update.get("dissonance"),
@@ -488,8 +482,9 @@ def merge_output(state: AgentState) -> dict:
         "hold_required": False,
         "hold_kind": None,
         "review_token": None,
-        "pending_actions": [],
-        "reason_codes": list(state.get("reason_codes") or []),
+        "review_pending_actions": [],
+        "pending_actions": state.get("pending_actions") or [],
+        "reason_codes": current_reason_codes,
         "external_reason": external_reason,
         "external_used": bool(external_meta.get("external_used", False)),
         "external_confidence": float(external_meta.get("external_confidence") or 0.0),
@@ -502,7 +497,7 @@ def merge_output(state: AgentState) -> dict:
         final_text=say_candidate,
         merge_mode=merge_mode,
         hold_required=False,
-        reason_codes=list(state.get("reason_codes") or []),
+        reason_codes=current_reason_codes,
         external_meta=external_meta,
     )
     return out

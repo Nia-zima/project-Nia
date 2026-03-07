@@ -11,8 +11,10 @@ Called by context_builder._build_long_term() when RETRIEVAL_ENABLED=True.
 """
 from __future__ import annotations
 
+import json as _json
 import re
 import time
+import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -61,8 +63,18 @@ _RE_RECALL = re.compile(
     r"|って何|ってなに|何だった|なんだった|教えて.*もう一回"
 )
 
-# Stop words for topic keyword extraction
-_STOP_WORDS = frozenset({
+# Stop nouns for janome-based extraction (functional words, pronouns, etc.)
+_STOP_NOUNS = frozenset({
+    "こと", "もの", "ところ", "これ", "それ", "あれ", "どれ",
+    "ここ", "そこ", "あそこ", "どこ", "とき", "ため", "よう",
+    "ほう", "はず", "わけ", "つもり", "まま", "うち", "ほか",
+    "私", "僕", "俺", "あなた", "君", "自分", "誰", "何",
+    "方", "人", "前", "後", "中", "上", "下", "間",
+    "今", "話", "気", "感じ",
+})
+
+# Fallback stop words for regex-based extraction (when janome is unavailable)
+_STOP_WORDS_REGEX = frozenset({
     "の", "に", "は", "を", "が", "で", "と", "も", "か", "な",
     "って", "した", "する", "して", "から", "まで", "よ", "ね",
     "だ", "です", "ます", "ある", "ない", "いる", "なる",
@@ -75,9 +87,66 @@ _STOP_WORDS = frozenset({
 # Minimum keyword length
 _MIN_KW_LEN = 2
 
+# ── Janome tokenizer (lazy-loaded singleton) ───────────────────
+
+_janome_tokenizer = None
+_janome_available: bool | None = None
+
+
+def _get_janome():
+    """Lazy-load janome tokenizer. Returns None if unavailable."""
+    global _janome_tokenizer, _janome_available
+    if _janome_available is False:
+        return None
+    if _janome_tokenizer is not None:
+        return _janome_tokenizer
+    try:
+        from janome.tokenizer import Tokenizer
+        _janome_tokenizer = Tokenizer()
+        _janome_available = True
+        logger.info("[Retrieval] janome tokenizer loaded")
+        return _janome_tokenizer
+    except ImportError:
+        _janome_available = False
+        logger.info("[Retrieval] janome not available, using regex fallback")
+        return None
+
+
+def _extract_nouns_janome(text: str) -> list[str]:
+    """Extract nouns using janome morphological analysis."""
+    tokenizer = _get_janome()
+    if tokenizer is None:
+        return []
+    nouns = []
+    for token in tokenizer.tokenize(text):
+        pos = token.part_of_speech.split(",")[0]
+        subpos = token.part_of_speech.split(",")[1] if "," in token.part_of_speech else ""
+        if pos != "名詞":
+            continue
+        # Skip non-independent nouns (接尾, 非自立, 代名詞, 数)
+        if subpos in ("接尾", "非自立", "代名詞", "数"):
+            continue
+        surface = token.surface
+        if len(surface) >= _MIN_KW_LEN and surface not in _STOP_NOUNS:
+            nouns.append(surface)
+    return nouns
+
+
+def _extract_keywords_regex(text: str) -> list[str]:
+    """Fallback: extract keywords using regex split + stop word filter."""
+    tokens = re.split(r"[\s、。？！?!,.\u3000]+", text)
+    keywords = []
+    for token in tokens:
+        t = token.strip()
+        if len(t) >= _MIN_KW_LEN and t.lower() not in _STOP_WORDS_REGEX:
+            cleaned = re.sub(r"(って|った|だっけ|だった|してた|してる|について|とは)$", "", t)
+            if len(cleaned) >= _MIN_KW_LEN:
+                keywords.append(cleaned)
+    return keywords
+
 
 def detect_intent(query: str) -> QueryIntent:
-    """Classify query intent using rule-based pattern matching."""
+    """Classify query intent using rule-based pattern matching + janome noun extraction."""
     if not query or not query.strip():
         return QueryIntent()
 
@@ -98,16 +167,15 @@ def detect_intent(query: str) -> QueryIntent:
     if _RE_RECALL.search(q):
         intent.is_recall = True
 
-    # Topic keyword extraction (simple: split on particles + filter stops)
-    tokens = re.split(r"[\s、。？！?!,.\u3000]+", q)
-    keywords = []
-    for token in tokens:
-        t = token.strip()
-        if len(t) >= _MIN_KW_LEN and t.lower() not in _STOP_WORDS:
-            # Remove trailing particles
-            cleaned = re.sub(r"(って|った|だっけ|だった|してた|してる|について|とは)$", "", t)
-            if len(cleaned) >= _MIN_KW_LEN:
-                keywords.append(cleaned)
+    # Topic keyword extraction (janome → regex fallback)
+    if settings.JANOME_ENABLED:
+        keywords = _extract_nouns_janome(q)
+    else:
+        keywords = []
+
+    if not keywords:
+        keywords = _extract_keywords_regex(q)
+
     if keywords:
         intent.is_topic_specific = True
         intent.topic_keywords = keywords
@@ -134,6 +202,7 @@ def _cosine_sim(a, b) -> float:
         from backend.core import embedding_model
         return embedding_model.cosine_similarity(a, b)
     except Exception:
+        logger.warning("[Retrieval] cosine_sim failed", exc_info=True)
         return 0.0
 
 
@@ -145,6 +214,7 @@ def semantic_search(
     Score candidate memories by semantic similarity to the query.
 
     Uses the multilingual embedding model (paraphrase-multilingual-MiniLM-L12-v2).
+    Prefers pre-computed embeddings from DB (R.b); falls back to batch encoding.
     Returns candidates with similarity scores. Returns empty list on failure.
     """
     if not query or not candidates:
@@ -155,17 +225,32 @@ def semantic_search(
     if query_vec is None:
         return []
 
-    # Batch encode all candidate contents
-    texts = [m.content for m in candidates]
-    mem_vecs = _encode_texts(texts)
-    if mem_vecs is None:
-        return []
+    # Try to use pre-computed embeddings from DB
+    from backend.services.memory.semantic_store import embedding_to_numpy
 
-    # Score each candidate
     scored: list[ScoredMemory] = []
+    need_encode: list[tuple[int, SemanticMemory]] = []  # (index, mem)
+
     for i, mem in enumerate(candidates):
-        sim = _cosine_sim(query_vec[0], mem_vecs[i])
-        scored.append(ScoredMemory(memory=mem, similarity=sim))
+        vec = embedding_to_numpy(mem.embedding)
+        if vec is not None:
+            sim = _cosine_sim(query_vec[0], vec)
+            scored.append(ScoredMemory(memory=mem, similarity=sim))
+        else:
+            need_encode.append((i, mem))
+
+    # Batch-encode candidates without pre-computed embeddings
+    if need_encode:
+        texts = [mem.content for _, mem in need_encode]
+        mem_vecs = _encode_texts(texts)
+        if mem_vecs is not None:
+            for j, (_, mem) in enumerate(need_encode):
+                sim = _cosine_sim(query_vec[0], mem_vecs[j])
+                scored.append(ScoredMemory(memory=mem, similarity=sim))
+        else:
+            # Embedding failed entirely — add with sim=0
+            for _, mem in need_encode:
+                scored.append(ScoredMemory(memory=mem, similarity=0.0))
 
     return scored
 
@@ -281,6 +366,66 @@ def select_top_k(
     return unique
 
 
+# ── Retrieval Logging ──────────────────────────────────────────
+
+
+def _log_to_db(
+    thread_id: str,
+    query: str,
+    intent: QueryIntent,
+    candidates_count: int,
+    top_k: list[ScoredMemory],
+    elapsed_ms: float,
+) -> None:
+    """Persist retrieval results to DB (fire-and-forget)."""
+    try:
+        from backend.core.db import managed_conn
+
+        intent_flags = (
+            ("T" if intent.is_temporal else "-")
+            + ("R" if intent.is_recall else "-")
+            + ("K" if intent.is_topic_specific else "-")
+        )
+        results = _json.dumps(
+            [
+                {
+                    "id": sm.memory.id,
+                    "snippet": sm.memory.content[:60],
+                    "score": round(sm.score, 4),
+                    "sim": round(sm.similarity, 4),
+                    "conf": round(sm.confidence, 4),
+                    "rec": round(sm.recency, 4),
+                    "intent": round(sm.intent_bonus, 4),
+                }
+                for sm in top_k
+            ],
+            ensure_ascii=False,
+        )
+
+        with managed_conn() as conn:
+            conn.execute(
+                "INSERT INTO retrieval_logs "
+                "(id, thread_id, turn_id, query, intent_flags, topic_keywords, "
+                " candidate_count, results, result_count, elapsed_ms, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _uuid.uuid4().hex,
+                    thread_id,
+                    None,
+                    query,
+                    intent_flags,
+                    _json.dumps(intent.topic_keywords, ensure_ascii=False),
+                    candidates_count,
+                    results,
+                    len(top_k),
+                    round(elapsed_ms, 1),
+                    time.time(),
+                ),
+            )
+    except Exception:
+        logger.warning("[Retrieval] log_to_db failed", exc_info=True)
+
+
 # ── Main Entrypoint ─────────────────────────────────────────────
 
 
@@ -289,12 +434,15 @@ def retrieve(
     thread_id: str,
     *,
     limit: int = 8,
+    prefetched_candidates: list[SemanticMemory] | None = None,
 ) -> list[SemanticMemory]:
     """
     Query-aware memory retrieval.
 
     Returns a list of SemanticMemory objects ranked by relevance to the query.
     Returns empty list on failure or empty query (caller falls back to SQL-only).
+
+    If prefetched_candidates is provided, skip the SQL query and use those directly.
     """
     if not user_query or not user_query.strip():
         return []
@@ -308,9 +456,12 @@ def retrieve(
         # Step 1: Intent detection
         intent = detect_intent(user_query)
 
-        # Step 2: Get candidate pool from SQL
-        candidate_n = settings.RETRIEVAL_CANDIDATE_N
-        candidates = semantic_store.search_active(thread_id, limit=candidate_n)
+        # Step 2: Get candidate pool (use prefetched or fetch from SQL)
+        if prefetched_candidates is not None:
+            candidates = prefetched_candidates
+        else:
+            candidate_n = settings.RETRIEVAL_CANDIDATE_N
+            candidates = semantic_store.search_active(thread_id, limit=candidate_n)
         if not candidates:
             logger.debug("[Retrieval] no candidates for thread=%s", thread_id)
             return []
@@ -342,8 +493,91 @@ def retrieve(
             elapsed_ms,
         )
 
+        if settings.RETRIEVAL_LOG_ENABLED:
+            _log_to_db(
+                thread_id=thread_id,
+                query=user_query,
+                intent=intent,
+                candidates_count=len(candidates),
+                top_k=top_k,
+                elapsed_ms=elapsed_ms,
+            )
+
         return [sm.memory for sm in top_k]
 
     except Exception:
         logger.warning("[Retrieval] retrieve failed", exc_info=True)
         return []
+
+
+def retrieve_with_scores(
+    user_query: str,
+    thread_id: str,
+    *,
+    limit: int = 8,
+    prefetched_candidates: list[SemanticMemory] | None = None,
+) -> tuple[list[SemanticMemory], list[ScoredMemory], QueryIntent]:
+    """Same as retrieve() but also returns scored candidates and intent.
+
+    Used by somatic translator to build InternalMetrics.
+    Returns (memories, scored_list, intent) — empty on failure.
+    """
+    empty: tuple[list[SemanticMemory], list[ScoredMemory], QueryIntent] = (
+        [], [], QueryIntent(),
+    )
+
+    if not user_query or not user_query.strip():
+        return empty
+
+    if not settings.RETRIEVAL_ENABLED:
+        return empty
+
+    t0 = time.time()
+
+    try:
+        intent = detect_intent(user_query)
+
+        if prefetched_candidates is not None:
+            candidates = prefetched_candidates
+        else:
+            candidate_n = settings.RETRIEVAL_CANDIDATE_N
+            candidates = semantic_store.search_active(thread_id, limit=candidate_n)
+        if not candidates:
+            return [], [], intent
+
+        scored = semantic_search(user_query, candidates)
+        if not scored:
+            scored = [ScoredMemory(memory=m, similarity=0.0) for m in candidates]
+
+        now = time.time()
+        ranked = hybrid_rank(scored, intent, now)
+        min_score = settings.RETRIEVAL_MIN_SCORE
+        top_k = select_top_k(ranked, k=limit, min_score=min_score)
+
+        elapsed_ms = (time.time() - t0) * 1000
+        logger.info(
+            "[Retrieval] query=%s intent=%s/%s/%s candidates=%d top_k=%d elapsed=%.1fms (with_scores)",
+            user_query[:30],
+            "T" if intent.is_temporal else "-",
+            "R" if intent.is_recall else "-",
+            "K" if intent.is_topic_specific else "-",
+            len(candidates),
+            len(top_k),
+            elapsed_ms,
+        )
+
+        if settings.RETRIEVAL_LOG_ENABLED:
+            _log_to_db(
+                thread_id=thread_id,
+                query=user_query,
+                intent=intent,
+                candidates_count=len(candidates),
+                top_k=top_k,
+                elapsed_ms=elapsed_ms,
+            )
+
+        return [sm.memory for sm in top_k], top_k, intent
+
+    except Exception:
+        logger.warning("[Retrieval] retrieve_with_scores failed", exc_info=True)
+        return empty

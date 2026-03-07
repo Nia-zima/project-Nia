@@ -13,6 +13,10 @@ import sqlite3
 
 from backend.services.pending_actions_repo import pending_actions_repo
 from backend.services.telemetry_logger import telemetry
+from backend.services.memory.capture_event import (
+    build_capture_recorded_payload,
+    find_existing_capture_event_id,
+)
 from backend.services.memory_gate import run_gate
 from backend.core.config import settings
 
@@ -126,37 +130,47 @@ def _candidate_summary(text: Optional[str], max_len: int = 120) -> str:
     return s[: max_len - 3] + "..."
 
 
-def _insert_episodic_capture(payload: Dict[str, Any]) -> None:
-    if getattr(settings, "LEGACY_MEMORY_READ_ONLY", False):
-        from backend.services.memory_manager import memory_manager
+def _use_event_capture_path() -> bool:
+    return bool(
+        getattr(settings, "LEGACY_MEMORY_READ_ONLY", False)
+        or not getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False)
+    )
 
-        event_payload = {
-            "legacy_capture_id": payload.get("id"),
-            "raw_text": payload.get("raw_text") or "",
-            "state_tag": payload.get("state_tag"),
-            "tags": payload.get("tags"),
-            "refs": payload.get("refs"),
-            "retention": float(payload.get("retention") or 0.0),
-            "stage": payload.get("stage") or "capture",
-            "scope": str(payload.get("stage") or "capture"),
-            "text_hash": payload.get("text_hash"),
-        }
-        memory_manager.append_memory_event(
-            thread_id=str(payload.get("thread_id") or "default_thread"),
+
+def _insert_episodic_capture(payload: Dict[str, Any]) -> None:
+    if _use_event_capture_path():
+        from backend.services.memory import memory_service
+
+        thread_id = str(payload.get("thread_id") or "default_thread")
+        message_id = str(payload.get("message_id") or payload.get("id") or "") or None
+        text_hash = str(payload.get("text_hash") or "") or None
+        existing_event_id = find_existing_capture_event_id(
+            thread_id=thread_id,
+            text_hash=text_hash,
+            message_id=message_id,
+        )
+        if existing_event_id:
+            raise sqlite3.IntegrityError(
+                f"text_hash already exists in memory_events: {existing_event_id}"
+            )
+
+        event_payload = build_capture_recorded_payload(payload)
+        memory_service.append_event(
+            thread_id=thread_id,
             event_type="capture_recorded",
             payload=event_payload,
             turn_id=str(payload.get("origin_message_id") or payload.get("message_id") or "") or None,
-            message_id=str(payload.get("message_id") or payload.get("id") or "") or None,
+            message_id=message_id,
             created_at=float(payload.get("created_at") or time.time()),
         )
         logger.info(
-            "approve_pending_action: wrote capture_recorded event in read-only mode thread_id=%s message_id=%s",
+            "approve_pending_action: wrote capture_recorded event path thread_id=%s message_id=%s",
             payload.get("thread_id"),
             payload.get("message_id"),
         )
         return
 
-    from backend.core.db import get_conn
+    from backend.core.db import managed_conn
 
     required = ("id", "thread_id", "created_at", "raw_text")
     for k in required:
@@ -172,11 +186,8 @@ def _insert_episodic_capture(payload: Dict[str, Any]) -> None:
     placeholders = ",".join(["?"] * len(cols))
     sql = f"INSERT INTO episodic_captures ({','.join(cols)}) VALUES ({placeholders})"
 
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         conn.execute(sql, tuple(vals))
-    finally:
-        conn.close()
 
 
 async def enqueue_memory_add(

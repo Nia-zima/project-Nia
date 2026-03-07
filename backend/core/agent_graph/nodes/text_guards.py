@@ -141,21 +141,8 @@ def _apply_identity_tone_policy(
     if wants_conclusion:
         if "暫定結論" not in softened and "いまのところ" not in softened and "現時点" not in softened:
             softened = f"いまのところの暫定結論としては、{softened}"
-    else:
-        if level == "strict":
-            if not any(marker in softened for marker in ("いまのところ", "見立て", "かもしれ", "たぶん", "と思う")):
-                softened = f"いまのところの見立てとしては、{softened}"
-            if _looks_strong_conclusion(softened):
-                softened = softened.replace("。", "。必要なら一緒に確認したい。", 1)
-        elif level == "balanced":
-            if _looks_strong_conclusion(softened):
-                softened = f"今の情報だと、{softened}"
-            if not any(marker in softened for marker in ("いまのところ", "見立て", "かもしれ", "たぶん", "と思う")):
-                softened = f"いまのところの見立てとしては、{softened}"
-        else:
-            # soft mode keeps original flow unless strongly deterministic.
-            if _looks_strong_conclusion(softened) and "いまのところ" not in softened:
-                softened = f"いまのところは、{softened}"
+    # else: _soften_assertive_tone already handled word-level replacements.
+    # No prefix/suffix injection — let LLM's natural phrasing stand.
     return _final_text_guard(softened, max_sentences=max_sentences, max_chars=max_chars)
 
 

@@ -1,8 +1,6 @@
-from datetime import datetime
-
 from fastapi import APIRouter
 
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 
 router = APIRouter()
 
@@ -10,12 +8,8 @@ router = APIRouter()
 @router.get("/summary")
 def get_stats_summary():
     """会話統計サマリーを取得"""
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    try:
-        # 今日の日付
-        today = datetime.now().strftime("%Y-%m-%d")
+    with managed_conn() as conn:
+        cursor = conn.cursor()
 
         # 各種統計を取得
         stats = {}
@@ -24,14 +18,13 @@ def get_stats_summary():
         cursor.execute("SELECT COUNT(*) FROM events")
         stats["total_events"] = cursor.fetchone()[0]
 
-        # 今日の会話数
+        # 今日の会話数（events.ts は CURRENT_TIMESTAMP = UTC なので date('now') で比較）
         cursor.execute(
             """
             SELECT COUNT(*) FROM events
             WHERE event_type = 'chat_received'
-            AND ts LIKE ?
-            """,
-            (f"{today}%",),
+            AND date(ts) = date('now')
+            """
         )
         stats["today_chats"] = cursor.fetchone()[0]
 
@@ -109,5 +102,3 @@ def get_stats_summary():
         stats["last_chat_time"] = row[0] if row else None
 
         return stats
-    finally:
-        conn.close()

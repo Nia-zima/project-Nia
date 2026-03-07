@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.services.memory import memory_service
 from backend.services.memory_manager import memory_manager
 from backend.services.telemetry_logger import telemetry
 
@@ -30,9 +31,9 @@ class ReviewRequest(BaseModel):
 def list_pending_memories(limit: int = 50, thread_id: str = "default_thread"):
     """B層の 'memory_pending' イベントを取得（memory_events path only）"""
     try:
-        idx_rows = memory_manager.query_memory_index(thread_id=thread_id, limit=max(int(limit) * 10, 100))
+        idx_rows = memory_service.query_index(thread_id=thread_id, limit=max(int(limit) * 10, 100))
         event_ids = [str(r.get("event_id")) for r in idx_rows if r.get("event_id")]
-        event_rows = memory_manager.load_memory_events(event_ids)
+        event_rows = memory_service.load_events(event_ids)
         by_id = {str(r.get("event_id")): r for r in event_rows}
 
         pending: dict[str, dict] = {}
@@ -95,7 +96,7 @@ async def approve_memory(req: ReviewRequest):
 
     # New memory_events path first
     try:
-        event_rows = memory_manager.load_memory_events([str(req.event_id)])
+        event_rows = memory_service.load_events([str(req.event_id)])
         if event_rows:
             ev = event_rows[0]
             payload = json.loads(ev.get("payload_json") or "{}")
@@ -131,7 +132,7 @@ async def approve_memory(req: ReviewRequest):
     })
     # New append-only event log (best-effort)
     try:
-        memory_manager.append_memory_event(
+        memory_service.append_event(
             thread_id=thread_id,
             event_type="memory_approved",
             payload={
@@ -155,7 +156,7 @@ async def reject_memory(req: ReviewRequest):
     thread_id = "unknown"
     found = False
     try:
-        event_rows = memory_manager.load_memory_events([str(req.event_id)])
+        event_rows = memory_service.load_events([str(req.event_id)])
         if event_rows:
             thread_id = str(event_rows[0].get("thread_id") or "unknown")
             found = True
@@ -171,7 +172,7 @@ async def reject_memory(req: ReviewRequest):
     })
     # New append-only event log (best-effort)
     try:
-        memory_manager.append_memory_event(
+        memory_service.append_event(
             thread_id=thread_id,
             event_type="memory_rejected",
             payload={

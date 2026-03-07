@@ -20,6 +20,7 @@ from backend.services.memory.retrieval import (
     select_top_k,
     retrieve,
 )
+from conftest import make_semantic as _make_semantic
 
 
 @pytest.fixture(autouse=True)
@@ -31,28 +32,6 @@ def _setup_db():
     finally:
         conn.close()
     yield
-
-
-def _make_semantic(
-    *,
-    id: str = None,
-    thread_id: str = "t1",
-    content: str = "test fact",
-    status: str = "confirmed",
-    confidence: float = 0.8,
-    updated_at: float = None,
-) -> SemanticMemory:
-    now = time.time()
-    return SemanticMemory(
-        id=id or str(uuid.uuid4()),
-        thread_id=thread_id,
-        content=content,
-        valid_from=now,
-        created_at=now,
-        updated_at=updated_at or now,
-        status=status,
-        confidence=confidence,
-    )
 
 
 def _insert(mem: SemanticMemory):
@@ -312,7 +291,8 @@ class TestRetrieve:
         # Should still return results (SQL-only fallback with sim=0)
         assert len(result) > 0
 
-    def test_thread_isolation(self):
+    def test_semantic_global_across_threads(self):
+        """Semantic memories are global — visible regardless of thread_id."""
         _insert(_make_semantic(content="thread1 memory", thread_id="t1"))
         _insert(_make_semantic(content="thread2 memory", thread_id="t2"))
 
@@ -321,7 +301,7 @@ class TestRetrieve:
 
         contents = [m.content for m in result]
         assert "thread1 memory" in contents
-        assert "thread2 memory" not in contents
+        assert "thread2 memory" in contents
 
 
 # ── context_builder integration ──────────────────────────────────
@@ -367,3 +347,116 @@ class TestContextBuilderIntegration:
 
         result = _build_long_term(active, user_query="", thread_id="t1")
         assert "some memory" in result
+
+
+# ── R.b: Save-time embedding ────────────────────────────────────
+
+
+class TestSaveTimeEmbedding:
+    """Tests for R.b: embedding BLOB saved at upsert time."""
+
+    def test_upsert_stores_embedding_blob(self):
+        """Embedding is encoded and stored on upsert when EMBEDDING_AT_SAVE=True."""
+        fake_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        fake_blob = fake_vec.tobytes()
+
+        with patch(
+            "backend.services.memory.semantic_store._encode_content",
+            return_value=fake_blob,
+        ):
+            mem = _make_semantic(content="embedding test")
+            _insert(mem)
+
+        # Read back from DB
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT embedding FROM semantic_memories WHERE id=?", (mem.id,)
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row["embedding"] is not None
+        restored = np.frombuffer(row["embedding"], dtype=np.float32)
+        np.testing.assert_array_almost_equal(restored, fake_vec)
+
+    def test_upsert_without_embedding_on_failure(self):
+        """Memory is saved even when embedding encode fails."""
+        with patch(
+            "backend.services.memory.semantic_store._encode_content",
+            return_value=None,
+        ):
+            mem = _make_semantic(content="no embedding test")
+            _insert(mem)
+
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT content, embedding FROM semantic_memories WHERE id=?",
+                (mem.id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row["content"] == "no embedding test"
+        assert row["embedding"] is None
+
+    def test_semantic_search_uses_precomputed_embedding(self):
+        """semantic_search() uses pre-computed embedding and skips batch encoding."""
+        fake_q_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        fake_m_vec = np.array([0.9, 0.1, 0.0], dtype=np.float32)
+        # Normalize
+        fake_m_vec = fake_m_vec / np.linalg.norm(fake_m_vec)
+
+        mem = _make_semantic(content="precomputed test")
+        mem.embedding = fake_m_vec.tobytes()
+
+        with patch(
+            "backend.services.memory.retrieval._encode_texts",
+            return_value=np.array([fake_q_vec]),
+        ) as mock_encode:
+            scored = semantic_search("query", [mem])
+
+        # _encode_texts should be called only once (for the query), not for candidates
+        mock_encode.assert_called_once_with(["query"])
+        assert len(scored) == 1
+        assert scored[0].similarity > 0
+
+    def test_semantic_search_mixed_precomputed_and_unencoded(self):
+        """Handles mix of candidates with and without pre-computed embeddings."""
+        fake_q_vec = np.array([1.0, 0.0], dtype=np.float32)
+        fake_pre = np.array([0.9, 0.1], dtype=np.float32)
+        fake_pre = fake_pre / np.linalg.norm(fake_pre)
+        fake_batch = np.array([[0.5, 0.5]], dtype=np.float32)
+
+        mem_with = _make_semantic(content="has embedding")
+        mem_with.embedding = fake_pre.tobytes()
+        mem_without = _make_semantic(content="no embedding")
+
+        with patch(
+            "backend.services.memory.retrieval._encode_texts",
+        ) as mock_encode:
+            # First call: query encoding; second call: batch encode the one without
+            mock_encode.side_effect = [
+                np.array([fake_q_vec]),  # query
+                fake_batch,              # batch for unencoded
+            ]
+            scored = semantic_search("query", [mem_with, mem_without])
+
+        assert len(scored) == 2
+        assert mock_encode.call_count == 2
+
+    def test_embedding_to_numpy_roundtrip(self):
+        """embedding_to_numpy correctly deserializes BLOB."""
+        from backend.services.memory.semantic_store import embedding_to_numpy
+
+        original = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+        blob = original.tobytes()
+        restored = embedding_to_numpy(blob)
+
+        assert restored is not None
+        np.testing.assert_array_equal(restored, original)
+
+    def test_embedding_to_numpy_none(self):
+        from backend.services.memory.semantic_store import embedding_to_numpy
+        assert embedding_to_numpy(None) is None

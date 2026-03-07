@@ -14,7 +14,6 @@ def test_system_endpoints_require_system_token() -> None:
     with TestClient(app) as client:
         assert client.post("/api/system/vision", json={"enabled": True}).status_code == 401
         assert client.post("/api/system/sleep").status_code == 401
-        assert client.post("/api/system/reflect").status_code == 401
 
 
 def test_system_vision_accepts_valid_token() -> None:

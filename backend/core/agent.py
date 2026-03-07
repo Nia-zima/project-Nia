@@ -22,7 +22,7 @@ from backend.core.agent_graph.graph import workflow
 from backend.core.agent_graph.utils import _log_task_exception
 from backend.core.config import settings
 from backend.core.logger import logger
-from backend.services.memory_manager import memory_manager
+from backend.services.checkpointer import checkpointer_service
 from backend.services.voicevox_client import voicevox_client
 from backend.services.speech_sanitizer import (
     SILENCE_DEFAULT,
@@ -33,7 +33,6 @@ from backend.services.speech_sanitizer import (
 from backend.services.pending_actions_service import enqueue_memory_add
 
 from backend.core.agent_helpers import (
-    HEARING_QUERY_RE,
     _build_user_content,
     _current_voice_id,
     _extract_emotion_tags,
@@ -62,7 +61,7 @@ async def analyze_and_save_memory(
 ):
     """Background Task for Memory Analysis (unchanged logic)"""
     try:
-        log = logging.getLogger("AI_Buddy")  # Local alias for safety
+        log = logging.getLogger("nia")  # Local alias for safety
         if not ports or not isinstance(ports, dict):
             log.error("[CAPTURE_SAVE] ports missing; aborting")
             return
@@ -141,7 +140,7 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
         if ports and ports.get("checkpointer"):
             checkpointer_ctx = ports["checkpointer"].get_async_checkpointer_conn()
         else:
-            checkpointer_ctx = memory_manager.get_async_checkpointer_conn()
+            checkpointer_ctx = checkpointer_service.get_async_checkpointer_conn()
 
         async with checkpointer_ctx as checkpointer:
             app_instance = workflow.compile(checkpointer=checkpointer)
@@ -248,7 +247,7 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
 
 async def get_thread_history(thread_id: str):
     try:
-        async with memory_manager.get_async_checkpointer_conn() as checkpointer:
+        async with checkpointer_service.get_async_checkpointer_conn() as checkpointer:
             app_instance = workflow.compile(checkpointer=checkpointer)
             config = {"configurable": {"thread_id": thread_id}}
             state = await app_instance.aget_state(config)
@@ -265,7 +264,7 @@ async def get_thread_history(thread_id: str):
         return []
 
 async def get_all_threads():
-    return await memory_manager.get_all_threads()
+    return await checkpointer_service.get_all_threads()
 
 async def delete_thread_history(thread_id: str):
-    return await memory_manager.delete_thread_state_history(thread_id)
+    return await checkpointer_service.delete_thread_state_history(thread_id)

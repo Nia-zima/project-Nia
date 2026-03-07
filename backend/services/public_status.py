@@ -14,8 +14,6 @@ _status_lock = asyncio.Lock()
 
 def _default_status() -> Dict[str, Any]:
     return {
-        "chapter_title": "Initializing...",
-        "vibe": "Awaking",
         "note": "System is starting up.",
         "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }

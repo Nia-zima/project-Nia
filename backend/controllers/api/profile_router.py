@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import List
 
 from fastapi import APIRouter
@@ -6,6 +7,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -53,7 +56,7 @@ async def get_user_profile():
                     
                     return res
         except Exception as e:
-            print(f"Profile load catch: {e}")
+            logger.warning("Profile load failed: %s", e)
 
     return res
 
@@ -70,7 +73,7 @@ async def update_user_profile(profile: UserProfile):
             with open(json_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
         except Exception:
-            pass
+            logger.debug("Could not load existing profile, starting fresh")
 
     # Merge updates
     updated_data = {**existing, **profile.model_dump()}

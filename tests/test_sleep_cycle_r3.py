@@ -1,12 +1,10 @@
-"""Tests for Sleep Cycle R.3 refactor (daily_reflections input + semantic extraction skip)."""
+"""Tests for Sleep Cycle R.3 refactor (daily_reflections input + semantic extraction)."""
 from __future__ import annotations
 
 import json
 import os
 import time
 import uuid
-
-os.environ.setdefault("RETENTION_PROFILE", "fast")
 
 import pytest
 
@@ -168,9 +166,9 @@ class TestSleepCycleR3Integration:
             return {"impressions": [], "mood": "neutral", "surprise": None}
 
         # Mock everything that sleep_cycle calls
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_a_impression_record", mock_layer_a)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_a_impression_record", mock_layer_a)
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.identity_manager",
+            "backend.scripts.sleep_cycle.orchestrator.identity_manager",
             type("FakeIM", (), {"get_identity": staticmethod(lambda: "fake identity")})(),
         )
 
@@ -178,11 +176,11 @@ class TestSleepCycleR3Integration:
         async def mock_layer_b(identity, memory_block):
             return (False, {}, 0, 0)
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_b_guardian_proposal", mock_layer_b)
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_b_guardian_adaptive", mock_layer_b)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_b_guardian_proposal", mock_layer_b)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_b_guardian_adaptive", mock_layer_b)
 
         # Prevent semantic extraction, confirm, etc.
-        monkeypatch.setattr("backend.scripts.sleep_cycle._extract_semantics_from_episodic", lambda: None)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator._extract_semantics_from_episodic", lambda: None)
 
         from backend.scripts.sleep_cycle import integrated_sleep_cycle
         await integrated_sleep_cycle()
@@ -202,18 +200,18 @@ class TestSleepCycleR3Integration:
             captured_block["memory_block"] = memory_block
             return {"impressions": [], "mood": "neutral", "surprise": None}
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_a_impression_record", mock_layer_a)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_a_impression_record", mock_layer_a)
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.identity_manager",
+            "backend.scripts.sleep_cycle.orchestrator.identity_manager",
             type("FakeIM", (), {"get_identity": staticmethod(lambda: "fake identity")})(),
         )
 
         async def mock_layer_b(identity, memory_block):
             return (False, {}, 0, 0)
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_b_guardian_proposal", mock_layer_b)
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_b_guardian_adaptive", mock_layer_b)
-        monkeypatch.setattr("backend.scripts.sleep_cycle._extract_semantics_from_episodic", lambda: None)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_b_guardian_proposal", mock_layer_b)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_b_guardian_adaptive", mock_layer_b)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator._extract_semantics_from_episodic", lambda: None)
 
         from backend.scripts.sleep_cycle import integrated_sleep_cycle
         await integrated_sleep_cycle()
@@ -222,8 +220,8 @@ class TestSleepCycleR3Integration:
         assert "テスト会話" in captured_block["memory_block"]
 
     @pytest.mark.asyncio
-    async def test_skips_semantic_extraction_with_reflections(self, monkeypatch, caplog):
-        """When daily_reflections exist, _extract_semantics_from_episodic is NOT called."""
+    async def test_always_runs_semantic_extraction(self, monkeypatch, caplog):
+        """Semantic extraction always runs (even with daily_reflections) to catch post-reflection events."""
         from datetime import date
         import logging
 
@@ -238,26 +236,26 @@ class TestSleepCycleR3Integration:
             extract_called["count"] += 1
             return 0
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle._extract_semantics_from_episodic", mock_extract)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator._extract_semantics_from_episodic", mock_extract)
 
         async def mock_layer_a(identity, memory_block):
             return {"impressions": [], "mood": "neutral", "surprise": None}
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_a_impression_record", mock_layer_a)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_a_impression_record", mock_layer_a)
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.identity_manager",
+            "backend.scripts.sleep_cycle.orchestrator.identity_manager",
             type("FakeIM", (), {"get_identity": staticmethod(lambda: "fake identity")})(),
         )
 
         async def mock_layer_b(identity, memory_block):
             return (False, {}, 0, 0)
 
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_b_guardian_proposal", mock_layer_b)
-        monkeypatch.setattr("backend.scripts.sleep_cycle.layer_b_guardian_adaptive", mock_layer_b)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_b_guardian_proposal", mock_layer_b)
+        monkeypatch.setattr("backend.scripts.sleep_cycle.orchestrator.layer_b_guardian_adaptive", mock_layer_b)
 
         with caplog.at_level(logging.INFO):
             from backend.scripts.sleep_cycle import integrated_sleep_cycle
             await integrated_sleep_cycle()
 
-        assert extract_called["count"] == 0
-        assert "handled by Idle Reflection" in caplog.text
+        # Extraction is always called; boundary logic inside handles dedup
+        assert extract_called["count"] == 1

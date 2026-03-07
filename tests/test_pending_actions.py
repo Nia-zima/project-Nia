@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.core.db import get_conn, init_schema
 from backend.core.config import settings
 from backend.services.pending_actions_repo import pending_actions_repo
+from backend.services.memory import memory_service
 from backend.services.pending_actions_service import (
     enqueue_memory_add,
     approve_pending_action,
@@ -306,7 +307,9 @@ def test_gate_log_only_logs_and_enqueues():
 def test_approve_uses_event_path_in_read_only_mode():
     thread_id = f"test_pending_actions_{uuid.uuid4().hex[:8]}"
     old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
+    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
     settings.LEGACY_MEMORY_READ_ONLY = True
+    settings.LEGACY_MEMORY_TABLES_ENABLED = False
     try:
         payload = _base_payload(thread_id, "msg_ro", text_hash="hash-ro")
         res = asyncio.run(enqueue_memory_add(thread_id, "msg_ro", payload))
@@ -323,8 +326,84 @@ def test_approve_uses_event_path_in_read_only_mode():
                 "SELECT COUNT(*) FROM memory_events WHERE thread_id=? AND event_type='capture_recorded'",
                 (thread_id,),
             ).fetchone()[0]
+            row = conn.execute(
+                "SELECT payload_json FROM memory_events WHERE thread_id=? AND event_type='capture_recorded' ORDER BY created_at DESC LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+        payload_json = json.loads(row[0]) if row else {}
         assert legacy_count == 0
+        assert event_count >= 1
+        assert payload_json.get("origin_message_id") == "msg_ro"
+        assert payload_json.get("stream_id") is None
+        assert payload_json.get("text_hash") == "hash-ro"
+        assert payload_json.get("tags") == []
+        assert payload_json.get("keywords") == []
+        assert payload_json.get("entities") == []
+        assert payload_json.get("emotion_tags") == []
+        assert payload_json.get("refs") == {}
+    finally:
+        settings.LEGACY_MEMORY_READ_ONLY = old
+        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
+        _cleanup(thread_id)
+
+
+def test_approve_uses_event_path_when_legacy_tables_disabled():
+    thread_id = f"test_pending_actions_{uuid.uuid4().hex[:8]}"
+    old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
+    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
+    settings.LEGACY_MEMORY_READ_ONLY = False
+    settings.LEGACY_MEMORY_TABLES_ENABLED = False
+    try:
+        payload = _base_payload(thread_id, "msg_evt_only", text_hash="hash-evt-only")
+        res = asyncio.run(enqueue_memory_add(thread_id, "msg_evt_only", payload))
+        pending_id = res["pending_action_id"]
+        r1 = asyncio.run(approve_pending_action(pending_id, "ok"))
+        assert r1 == "APPLIED"
+
+        with get_conn() as conn:
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE thread_id=? AND event_type='capture_recorded'",
+                (thread_id,),
+            ).fetchone()[0]
         assert event_count >= 1
     finally:
         settings.LEGACY_MEMORY_READ_ONLY = old
+        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
+        _cleanup(thread_id)
+
+
+def test_read_only_event_path_dedupes_existing_text_hash():
+    thread_id = f"test_pending_actions_{uuid.uuid4().hex[:8]}"
+    old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
+    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
+    settings.LEGACY_MEMORY_READ_ONLY = True
+    settings.LEGACY_MEMORY_TABLES_ENABLED = False
+    try:
+        memory_service.append_event(
+            thread_id=thread_id,
+            event_type="capture_recorded",
+            payload={
+                "raw_text": "already stored",
+                "text_hash": "hash-existing-event",
+                "scope": "capture",
+                "stage": "capture",
+            },
+            message_id="msg_existing_event",
+        )
+
+        payload = _base_payload(thread_id, "msg_ro_dup", text_hash="hash-existing-event")
+        res = asyncio.run(enqueue_memory_add(thread_id, "msg_ro_dup", payload))
+        pending_id = res["pending_action_id"]
+        r1 = asyncio.run(approve_pending_action(pending_id, "ok"))
+        assert r1 == "CANCELLED_ALREADY_EXISTS"
+
+        with get_conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE thread_id=? AND event_type='capture_recorded'",
+                (thread_id,),
+            ).fetchone()[0]
+        assert count == 1
+    finally:
+        settings.LEGACY_MEMORY_READ_ONLY = old
+        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
         _cleanup(thread_id)

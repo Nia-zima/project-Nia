@@ -1,35 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 from os import getenv
 from typing import Any
 import base64
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 
+from backend.controllers.ws_security import (
+    is_ws_origin_allowed,
+    WS_MAX_MESSAGE_BYTES,
+    WS_RECEIVE_TIMEOUT_SEC,
+)
+from backend.core.config import settings
 from backend.core.logger import logger
+from backend.core.rate_limit import limiter
 from backend.services.stt_service import stt_service, StreamingDecoder
 from backend.services.voice_session_manager import voice_session_manager
 
 router = APIRouter()
-
-
-def _allowed_ws_origins() -> set[str]:
-    raw = getenv(
-        "VOICE_WS_ALLOWED_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
-    )
-    return {item.strip().lower() for item in raw.split(",") if item.strip()}
-
-
-def _is_ws_origin_allowed(origin: str | None) -> bool:
-    if not origin:
-        return True
-    allowed = _allowed_ws_origins()
-    if "*" in allowed:
-        return True
-    return origin.strip().lower() in allowed
 
 
 def _voice_verbose_log() -> bool:
@@ -48,7 +39,8 @@ class VoiceSessionStopRequest(BaseModel):
 
 
 @router.post("/voice/session/start")
-async def voice_session_start(req: VoiceSessionStartRequest) -> dict[str, Any]:
+@limiter.limit(lambda: settings.RATE_LIMIT_VOICE)
+async def voice_session_start(req: VoiceSessionStartRequest, request: Request) -> dict[str, Any]:
     session = await voice_session_manager.start_session(
         thread_id=req.thread_id,
         client_id=req.client_id,
@@ -78,7 +70,7 @@ async def voice_session_get(session_id: str) -> dict[str, Any]:
 @router.websocket("/voice/ws")
 async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "default_client") -> None:
     origin = websocket.headers.get("origin")
-    if not _is_ws_origin_allowed(origin):
+    if not is_ws_origin_allowed(origin):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -109,13 +101,15 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
             "last_seq": -1,
         }
         turns[utterance_id] = state
-        # runaway protection for old orphan utterances
-        if len(turns) > 8:
+        # runaway protection: evict oldest orphan utterances
+        while len(turns) > 6:
             oldest = next(iter(turns.keys()))
-            if oldest != utterance_id:
-                old_state = turns.pop(oldest, None)
-                if old_state and old_state.get("decoder"):
-                    old_state["decoder"].cleanup()
+            if oldest == utterance_id:
+                break
+            old_state = turns.pop(oldest, None)
+            if old_state and old_state.get("decoder"):
+                old_state["decoder"].cleanup()
+            logger.debug("[VOICE_WS] evicted orphan utterance %s (turns=%d)", oldest, len(turns))
         return state
 
     try:
@@ -125,7 +119,25 @@ async def voice_ws(websocket: WebSocket, session_id: str, client_id: str = "defa
                 await websocket.send_json({"type": "voice_session_closed"})
                 break
 
-            message = await websocket.receive_json()
+            try:
+                raw = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=WS_RECEIVE_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[VOICE_WS] receive timeout session_id=%s", session_id)
+                try:
+                    await websocket.send_json({"type": "error", "content": "receive_timeout"})
+                except Exception:
+                    pass
+                break
+
+            if len(raw) > WS_MAX_MESSAGE_BYTES:
+                logger.warning("[VOICE_WS] message too large (%d bytes) session_id=%s", len(raw), session_id)
+                await websocket.send_json({"type": "error", "content": "message_too_large"})
+                continue
+
+            message = _json.loads(raw)
             msg_type = str(message.get("type") or "").strip().lower()
             await voice_session_manager.touch(session_id)
 

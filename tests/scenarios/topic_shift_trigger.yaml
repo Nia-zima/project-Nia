@@ -1,0 +1,59 @@
+# tests/scenarios/topic_shift_trigger.yaml
+# 3回の話題転換 → topic_shift_count=3 → N.4 トリガー
+
+name: "話題転換 → N.4 リフレクショントリガー"
+description: >
+  完全に異なる話題を3回連続で投入すると、topic_shift_count が3に達し、
+  N.4 の state-driven reflection がトリガーされる。
+  compute_awareness のキーワードオーバーラップ閾値 (0.1) を下回る
+  まったく無関係な話題を使用する。
+thread_id: "playbook_test"
+
+setup:
+  telemetry:
+    topic_shift_count: "0"
+    dissonance_streak: "0"
+
+turns:
+  # Turn 1: 最初の話題（料理）
+  - user: "今日はカレーを作ったよ。スパイスをたくさん入れた"
+    mock_nia_response: "カレーいいね。どんなスパイスを使ったの？"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        topic_shift_count: "0"
+    assert_not_state:
+      n4_not_trigger: true
+
+  # Turn 2: 話題転換1（天文学へ）— カレーと全く無関係
+  - user: "木星の衛星エウロパに海があるって知ってた？"
+    mock_nia_response: "エウロパの氷の下に海がある可能性は高いって言われてるね"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        topic_shift_count: "1"
+
+  # Turn 3: 話題転換2（プログラミングへ）— 天文学と全く無関係
+  - user: "Rustのライフタイムがどうしても理解できない"
+    mock_nia_response: "ライフタイムは最初は難しいよね。参照の有効期間を示すものだよ"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        topic_shift_count: "2"
+    assert_not_state:
+      n4_not_trigger: true
+
+  # Turn 4: 話題転換3（音楽へ）— プログラミングと全く無関係
+  - user: "ショパンのバラード第一番をずっと練習してるんだけど"
+    mock_nia_response: "バラード第一番、美しい曲だよね。コーダが難しそう"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        topic_shift_count: "3"
+      n4_trigger:
+        expected: true
+        reason: "topic_shifts"

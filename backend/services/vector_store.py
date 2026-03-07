@@ -12,7 +12,7 @@ from typing import List, Dict, Optional
 
 from backend.core.logger import logger
 from backend.core.config import settings
-from backend.core.embedding_model import _MODEL_NAME as EMBEDDING_MODEL_NAME
+from backend.core.embedding_model import MODEL_NAME as EMBEDDING_MODEL_NAME
 
 class VectorStore:
     _instance = None
@@ -174,10 +174,15 @@ class VectorStore:
         raw_text: str,
         metadata: Optional[Dict] = None,
         collection_type: str = "episodic",
+        embedding: Optional[List[float]] = None,
     ) -> bool:
         """
         長期記憶の upsert を VectorStore 経由で統一する。
         同じ client / collection / embedding_function を必ず使う。
+
+        embedding が渡された場合はそれを直接使い、ChromaDB 側での
+        再エンコードをスキップする。None の場合は従来通り documents から
+        ChromaDB が自動エンコードする。
         """
         if not capture_id or not raw_text:
             return False
@@ -200,11 +205,18 @@ class VectorStore:
                 meta[key] = val
 
         try:
-            target_collection.upsert(
-                documents=[raw_text],
-                metadatas=[meta],
-                ids=[capture_id],
-            )
+            if embedding is not None:
+                target_collection.upsert(
+                    embeddings=[embedding],
+                    metadatas=[meta],
+                    ids=[capture_id],
+                )
+            else:
+                target_collection.upsert(
+                    documents=[raw_text],
+                    metadatas=[meta],
+                    ids=[capture_id],
+                )
 
             logger.info("[VEC] collection=%s count=%s", target_collection.name, target_collection.count())
             # Diagnostic peek (filter out None values; ChromaDB rejects them)

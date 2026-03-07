@@ -14,8 +14,8 @@ import sys
 
 
 async def run_cleanup(retention_days: int | None = None) -> dict:
-    from backend.services.memory_manager import memory_manager
-    return await memory_manager.cleanup_old_checkpoints(retention_days)
+    from backend.services.checkpointer import checkpointer_service
+    return await checkpointer_service.cleanup_old_checkpoints(retention_days)
 
 
 def main() -> None:

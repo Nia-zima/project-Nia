@@ -183,44 +183,43 @@ def _save_to_memory(
     try:
         from backend.services.memory.semantic_store import upsert
         from backend.services.memory.models import SemanticMemory
-        from backend.core.db import get_conn
+        from backend.core.db import managed_conn
     except ImportError:
         logger.warning("[MotionLearner] Could not import semantic_store")
         return []
 
     now = time.time()
     ids: list[str] = []
-    conn = get_conn()
-    try:
-        for pattern in patterns:
-            name = pattern.get("name", "unknown")
-            context = pattern.get("context", "")
-            bones = pattern.get("bones", "")
+    with managed_conn() as conn:
+        try:
+            for pattern in patterns:
+                name = pattern.get("name", "unknown")
+                context = pattern.get("context", "")
+                bones = pattern.get("bones", "")
 
-            mem_id = str(uuid.uuid4())
-            content = f"[モーション学習] {name}: {context} ({bones})"
-            mem = SemanticMemory(
-                id=mem_id,
-                thread_id=thread_id,
-                content=content,
-                status="inferred",
-                confidence=0.5,
-                state_tag="motion_knowledge",
-                source_turn_ids="",
-                source_event_ids="",
-                note=f"auto:motion_learn:{source_video}",
-                seed_retention=0.5,
-                vector_sync_pending=1,
-                created_at=now,
-                updated_at=now,
-            )
-            upsert(conn, mem)
-            ids.append(mem_id)
+                mem_id = str(uuid.uuid4())
+                content = f"[モーション学習] {name}: {context} ({bones})"
+                mem = SemanticMemory(
+                    id=mem_id,
+                    thread_id=thread_id,
+                    content=content,
+                    valid_from=now,
+                    created_at=now,
+                    updated_at=now,
+                    status="inferred",
+                    confidence=0.5,
+                    state_tag="motion_knowledge",
+                    source_turn_ids="",
+                    source_event_ids="",
+                    note=f"auto:motion_learn:{source_video}",
+                    seed_retention=0.5,
+                    vector_sync_pending=1,
+                )
+                upsert(conn, mem)
+                ids.append(mem_id)
 
-        logger.info("[MotionLearner] Saved %d patterns to semantic memory", len(ids))
-    except Exception:
-        logger.exception("[MotionLearner] Failed to save patterns to memory")
-    finally:
-        conn.close()
+            logger.info("[MotionLearner] Saved %d patterns to semantic memory", len(ids))
+        except Exception:
+            logger.exception("[MotionLearner] Failed to save patterns to memory")
 
     return ids

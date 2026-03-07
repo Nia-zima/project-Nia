@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.core.db import init_schema
 from backend.core.db import get_conn
 from backend.controllers import pending_memory_router as pmr
-from backend.services.memory_manager import memory_manager
+from backend.services.memory import memory_service
 from backend.core.config import settings
 
 
@@ -20,7 +20,7 @@ def _thread(prefix: str = "pending") -> str:
 def test_list_pending_memories_uses_event_path():
     init_schema()
     tid = _thread("list")
-    eid = memory_manager.append_memory_event(
+    eid = memory_service.append_event(
         thread_id=tid,
         event_type="memory_pending",
         payload={
@@ -38,7 +38,7 @@ def test_list_pending_memories_uses_event_path():
 def test_approve_and_reject_accept_event_id_string(monkeypatch):
     init_schema()
     tid = _thread("approve")
-    eid = memory_manager.append_memory_event(
+    eid = memory_service.append_event(
         thread_id=tid,
         event_type="memory_pending",
         payload={
@@ -55,7 +55,7 @@ def test_approve_and_reject_accept_event_id_string(monkeypatch):
     async def _fake_telemetry_event(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(memory_manager, "register_thought", _fake_register_thought)
+    monkeypatch.setattr(pmr.memory_manager, "register_thought", _fake_register_thought)
     monkeypatch.setattr(pmr.telemetry, "event", _fake_telemetry_event)
 
     ok1 = pmr.approve_memory(pmr.ReviewRequest(event_id=eid, confirm="APPROVE"))

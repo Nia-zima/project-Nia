@@ -1,8 +1,11 @@
 import json
+import logging
 
 from fastapi import APIRouter
 
 from backend.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -45,8 +48,8 @@ def get_internal_state():
 @router.get("/checkpointer")
 async def get_checkpointer_stats():
     """Checkpointer DB の統計情報を返す。"""
-    from backend.services.memory_manager import memory_manager
-    return await memory_manager.get_checkpointer_stats()
+    from backend.services.checkpointer import checkpointer_service
+    return await checkpointer_service.get_checkpointer_stats()
 
 
 @router.get("/inner_monologue")
@@ -85,6 +88,5 @@ def get_inner_monologue(limit: int = 50):
         return {"entries": entries, "total": len(entries)}
 
     except Exception as e:
-        import traceback
-        print(f"Error in inner_monologue: {traceback.format_exc()}")
+        logger.warning("Error in inner_monologue", exc_info=True)
         return {"entries": [], "error": str(e)}

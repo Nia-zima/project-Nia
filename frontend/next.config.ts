@@ -21,6 +21,11 @@ const nextConfig: NextConfig = {
         source: "/static/:path*",
         destination: "http://127.0.0.1:8000/static/:path*",
       },
+      // Nero server proxy
+      {
+        source: "/nero/:path*",
+        destination: "http://127.0.0.1:8001/nero/:path*",
+      },
     ];
   },
 };

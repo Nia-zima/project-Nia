@@ -23,7 +23,10 @@ def test_high_confidence_non_conclusion_request_softens_assertion():
     out = merge_output(state)
     assert out.get("final_text") != "WAIT"
     text = out.get("final_text") or ""
-    assert "いまのところ" in text or "見立て" in text
+    # Word-level softening: 「正解は」→「いまのところは」
+    assert "いまのところは" in text
+    # No mechanical prefix/suffix injection
+    assert "見立てとしては" not in text
 
 
 def test_high_confidence_conclusion_request_allows_provisional_conclusion():
@@ -43,7 +46,8 @@ def test_high_confidence_conclusion_request_allows_provisional_conclusion():
     assert "暫定結論" in text or "現時点" in text
 
 
-def test_identity_tone_level_strict_adds_hesitation_marker():
+def test_identity_tone_level_strict_still_softens_words():
+    """strict mode still applies word-level softening (same as balanced now)."""
     prev = getattr(settings, "IDENTITY_TONE_LEVEL", "balanced")
     settings.IDENTITY_TONE_LEVEL = "strict"
     try:
@@ -59,7 +63,10 @@ def test_identity_tone_level_strict_adds_hesitation_marker():
         }
         out = merge_output(state)
         text = out.get("final_text") or ""
-        assert "いまのところ" in text or "見立て" in text
+        # Word-level softening still active
+        assert "いまのところは" in text
+        # No mechanical suffix injection
+        assert "一緒に確認" not in text
     finally:
         settings.IDENTITY_TONE_LEVEL = prev
 

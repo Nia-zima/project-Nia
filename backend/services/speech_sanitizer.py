@@ -259,7 +259,7 @@ RollingStreamCleaner = StreamSanitizer
 
 
 # 沈黙時の既定文
-SILENCE_DEFAULT = "……今は、静かにここにいます。"
+SILENCE_DEFAULT = "……"
 
 # ト書き・描写の削除パターン
 STAGE_DIRECTIONS = [
@@ -370,6 +370,24 @@ PLAN_VERB_RE = re.compile(
     re.IGNORECASE,
 )
 
+# LLM第三者メタ推論パターン（多層防御: helpers.py と同一パターン）
+# ユーザーについての推論・応答計画をプレーンテキストで出力するケースを検出。
+# 英語比率ではなく第三者視点の推論パターンのみ対象 → 正当な英語応答を保護。
+_META_REASONING_RES = [
+    re.compile(r"^The user\b", re.IGNORECASE),
+    re.compile(r"^User (wants|says|is|asks|said|needs)\b", re.IGNORECASE),
+    re.compile(r"^They (want|are asking|said|need|seem|mention|'re asking)", re.IGNORECASE),
+    re.compile(r"^The (message|input|query|request|question)\b", re.IGNORECASE),
+    re.compile(r"^Should (I|be|we)\b", re.IGNORECASE),
+    re.compile(r"^Let'?s (do|say|respond|go with|keep|use|try)\b", re.IGNORECASE),
+    re.compile(r"^I (should|need to|will|'ll) (respond|reply|say|answer|keep|give)\b", re.IGNORECASE),
+    re.compile(r"^(Provide|Keep|Give|Use|Try|Make|Write|Generate)\s+(a |it |the |simple|short|brief)", re.IGNORECASE),
+    re.compile(r"^Ok(ay)?[.\s,!]", re.IGNORECASE),
+    re.compile(r"^(So|Now|Then)\s+I('ll| will| should| need)\b", re.IGNORECASE),
+    re.compile(r"^(Response|Answer|Reply)\s*:", re.IGNORECASE),
+    re.compile(r"^(This|That) (is|seems like) (a |an )?(greeting|question|request|casual)\b", re.IGNORECASE),
+]
+
 def _ascii_ratio(s: str) -> float:
     if not s:
         return 0.0
@@ -387,6 +405,10 @@ def _looks_like_plan_line(line: str) -> bool:
     if not line:
         return False
     if INTERNAL_PLAN_LINE_RE.match(line):
+        return True
+    # 第三者メタ推論パターン検出（多層防御）
+    s = line.strip()
+    if s and any(p.match(s) for p in _META_REASONING_RES):
         return True
     if PLAN_VERB_RE.search(line):
         # If it's mostly ASCII and not Japanese, it's likely a leaked plan

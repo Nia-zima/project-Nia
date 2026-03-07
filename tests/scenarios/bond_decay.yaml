@@ -1,0 +1,77 @@
+# tests/scenarios/bond_decay.yaml
+# Pip 言及なし5ターン → Bond 未増加を確認
+
+name: "Pip言及なし → Bond維持（増加なし）"
+description: >
+  5ターンの会話で一度も Pip に言及しない場合、
+  Bond は増加しない。Pip を名前で呼ぶと Bond が増加する。
+  注: time_decay は長時間（hours）単位なのでターン間では影響しない。
+thread_id: "playbook_test"
+
+setup:
+  pip:
+    bond: 0.2
+  telemetry:
+    dissonance_streak: "0"
+
+turns:
+  # Turn 1-3: Pip 言及なし
+  - user: "今日は何してた？"
+    mock_nia_response: "ちょっと読書してた"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    pip:
+      skip: true
+    assert_after:
+      pip:
+        bond_range:
+          min: 0.19
+          max: 0.21
+
+  - user: "何の本？"
+    mock_nia_response: "SF小説。宇宙の話"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    pip:
+      skip: true
+    assert_after:
+      pip:
+        bond_range:
+          min: 0.19
+          max: 0.21
+
+  - user: "面白かった？"
+    mock_nia_response: "うん、結構良かった"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    pip:
+      skip: true
+
+  # Turn 4: Pip の名前を呼ぶ → Bond 増加
+  # Nia の返答にも "Pip" が含まれる → called_pip(+0.02) + mentioned_pip は called に含まれる
+  - user: "そういえば Pip はどうしてる？"
+    mock_nia_response: "Pip は今ここにいるよ。しっぽ振ってる"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      pip:
+        bond_range:
+          min: 0.219
+          max: 0.30
+
+  # Turn 5: Pip 言及なし → Bond そのまま
+  - user: "明日の予定は？"
+    mock_nia_response: "特に決まってないかな"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      pip:
+        bond_range:
+          min: 0.219
+          max: 0.30
+
+final_assert:
+  pip:
+    bond_range:
+      min: 0.219
+      max: 0.30

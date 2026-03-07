@@ -3,7 +3,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     has_user_text: bool
     user_text: Optional[str]
@@ -24,6 +24,7 @@ class AgentState(TypedDict):
     hold_required: Optional[bool]
     hold_kind: Optional[str]
     review_token: Optional[str]
+    review_pending_actions: Optional[list]  # Review Window 確認待ちの発話プレビュー
     suppressed_actions: Optional[list]
     # Phase 2: 確信度システム
     confidence: Optional[float]  # 複合確信度 (0.0-1.0)
@@ -33,7 +34,7 @@ class AgentState(TypedDict):
     # Phase 5: アクションシステム
     proposed_actions: Optional[list]  # LLMが提案したアクション
     approved_actions: Optional[list]  # ゲートを通過したアクション
-    pending_actions: Optional[list]  # 確認待ちのアクション
+    pending_actions: Optional[list]  # Phase5 の確認待ちアクション
     rejected_actions: Optional[list]  # 拒否されたアクション
     action_results: Optional[list]  # 実行結果
     selected_depth: Optional[int]  # 選択されたDepth (0, 1, or 2)
@@ -56,3 +57,13 @@ class AgentState(TypedDict):
     # Minecraft Game Integration
     game_context: Optional[str]  # ゲーム状態のLLMコンテキスト
     game_active: Optional[bool]  # Minecraftセッションがアクティブか
+    # N.1: Metacognitive check
+    metacog_result: Optional[Dict[str, Any]]  # MetaCogResult の dict 表現
+    # N.0: Awareness Core
+    awareness_signal: Optional[Dict[str, Any]]  # AwarenessSignal の dict 表現
+    # S.1a: Somatic Self-Awareness
+    somatic_senses: Optional[list]  # list[{"text": str, "intensity": float}]
+    # NiaCore: Shadow inference result
+    niacore_shadow: Optional[Dict[str, Any]]
+    # SkeletonCore: 会話骨格ラベル
+    conversation_skeleton: Optional[Dict[str, Any]]

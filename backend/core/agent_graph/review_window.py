@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import logging
 import uuid
 from typing import Iterable, Optional
 
 from backend.core.agent_graph.state import AgentState
-
-logger = logging.getLogger(__name__)
+from backend.core.logger import logger
 
 _REVIEW_PREFIX = "review:"
-_REVIEW_REQUEST = "review_request"
 
 # Phase2 constants
 D_LOW = 0.30
@@ -77,6 +74,12 @@ def _cap_items(items: Optional[list], limit: int) -> list:
     return base[-limit:]
 
 
+def get_review_pending_actions(state: AgentState | dict) -> list:
+    if "review_pending_actions" in state:
+        return _cap_items(state.get("review_pending_actions") or [], MAX_PENDING)
+    return _cap_items(state.get("pending_actions") or [], MAX_PENDING)
+
+
 def get_review_token(state: AgentState) -> Optional[str]:
     direct = state.get("review_token")
     if isinstance(direct, str) and direct.strip():
@@ -94,13 +97,15 @@ def set_review_token(
     state: AgentState,
     *,
     token: Optional[str] = None,
+    review_pending_actions: Optional[list] = None,
     pending_actions: Optional[list] = None,
     hold_kind: str = "speech_preview",
     reason_codes: Optional[list] = None,
     dissonance: Optional[float] = None,
 ) -> dict:
     token = token or uuid.uuid4().hex
-    pending = _cap_items(pending_actions, MAX_PENDING)
+    pending_source = review_pending_actions if review_pending_actions is not None else pending_actions
+    pending = _cap_items(pending_source, MAX_PENDING)
     merged_reasons = _merge_reason_codes(reason_codes, ["system_review_window", "action_say_held"])
     base_dissonance = float(dissonance if dissonance is not None else (state.get("dissonance") or 0.0))
     after_hold = min(base_dissonance + K_HOLD, D_MAX)
@@ -119,7 +124,7 @@ def set_review_token(
         "hold_required": True,
         "hold_kind": hold_kind,
         "review_token": token,
-        "pending_actions": pending,
+        "review_pending_actions": pending,
         "merge_mode": f"{_REVIEW_PREFIX}{token}",
         "reason_codes": merged_reasons,
         "suppressed_actions": suppressed,
@@ -136,7 +141,7 @@ def clear_review_token(*, next_merge_mode: Optional[str] = None) -> dict:
         "review_token": None,
         "hold_required": False,
         "hold_kind": None,
-        "pending_actions": [],
+        "review_pending_actions": [],
     }
 
 
@@ -150,7 +155,7 @@ def apply_review_decision(
     if not expected or expected != token:
         return {}
 
-    pending_actions = list(state.get("pending_actions") or [])
+    pending_actions = get_review_pending_actions(state)
     candidate_text = ""
     for item in pending_actions:
         if isinstance(item, dict) and item.get("kind") == "say":
@@ -205,7 +210,7 @@ def cancel_review_on_new_input(
         return {}
 
     logger.info("[EVENT] hold_cancelled token=%s", token)
-    pending_actions = list(state.get("pending_actions") or [])
+    pending_actions = get_review_pending_actions(state)
     shadowed = [
         {
             "kind": item.get("kind"),
@@ -230,17 +235,13 @@ def cancel_review_on_new_input(
     }
 
 
-def is_review_request(merge_mode: Optional[str]) -> bool:
-    return merge_mode == _REVIEW_REQUEST
-
-
 def build_hold_request_event(update: dict) -> Optional[dict]:
     token = update.get("review_token")
     if not token:
         token = get_review_token({"merge_mode": update.get("merge_mode")})
     if not token:
         return None
-    pending_actions = _cap_items(update.get("pending_actions") or [], MAX_PENDING)
+    pending_actions = get_review_pending_actions(update)
     preview_text = ""
     for item in pending_actions:
         if isinstance(item, dict) and item.get("kind") == "say":

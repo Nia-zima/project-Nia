@@ -2,12 +2,39 @@
 from __future__ import annotations
 import sqlite3
 import time
-from typing import Dict, Any
+from contextlib import contextmanager
+from typing import Dict, Any, Generator
 from backend.core.config import ensure_dirs, settings
 from backend.core.logger import logger
 
+
+@contextmanager
+def managed_conn() -> Generator[sqlite3.Connection, None, None]:
+    """get_conn() + 自動close のコンテキストマネージャー。
+
+    Usage::
+
+        with managed_conn() as conn:
+            conn.execute("SELECT ...")
+
+    注意: ``with get_conn() as conn`` は sqlite3 の __exit__ が
+    commit/rollback するだけで close() しないためリークする。
+    新規コードではこちらを使うこと。
+    """
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def get_conn() -> sqlite3.Connection:
-    """唯一のDB接続エントリポイント"""
+    """唯一のDB接続エントリポイント。
+
+    .. deprecated::
+        新規コードでは managed_conn() コンテキストマネージャを使うこと。
+        get_conn() は close() 漏れのリスクがある。
+    """
     ensure_dirs()
     # check_same_thread=False is needed for FastAPI/asyncio environment
     conn = sqlite3.connect(str(settings.DB_PATH), isolation_level=None, check_same_thread=False, timeout=10)
@@ -20,7 +47,11 @@ def get_conn() -> sqlite3.Connection:
 
 def init_schema() -> None:
     """起動時に必ず呼ばれるスキーマ初期化"""
-    conn = get_conn()
+    with managed_conn() as conn:
+        _init_schema_inner(conn)
+
+
+def _init_schema_inner(conn: sqlite3.Connection) -> None:
     try:
         # --- Auto Migration for 'messages' table ---
         # If 'messages' exists but lacks 'created_at', rename it to force re-creation.
@@ -45,36 +76,7 @@ def init_schema() -> None:
 
         # -----------------------------------------------
 
-        # 1. A-Layer Memories (Visible AI Text, Critical Logs)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS a_memory (
-            id TEXT PRIMARY KEY,
-            created_at INTEGER NOT NULL,
-            session_id TEXT,
-            turn_id TEXT,
-            visible_ai_text TEXT NOT NULL,
-            meta_json TEXT
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_a_memory_created_at ON a_memory(created_at);")
-
-        # 2. Daily Memories (Short-term buffer, replaces judge_audit.jsonl)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS daily_memories (
-            id TEXT PRIMARY KEY,
-            created_at INTEGER NOT NULL,
-            thread_id TEXT,
-            user_input TEXT,
-            summary TEXT,
-            surprise REAL,
-            importance REAL,
-            grounded INTEGER DEFAULT 0,
-            processed INTEGER DEFAULT 0 -- 0: Unprocessed, 1: Processed by Sleep Cycle
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_memories_processed ON daily_memories(processed, created_at);")
-
-        # 3. Dreams (Generated during sleep)
+        # Dreams (Generated during sleep)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS dreams (
             id TEXT PRIMARY KEY,
@@ -103,24 +105,7 @@ def init_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_turn ON messages(thread_id, turn_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)")
 
-        # Audit Log (Memory Judgments)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS memory_judgments (
-                id TEXT PRIMARY KEY,
-                created_at INTEGER NOT NULL,
-                thread_id TEXT,
-                decision TEXT NOT NULL,      -- 'reject' | 'pending' | 'save'
-                summary TEXT,
-                surprise REAL,
-                importance REAL,
-                grounded INTEGER NOT NULL,
-                reason TEXT
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_judgments_created ON memory_judgments(created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_judgments_decision ON memory_judgments(decision)")
-
-        # 5. Telemetry KV (System state, global flags)
+        # Telemetry KV (System state, global flags)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS telemetry_kv (
             k TEXT PRIMARY KEY,
@@ -200,7 +185,6 @@ def init_schema() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_epi_thread_time ON episodic_captures(thread_id, created_at DESC);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_epi_stage_time ON episodic_captures(stage, created_at DESC);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_epi_state_tag ON episodic_captures(state_tag);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_epi_thread_created_at ON episodic_captures(thread_id, created_at);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_epi_thread_stage_created_at ON episodic_captures(thread_id, stage, created_at);")
 
             # Add missing columns for legacy episodic_captures
@@ -234,7 +218,6 @@ def init_schema() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ltm_thread_time ON long_term_memories(thread_id, created_at DESC);")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_ltm_capture ON long_term_memories(capture_id);")
-            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ltm_capture_id ON long_term_memories(capture_id);")
 
         # 11. Vector Sync Queue (SQL is source of truth)
         conn.execute("""
@@ -374,6 +357,8 @@ def init_schema() -> None:
             note            TEXT,
             seed_retention  REAL NOT NULL DEFAULT 0.5,
             vector_sync_pending INTEGER NOT NULL DEFAULT 1,
+            embedding       BLOB,
+            defeaters       TEXT NOT NULL DEFAULT '[]',
             created_at      REAL NOT NULL,
             updated_at      REAL NOT NULL
         );
@@ -382,6 +367,13 @@ def init_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_status_valid ON semantic_memories(status, valid_to);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_supersedes ON semantic_memories(supersedes_id) WHERE supersedes_id IS NOT NULL;")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sm_vector_pending ON semantic_memories(vector_sync_pending) WHERE vector_sync_pending = 1;")
+
+        # --- Migration: add columns to existing DBs ---
+        _cols = {row[1] for row in conn.execute("PRAGMA table_info(semantic_memories)").fetchall()}
+        if "embedding" not in _cols:
+            conn.execute("ALTER TABLE semantic_memories ADD COLUMN embedding BLOB")
+        if "defeaters" not in _cols:
+            conn.execute("ALTER TABLE semantic_memories ADD COLUMN defeaters TEXT NOT NULL DEFAULT '[]'")
 
         # 16. Working Items (Memory Redesign v2 - Phase C)
         conn.execute("""
@@ -465,49 +457,127 @@ def init_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_status ON identity_proposals(status, created_at DESC);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_date ON identity_proposals(date);")
 
+        # 20. Somatic Log (Phase S.1b — somatic feedback outcomes)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS somatic_log (
+            id              TEXT PRIMARY KEY,
+            thread_id       TEXT NOT NULL,
+            turn_id         TEXT,
+            query           TEXT,
+            sense_text      TEXT NOT NULL,
+            intensity       REAL NOT NULL,
+            outcome         TEXT NOT NULL DEFAULT 'unknown',
+            correction_source TEXT,
+            created_at      REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sl_thread_time ON somatic_log(thread_id, created_at DESC);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sl_outcome ON somatic_log(outcome, created_at DESC);")
+
+        # 21. Retrieval Logs (Phase M — search observability)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS retrieval_logs (
+            id              TEXT PRIMARY KEY,
+            thread_id       TEXT NOT NULL,
+            turn_id         TEXT,
+            query           TEXT NOT NULL,
+            intent_flags    TEXT NOT NULL,
+            topic_keywords  TEXT,
+            candidate_count INTEGER NOT NULL,
+            results         TEXT NOT NULL,
+            result_count    INTEGER NOT NULL,
+            elapsed_ms      REAL,
+            created_at      REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rl_thread ON retrieval_logs(thread_id, created_at DESC);")
+
+        # 22. NiaCore Experience Replay Buffer (NiaCore LNN prerequisites)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS niacore_experience (
+            id                       TEXT PRIMARY KEY,
+            turn_id                  TEXT NOT NULL,
+            session_id               TEXT,
+            timestamp                REAL NOT NULL,
+            state_vector             BLOB,
+            niacore_selected         TEXT,
+            niacore_logits           TEXT,
+            rule_based_depth         TEXT NOT NULL,
+            is_deviation             BOOLEAN DEFAULT 0,
+            review_rejected          BOOLEAN DEFAULT 0,
+            review_checked           BOOLEAN DEFAULT 0,
+            user_correction          BOOLEAN DEFAULT 0,
+            correction_window_closed BOOLEAN DEFAULT 0,
+            conversation_continued   BOOLEAN DEFAULT 0,
+            surprise_v               INTEGER DEFAULT 0,
+            reward                   REAL,
+            used_in_training         BOOLEAN DEFAULT 0,
+            created_at               REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nce_turn ON niacore_experience(turn_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nce_training ON niacore_experience(used_in_training, created_at);")
+
+        # 23. Conversation Skeletons (SkeletonCore)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_skeletons (
+            id TEXT PRIMARY KEY,
+            turn_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            focus TEXT NOT NULL,
+            response_intent TEXT NOT NULL,
+            question_intent TEXT,
+            source TEXT,
+            confidence REAL,
+            rule_trace TEXT,
+            created_at REAL NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cs_session ON conversation_skeletons(session_id, created_at DESC);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cs_turn ON conversation_skeletons(turn_id);")
+
         logger.info(f"[DB] Schema initialized at {settings.DB_PATH}")
     except Exception as e:
         logger.exception(f"[DB] Schema initialization failed: {e}")
         raise
-    finally:
-        conn.close()
 
 def health_check() -> Dict[str, Any]:
     """DBの状態を見える化する"""
-    conn = get_conn()
     try:
-        integrity = conn.execute("PRAGMA integrity_check;").fetchone()[0]
-        
-        # Get list of existing tables
-        tables = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
-        ).fetchall()]
-        
-        counts = {}
-        target_tables = ["a_memory", "daily_memories", "dreams", "telemetry_kv"]
-        last_updates = {}
-        for t in target_tables:
-            if t in tables:
-                try:
-                    counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t};").fetchone()[0]
-                    # Get last updated timestamp if created_at column exists
+        with managed_conn() as conn:
+            integrity = conn.execute("PRAGMA integrity_check;").fetchone()[0]
+
+            # Get list of existing tables
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+            ).fetchall()]
+
+            counts = {}
+            target_tables = ["dreams", "telemetry_kv"]
+            last_updates = {}
+            for t in target_tables:
+                if t in tables:
                     try:
-                        last_ts = conn.execute(f"SELECT MAX(created_at) FROM {t};").fetchone()[0]
-                        last_updates[t] = last_ts if last_ts else None
+                        counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t};").fetchone()[0]
+                        # Get last updated timestamp
+                        try:
+                            ts_col = "updated_at" if t == "telemetry_kv" else "created_at"
+                            last_ts = conn.execute(f"SELECT MAX({ts_col}) FROM {t};").fetchone()[0]
+                            last_updates[t] = last_ts if last_ts else None
+                        except Exception:
+                            logger.debug("[DB] health_check: MAX(%s) failed for %s", ts_col, t, exc_info=True)
                     except Exception:
-                        pass
-                except Exception:
-                    counts[t] = "error"
-        
-        return {
-            "status": "ok" if integrity == "ok" else "error",
-            "db_path": str(settings.DB_PATH),
-            "integrity_check": integrity,
-            "tables": tables,
-            "counts": counts,
-            "last_updates": last_updates,
-            "ts": int(time.time()),
-        }
+                        counts[t] = "error"
+
+            return {
+                "status": "ok" if integrity == "ok" else "error",
+                "db_path": str(settings.DB_PATH),
+                "integrity_check": integrity,
+                "tables": tables,
+                "counts": counts,
+                "last_updates": last_updates,
+                "ts": int(time.time()),
+            }
     except Exception as e:
         logger.error(f"[DB] Health check failed: {e}")
         return {
@@ -515,5 +585,3 @@ def health_check() -> Dict[str, Any]:
             "error": str(e),
             "db_path": str(settings.DB_PATH)
         }
-    finally:
-        conn.close()

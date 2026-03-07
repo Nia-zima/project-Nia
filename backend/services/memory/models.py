@@ -51,6 +51,8 @@ class SemanticMemory:
     note: Optional[str] = None
     seed_retention: float = 0.5
     vector_sync_pending: int = 1
+    embedding: Optional[bytes] = None
+    defeaters: str = "[]"
 
 
 @dataclass

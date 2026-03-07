@@ -38,7 +38,10 @@ class SkillExecutor:
                     f"{self._bot_url}/execute_skill",
                     json={"name": name, "args": args or {}},
                 )
-                result = r.json()
+                if not r.is_success:
+                    result = {"success": False, "error": f"HTTP {r.status_code}"}
+                else:
+                    result = r.json()
         except httpx.TimeoutException:
             result = {"success": False, "error": "Execution timed out"}
         except Exception as e:
@@ -65,7 +68,10 @@ class SkillExecutor:
                     f"{self._bot_url}/execute_code",
                     json={"code": code, "timeout": settings.MINECRAFT_CODE_TIMEOUT},
                 )
-                result = r.json()
+                if not r.is_success:
+                    result = {"success": False, "error": f"HTTP {r.status_code}", "logs": []}
+                else:
+                    result = r.json()
         except httpx.TimeoutException:
             result = {"success": False, "error": "Execution timed out", "logs": []}
         except Exception as e:

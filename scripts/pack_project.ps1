@@ -1,7 +1,7 @@
 
-$destination = "AI_Buddy_Source_Backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
-$sourceDir = "c:\Users\jk023\Desktop\AI_Buddy"
-$tempDir = Join-Path $env:TEMP "AI_Buddy_Pack"
+$destination = "project_nia_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
+$sourceDir = "c:\Users\jk023\Desktop\project-nia"
+$tempDir = Join-Path $env:TEMP "project_nia_pack"
 
 if (Test-Path $tempDir) { Remove-Item -Recurse -Force $tempDir }
 New-Item -ItemType Directory -Path $tempDir
@@ -14,7 +14,7 @@ $excludeList = @(
     ".pytest_cache",
     ".git",
     "backups",
-    "AI_Buddy_Backup_Refactored.zip",
+    "project_nia_backup_*.zip",
     "chat_history.db" # データベースは大きいので除外（必要なら別途バックアップ）
 )
 

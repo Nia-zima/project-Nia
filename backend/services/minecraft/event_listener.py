@@ -48,6 +48,13 @@ class MinecraftEventListener:
         """Register frontend event callback."""
         self._frontend_callbacks.append(callback)
 
+    def remove_callback(self, callback) -> None:
+        """Unregister frontend event callback."""
+        try:
+            self._frontend_callbacks.remove(callback)
+        except ValueError:
+            pass
+
     async def _listen_loop(self) -> None:
         """Reconnecting WebSocket listener loop."""
         backoff = 1.0
@@ -62,11 +69,11 @@ class MinecraftEventListener:
                                 try:
                                     event = json.loads(msg.data)
                                     self.state_manager.record_event(event)
-                                    for cb in self._frontend_callbacks:
+                                    for cb in list(self._frontend_callbacks):
                                         try:
                                             cb(event)
                                         except Exception:
-                                            pass
+                                            logger.debug("[MC_EVENTS] Callback error", exc_info=True)
                                 except json.JSONDecodeError:
                                     pass
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):

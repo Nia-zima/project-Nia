@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Optional, List
 
 from backend.core.logger import logger
-from backend.core.db import get_conn  # Centralized DB Access
+from backend.core.db import get_conn, managed_conn  # Centralized DB Access
 
 
 @dataclass
@@ -47,7 +47,7 @@ class DreamStore:
 
         # デデュプ: 直近 SAVE_COOLDOWN_SEC 秒以内に保存済みならスキップ
         try:
-            with get_conn() as conn:
+            with managed_conn() as conn:
                 recent = conn.execute(
                     "SELECT COUNT(*) as cnt FROM dreams WHERE created_at > ?",
                     (now - self.SAVE_COOLDOWN_SEC,),
@@ -60,7 +60,7 @@ class DreamStore:
 
         dream_id = str(uuid.uuid4())
         try:
-            with get_conn() as conn:
+            with managed_conn() as conn:
                 conn.execute(
                     "INSERT INTO dreams (id, created_at, mood, dream_text, presented) VALUES (?, ?, ?, ?, 0)",
                     (dream_id, now, mood, dream_text[:900]),  # 上限900文字
@@ -84,7 +84,7 @@ class DreamStore:
 
         # 配信クールダウン: 直近に夢を配信済みならスキップ
         try:
-            with get_conn() as check_conn:
+            with managed_conn() as check_conn:
                 last = check_conn.execute(
                     "SELECT MAX(presented_at) as last_at FROM dreams WHERE presented=1"
                 ).fetchone()
@@ -136,7 +136,7 @@ class DreamStore:
     def list_recent_dreams(self, limit: int = 10) -> List[Dream]:
         """最近の夢を取得（将来の「見返す」機能用）"""
         try:
-            with get_conn() as conn:
+            with managed_conn() as conn:
                 rows = conn.execute(
                     "SELECT id, created_at, mood, dream_text FROM dreams ORDER BY created_at DESC LIMIT ?",
                     (limit,)

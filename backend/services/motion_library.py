@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Optional
 
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,7 @@ class MotionLibrary:
     ) -> dict:
         """Save or update a motion preset."""
         now = time.time()
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             existing = conn.execute(
                 "SELECT id FROM motion_presets WHERE name = ?", (name,)
             ).fetchone()
@@ -185,13 +184,10 @@ class MotionLibrary:
 
             logger.info("[MotionLibrary] Saved preset: %s", name)
             return {"id": preset_id, "name": name}
-        finally:
-            conn.close()
 
     def get(self, name: str) -> Optional[dict]:
         """Get a preset by name."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             row = conn.execute(
                 "SELECT * FROM motion_presets WHERE name = ?", (name,)
             ).fetchone()
@@ -200,13 +196,10 @@ class MotionLibrary:
             d = dict(row)
             d["tags"] = json.loads(d["tags"]) if d["tags"] else []
             return d
-        finally:
-            conn.close()
 
     def list_all(self) -> list[dict]:
         """List all presets."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             rows = conn.execute(
                 """SELECT id, name, description, tags, context_hint, use_count,
                           success_count, failure_count, source, created_at, updated_at
@@ -219,29 +212,26 @@ class MotionLibrary:
                 d["total_uses"] = d["use_count"]
                 result.append(d)
             return result
-        finally:
-            conn.close()
 
     def record_use(self, name: str, success: bool = True) -> None:
         """Increment use counter and optionally success/failure."""
-        conn = get_conn()
-        try:
-            col = "success_count" if success else "failure_count"
-            conn.execute(
-                f"UPDATE motion_presets SET use_count = use_count + 1, {col} = {col} + 1, updated_at = ? WHERE name = ?",
-                (time.time(), name),
-            )
-        finally:
-            conn.close()
+        with managed_conn() as conn:
+            if success:
+                conn.execute(
+                    "UPDATE motion_presets SET use_count = use_count + 1, success_count = success_count + 1, updated_at = ? WHERE name = ?",
+                    (time.time(), name),
+                )
+            else:
+                conn.execute(
+                    "UPDATE motion_presets SET use_count = use_count + 1, failure_count = failure_count + 1, updated_at = ? WHERE name = ?",
+                    (time.time(), name),
+                )
 
     def delete(self, name: str) -> bool:
         """Delete a preset by name."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             cur = conn.execute("DELETE FROM motion_presets WHERE name = ?", (name,))
             return cur.rowcount > 0
-        finally:
-            conn.close()
 
     def get_for_context(self, emotion: str = "", text_hint: str = "") -> list[dict]:
         """Get presets matching a context (tag-based)."""

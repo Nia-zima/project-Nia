@@ -66,6 +66,7 @@ async def extract_frames(
         except asyncio.TimeoutError:
             logger.error("[VideoAnalyzer] ffmpeg timed out")
             proc.kill()
+            await proc.wait()
             return []
         except FileNotFoundError:
             logger.error("[VideoAnalyzer] ffmpeg not found in PATH")

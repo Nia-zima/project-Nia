@@ -43,7 +43,9 @@ def test_cancel_on_new_user_input():
     assert get_review_token(merged) is None
 
 
-def test_hold_opens_review_token_and_wait():
+def test_hold_opens_review_token_and_wait(monkeypatch):
+    from backend.core import config as _cfg
+    monkeypatch.setattr(_cfg.settings, "HOLD_POLICY", "strict")
     state = {
         "safety_route": "safe",
         "draft": "hello",
@@ -122,7 +124,9 @@ def test_wait_passthrough_reason():
     assert "system_wait_passthrough" in (out.get("reason_codes") or [])
 
 
-def test_long_text_triggers_hold():
+def test_long_text_triggers_hold(monkeypatch):
+    from backend.core import config as _cfg
+    monkeypatch.setattr(_cfg.settings, "HOLD_POLICY", "strict")
     state = {
         "safety_route": "safe",
         "draft": "短い返答",
@@ -138,7 +142,9 @@ def test_long_text_triggers_hold():
     assert "risk_long_text" in (out.get("reason_codes") or [])
 
 
-def test_keyword_triggers_hold():
+def test_keyword_triggers_hold(monkeypatch):
+    from backend.core import config as _cfg
+    monkeypatch.setattr(_cfg.settings, "HOLD_POLICY", "strict")
     state = {
         "safety_route": "safe",
         "draft": "わかったよ",
@@ -189,7 +195,7 @@ def test_review_token_mismatch_logs_reason():
 
     with mock.patch.object(review_router, "telemetry", _TelemetryStub()):
         with mock.patch.object(review_router.workflow, "compile", lambda checkpointer: dummy_app):
-            with mock.patch.object(review_router.memory_manager, "get_async_checkpointer_conn", lambda: _DummyCtx()):
+            with mock.patch.object(review_router.checkpointer_service, "get_async_checkpointer_conn", lambda: _DummyCtx()):
                 import asyncio
                 res = asyncio.run(review_router._apply_review("t1", "wrong_token", "approve"))
                 assert res.get("reason") == "token_mismatch"

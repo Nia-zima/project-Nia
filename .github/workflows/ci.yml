@@ -119,20 +119,43 @@ jobs:
           poetry config virtualenvs.create false
           poetry install --no-interaction --no-ansi
 
-      - name: Run Backend Smoke Tests
+      - name: Run Backend Tests
         run: |
-          pytest -q \
-            tests/test_external_data.py \
-            tests/test_depth_selector.py \
-            tests/test_phase2_review_window.py \
-            tests/test_context_builder.py \
-            tests/test_guardrail.py \
-            tests/test_s5_commit.py \
-            tests/test_semantic_store.py \
-            tests/test_working_store.py \
-            tests/test_action_gate.py \
-            tests/test_confidence.py \
-            tests/test_contracts.py
+          pytest -q tests/ backend/tests/ \
+            -m "not agent and not server and not e2e" \
+            --tb=short --timeout=120
+
+      - name: Record Duration
+        id: timing_end
+        if: ${{ always() }}
+        run: |
+          end=$(date +%s)
+          start=${{ steps.timing_start.outputs.start }}
+          echo "seconds=$((end-start))" >> "$GITHUB_OUTPUT"
+
+  backend-lint:
+    name: Backend Lint (ruff)
+    runs-on: ubuntu-latest
+    outputs:
+      duration_seconds: ${{ steps.timing_end.outputs.seconds }}
+    steps:
+      - name: Record Start Time
+        id: timing_start
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: ruff check backend/ tests/ --output-format=github
 
       - name: Record Duration
         id: timing_end
@@ -155,6 +178,7 @@ jobs:
       - frontend-build
       - frontend-priority-lint
       - backend-smoke-tests
+      - backend-lint
     steps:
       - name: Comment PR with Timing
         uses: actions/github-script@v7
@@ -182,6 +206,11 @@ jobs:
                 name: "Backend Smoke Tests",
                 result: "${{ needs.backend-smoke-tests.result }}",
                 sec: "${{ needs.backend-smoke-tests.outputs.duration_seconds }}",
+              },
+              {
+                name: "Backend Lint (ruff)",
+                result: "${{ needs.backend-lint.result }}",
+                sec: "${{ needs.backend-lint.outputs.duration_seconds }}",
               },
             ];
             const totalSec = rows.reduce((acc, r) => acc + Number(r.sec || 0), 0);

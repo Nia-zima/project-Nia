@@ -13,11 +13,13 @@ import uuid
 import re
 from typing import Any, Dict, Optional, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.core.config import settings
 from backend.core.logger import logger
+from backend.core.rate_limit import limiter
 from backend.services.livestream_queue import (
     get_livestream_queue,
     Comment,
@@ -108,7 +110,8 @@ def _sse_json(obj: dict) -> str:
 # ---------- Endpoints ----------
 
 @router.post("/livestream/comment", response_model=CommentResponse)
-async def submit_comment(req: CommentRequest) -> CommentResponse:
+@limiter.limit(lambda: settings.RATE_LIMIT_LIVESTREAM)
+async def submit_comment(req: CommentRequest, request: Request) -> CommentResponse:
     """
     コメントを投稿
     
@@ -211,9 +214,9 @@ async def get_diagnostics(thread_id: str = "live_stream") -> DiagnosticsResponse
 
     try:
         from backend.core.agent_graph.graph import workflow
-        from backend.services.memory_manager import memory_manager
+        from backend.services.checkpointer import checkpointer_service
 
-        async with memory_manager.get_async_checkpointer_conn() as checkpointer:
+        async with checkpointer_service.get_async_checkpointer_conn() as checkpointer:
             app_instance = workflow.compile(checkpointer=checkpointer)
             config = {"configurable": {"thread_id": thread_id}}
             state = await app_instance.aget_state(config)
@@ -337,33 +340,38 @@ async def stream_next_comment(thread_id: str = "live_stream"):
     agent_input = _format_livestream_input(comment)
 
     async def _response_stream():
-        from backend.services.agent_orchestrator import get_default_orchestrator
-        orchestrator = get_default_orchestrator()
+        try:
+            from backend.services.agent_orchestrator import get_default_orchestrator
+            orchestrator = get_default_orchestrator()
 
-        # コメント情報を先に送信
-        yield _sse_json({
-            "type": "comment_selected",
-            "comment": {
-                "id": comment.id,
-                "text": comment.text,
-                "user_name": comment.user_name,
-                "role": comment.role.value,
-                "addressed_to_nia": comment.addressed_to_nia,
-            },
-            "queue_remaining": stats.pending,
-        })
+            # コメント情報を先に送信
+            yield _sse_json({
+                "type": "comment_selected",
+                "comment": {
+                    "id": comment.id,
+                    "text": comment.text,
+                    "user_name": comment.user_name,
+                    "role": comment.role.value,
+                    "addressed_to_nia": comment.addressed_to_nia,
+                },
+                "queue_remaining": stats.pending,
+            })
 
-        # エージェント応答をストリーム（text, emotion, audio, done）
-        async for sse_chunk in orchestrator.stream_sse(
-            input_text=agent_input,
-            thread_id=thread_id,
-            voice_id="14",
-            image_data=None,
-            mode="normal",
-            stream_id=None,
-            message_id=None,
-        ):
-            yield sse_chunk
+            # エージェント応答をストリーム（text, emotion, audio, done）
+            async for sse_chunk in orchestrator.stream_sse(
+                input_text=agent_input,
+                thread_id=thread_id,
+                voice_id="14",
+                image_data=None,
+                mode="normal",
+                stream_id=None,
+                message_id=None,
+            ):
+                yield sse_chunk
+        except Exception as e:
+            logger.exception("[LIVESTREAM] stream error")
+            yield _sse_json({"type": "error", "content": str(e)})
+            yield _sse_json({"type": "done"})
 
     return StreamingResponse(
         _response_stream(),
@@ -376,9 +384,54 @@ async def stream_next_comment(thread_id: str = "live_stream"):
 async def clear_queue() -> Dict[str, Any]:
     """
     キューをクリア（配信終了時）
-    
+
     POST /api/livestream/clear
     """
     queue = get_livestream_queue()
     await queue.clear()
-    return {"ok": True, "message": "Queue cleared"}
+
+    # Also stop chat bridges
+    try:
+        from backend.services.chat_bridge import chat_bridge
+        await chat_bridge.stop_all()
+    except Exception:
+        pass
+
+    return {"ok": True, "message": "Queue cleared, bridges stopped"}
+
+
+# ---------- Chat Bridge Endpoints ----------
+
+
+class BridgeStartRequest(BaseModel):
+    """ブリッジ開始リクエスト"""
+    video_id: str = ""
+    channel: str = ""
+
+
+@router.post("/livestream/bridge/youtube/start")
+async def start_youtube_bridge(req: BridgeStartRequest) -> Dict[str, Any]:
+    """YouTube Live Chat ブリッジ開始"""
+    from backend.services.chat_bridge import chat_bridge
+    return await chat_bridge.start_youtube(video_id=req.video_id or None)
+
+
+@router.post("/livestream/bridge/twitch/start")
+async def start_twitch_bridge(req: BridgeStartRequest) -> Dict[str, Any]:
+    """Twitch Chat ブリッジ開始"""
+    from backend.services.chat_bridge import chat_bridge
+    return await chat_bridge.start_twitch(channel=req.channel or None)
+
+
+@router.post("/livestream/bridge/stop")
+async def stop_bridge() -> Dict[str, Any]:
+    """全ブリッジ停止"""
+    from backend.services.chat_bridge import chat_bridge
+    return await chat_bridge.stop_all()
+
+
+@router.get("/livestream/bridge/status")
+async def bridge_status() -> Dict[str, Any]:
+    """ブリッジ接続状態 + 統計"""
+    from backend.services.chat_bridge import chat_bridge
+    return chat_bridge.get_status()

@@ -67,7 +67,7 @@ export default function GamePanel() {
           if (mounted) {
             setEvents((prev) => [...prev.slice(-49), event]);
           }
-        } catch { /* ignore */ }
+        } catch (e) { console.warn("[GAME_WS] Failed to parse message:", e); }
       };
 
       ws.onclose = () => {

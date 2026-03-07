@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from backend.core.logger import logger
 from backend.core.config import settings
+from backend.core.rate_limit import limiter
 from backend.services.llm_client import call_llm
 
 router = APIRouter()
@@ -78,20 +79,26 @@ async def _safe_stream_generator(
 ):
     """
     SSE整形は Orchestrator に委譲する。
+    致命的エラー時もクライアントにエラーイベントを送信してストリームを正常終了する。
     """
-    from backend.services.agent_orchestrator import get_default_orchestrator
-    orchestrator = get_default_orchestrator()
+    try:
+        from backend.services.agent_orchestrator import get_default_orchestrator
+        orchestrator = get_default_orchestrator()
 
-    async for sse in orchestrator.stream_sse(
-        input_text=input_text,
-        thread_id=thread_id,
-        voice_id=voice_id,
-        image_data=image_data,
-        mode=mode,
-        stream_id=stream_id,
-        message_id=message_id,
-    ):
-        yield sse
+        async for sse in orchestrator.stream_sse(
+            input_text=input_text,
+            thread_id=thread_id,
+            voice_id=voice_id,
+            image_data=image_data,
+            mode=mode,
+            stream_id=stream_id,
+            message_id=message_id,
+        ):
+            yield sse
+    except Exception as e:
+        logger.exception("[STREAM] Fatal error in stream generator")
+        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
 async def _collect_text_from_agent_stream(input_text: str, thread_id: str) -> str:
@@ -107,6 +114,7 @@ async def _collect_text_from_agent_stream(input_text: str, thread_id: str) -> st
 # ---------- Endpoints ----------
 
 @router.post("/stream_chat")
+@limiter.limit(lambda: settings.RATE_LIMIT_CHAT)
 async def stream_chat(req: StreamChatRequest, request: Request):
     # SSE Streaming (Phase 3: Plan B - Canonical)
     # ストリーミングを復活させ、_safe_stream_generator で安全に中継・整形する。

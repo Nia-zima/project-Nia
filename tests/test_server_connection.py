@@ -11,7 +11,7 @@ if not os.getenv("RUN_SERVER_TESTS"):
     "name,url",
     [
         ("LM Studio (LLM)", "http://localhost:1234/v1/models"),
-        ("AI Buddy Backend", "http://localhost:8000/health"),
+        ("Nia Backend", "http://localhost:8000/health"),
     ],
 )
 def test_connection(name, url):

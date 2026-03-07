@@ -1,7 +1,7 @@
 "use client";
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { apiClient } from '@/lib/apiClient';
-import { Clock, Database, Brain } from 'lucide-react';
+import { Clock, Database, Brain, Search, ArrowUpDown } from 'lucide-react';
 
 interface MemoryDetails {
     raw_text?: string;
@@ -50,60 +50,56 @@ interface PendingMemory {
     reason?: string;
 }
 
+type SortKey = 'date_desc' | 'date_asc' | 'confidence_desc';
+
 export default function MemoryExplorer() {
     const [activeTab, setActiveTab] = useState<'approved' | 'pending' | 'long_term'>('pending');
+    const [searchQuery, setSearchQuery] = useState('');
+    const [debouncedQuery, setDebouncedQuery] = useState('');
+    const [statusFilter, setStatusFilter] = useState<string>('all');
+    const [tagFilter, setTagFilter] = useState<string>('all');
+    const [sortKey, setSortKey] = useState<SortKey>('date_desc');
+
+    // Debounce search
+    useEffect(() => {
+        const timer = setTimeout(() => setDebouncedQuery(searchQuery), 300);
+        return () => clearTimeout(timer);
+    }, [searchQuery]);
+
     const statusLabel = (status?: string) => {
         switch ((status || "").toUpperCase()) {
-            case "PENDING":
-                return "承認待ち";
-            case "APPROVED":
-                return "承認済み";
-            case "APPLIED":
-                return "保存済み";
-            case "REJECTED":
-                return "却下";
-            case "ERROR":
-                return "失敗";
-            default:
-                return status || "不明";
+            case "PENDING": return "承認待ち";
+            case "APPROVED": return "承認済み";
+            case "APPLIED": return "保存済み";
+            case "REJECTED": return "却下";
+            case "ERROR": return "失敗";
+            default: return status || "不明";
         }
     };
 
     const stageLabel = (stage?: string) => {
         switch ((stage || "").toLowerCase()) {
-            case "episode":
-                return "エピソード";
-            case "thought":
-                return "思考";
-            case "state":
-                return "状態";
-            case "capture":
-                return "記憶（確定）";
-            case "background":
-                return "記憶（保留）";
-            default:
-                return stage || "不明";
+            case "episode": return "エピソード";
+            case "thought": return "思考";
+            case "state": return "状態";
+            case "capture": return "記憶（確定）";
+            case "background": return "記憶（保留）";
+            default: return stage || "不明";
         }
     };
 
     const semanticStatusLabel = (status?: string) => {
         switch ((status || "").toLowerCase()) {
-            case "confirmed":
-                return "確定";
-            case "inferred":
-                return "推定";
-            case "revoked":
-                return "取消";
-            default:
-                return status || "不明";
+            case "confirmed": return "確定";
+            case "inferred": return "推定";
+            case "revoked": return "取消";
+            default: return status || "不明";
         }
     };
 
-    // Approved State
+    // Data state
     const [memories, setMemories] = useState<Memory[]>([]);
     const [semanticMemories, setSemanticMemories] = useState<SemanticMemory[]>([]);
-
-    // Pending State
     const [pendingItems, setPendingItems] = useState<PendingMemory[]>([]);
     const [loading, setLoading] = useState(false);
 
@@ -158,7 +154,6 @@ export default function MemoryExplorer() {
     const fetchData = async () => {
         setLoading(true);
 
-        // Fetch Approved (episodic captures)
         if (activeTab === 'approved') {
             try {
                 const items = await apiClient.fetchCaptures();
@@ -177,7 +172,6 @@ export default function MemoryExplorer() {
             }
         }
 
-        // Fetch Pending (Phase3 pending_actions)
         if (activeTab === 'pending') {
             try {
                 const payload = await apiClient.fetchPendingActions("default_thread");
@@ -223,6 +217,54 @@ export default function MemoryExplorer() {
         fetchData();
     }, [activeTab]);
 
+    // --- Filtering & Sorting ---
+
+    const matchesSearch = (text: string) => {
+        if (!debouncedQuery) return true;
+        return text.toLowerCase().includes(debouncedQuery.toLowerCase());
+    };
+
+    const filteredPending = useMemo(() => {
+        return pendingItems.filter(item =>
+            matchesSearch(item.summary + ' ' + (item.details?.raw_text || ''))
+        );
+    }, [pendingItems, debouncedQuery]);
+
+    const filteredMemories = useMemo(() => {
+        let items = memories.filter(m =>
+            matchesSearch(m.summary + ' ' + (m.details?.raw_text || ''))
+        );
+        if (sortKey === 'date_asc') {
+            items = [...items].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+        }
+        // date_desc is default order from API
+        return items;
+    }, [memories, debouncedQuery, sortKey]);
+
+    const filteredSemantic = useMemo(() => {
+        let items = semanticMemories.filter(m => {
+            if (!matchesSearch(m.summary + ' ' + m.details)) return false;
+            if (statusFilter !== 'all' && m.metadata?.status !== statusFilter) return false;
+            if (tagFilter !== 'all' && m.metadata?.state_tag !== tagFilter) return false;
+            return true;
+        });
+        if (sortKey === 'confidence_desc') {
+            items = [...items].sort((a, b) => (b.metadata?.confidence || 0) - (a.metadata?.confidence || 0));
+        } else if (sortKey === 'date_asc') {
+            items = [...items].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        }
+        // date_desc is default
+        return items;
+    }, [semanticMemories, debouncedQuery, statusFilter, tagFilter, sortKey]);
+
+    const currentTotal = activeTab === 'pending' ? pendingItems.length
+        : activeTab === 'approved' ? memories.length
+        : semanticMemories.length;
+
+    const currentFiltered = activeTab === 'pending' ? filteredPending.length
+        : activeTab === 'approved' ? filteredMemories.length
+        : filteredSemantic.length;
+
     if (loading && memories.length === 0 && pendingItems.length === 0 && semanticMemories.length === 0) {
         return <div className="p-8 text-gray-400 animate-pulse font-mono">データ取得中...</div>;
     }
@@ -257,6 +299,7 @@ export default function MemoryExplorer() {
                     </div>
                 </div>
 
+                {/* Tab Switcher */}
                 <div className="flex w-full max-w-lg rounded-2xl border border-white/10 bg-black/40 p-1">
                     <button
                         onClick={() => setActiveTab('pending')}
@@ -300,17 +343,112 @@ export default function MemoryExplorer() {
                         </div>
                     </button>
                 </div>
+
+                {/* Search & Filters */}
+                <div className="flex flex-col gap-3">
+                    {/* Search Bar */}
+                    <div className="relative max-w-lg">
+                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                        <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={e => setSearchQuery(e.target.value)}
+                            placeholder="記憶を検索..."
+                            className="w-full rounded-xl bg-black/40 border border-white/10 pl-10 pr-4 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-blue-400/40 focus:outline-none transition-colors"
+                        />
+                        {debouncedQuery && currentFiltered !== currentTotal && (
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-500">
+                                {currentTotal}件中 {currentFiltered}件
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Filters for Semantic tab */}
+                    {activeTab === 'long_term' && (
+                        <div className="flex flex-wrap items-center gap-2">
+                            {/* Status Filter */}
+                            <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-slate-500 uppercase tracking-wider mr-1">Status:</span>
+                                {(['all', 'confirmed', 'inferred'] as const).map(s => (
+                                    <button
+                                        key={s}
+                                        onClick={() => setStatusFilter(s)}
+                                        className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all ${
+                                            statusFilter === s
+                                                ? 'bg-sky-500/20 text-sky-200 border-sky-400/30'
+                                                : 'bg-white/5 text-slate-400 border-white/10 hover:text-slate-200'
+                                        }`}
+                                    >
+                                        {s === 'all' ? '全て' : semanticStatusLabel(s)}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* State Tag Filter */}
+                            <div className="flex items-center gap-1 ml-2">
+                                <span className="text-[10px] text-slate-500 uppercase tracking-wider mr-1">Tag:</span>
+                                {(['all', 'origin', 'nero', 'nia', 'shared', 'insight'] as const).map(t => {
+                                    const labelMap: Record<string, string> = {
+                                        all: '全て', origin: 'Origin', nero: 'Nero', nia: 'Nia', shared: '共有', insight: 'Insight',
+                                    };
+                                    return (
+                                        <button
+                                            key={t}
+                                            onClick={() => setTagFilter(t)}
+                                            className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all ${
+                                                tagFilter === t
+                                                    ? 'bg-violet-500/20 text-violet-200 border-violet-400/30'
+                                                    : 'bg-white/5 text-slate-400 border-white/10 hover:text-slate-200'
+                                            }`}
+                                        >
+                                            {labelMap[t]}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            {/* Sort */}
+                            <div className="flex items-center gap-1 ml-auto">
+                                <ArrowUpDown size={12} className="text-slate-500" />
+                                <select
+                                    value={sortKey}
+                                    onChange={e => setSortKey(e.target.value as SortKey)}
+                                    className="text-[11px] bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-slate-300 focus:outline-none"
+                                >
+                                    <option value="date_desc">新しい順</option>
+                                    <option value="date_asc">古い順</option>
+                                    <option value="confidence_desc">確信度順</option>
+                                </select>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Sort for Episodic tab */}
+                    {activeTab === 'approved' && (
+                        <div className="flex items-center gap-1">
+                            <ArrowUpDown size={12} className="text-slate-500" />
+                            <select
+                                value={sortKey}
+                                onChange={e => setSortKey(e.target.value as SortKey)}
+                                className="text-[11px] bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-slate-300 focus:outline-none"
+                            >
+                                <option value="date_desc">新しい順</option>
+                                <option value="date_asc">古い順</option>
+                            </select>
+                        </div>
+                    )}
+                </div>
             </div>
 
             {/* Content: Pending List */}
             {activeTab === 'pending' && (
                 <div className="grid gap-4">
-                    {pendingItems.length === 0 && (
+                    {filteredPending.length === 0 && (
                         <div className="text-slate-400 italic p-6 text-center border border-white/10 rounded-2xl bg-white/5">
-                            承認待ちの記憶はありません。
+                            {debouncedQuery ? '検索結果がありません。' : '承認待ちの記憶はありません。'}
                         </div>
                     )}
-                    {pendingItems.map((item, index) => (
+                    {filteredPending.map((item, index) => (
                         <div
                             key={item.id}
                             className="group relative overflow-hidden rounded-2xl border border-white/10 bg-[rgba(15,18,24,0.92)] p-5 transition-all duration-300 hover:border-amber-400/40 animate-rise"
@@ -320,7 +458,7 @@ export default function MemoryExplorer() {
 
                             <div className="flex justify-between items-start mb-2">
                                 <span className="text-xs text-cyan-200/80 font-mono">{item.timestamp ? new Date(item.timestamp).toLocaleString() : "--"}</span>
-                                <div className="flex gap-2">
+                                <div className="flex gap-2 flex-wrap justify-end">
                                     <span className="text-xs font-mono bg-white/10 px-2 py-1 rounded text-slate-300">
                                         Retention: {Math.round((item.details?.retention ?? 0) * 100)}%
                                     </span>
@@ -329,14 +467,14 @@ export default function MemoryExplorer() {
                                             {item.details.state_tag}
                                         </span>
                                     )}
-                                <span className="text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] bg-amber-500/20 text-amber-200 border border-amber-400/30">
-                                    {statusLabel(item.status)}
-                                </span>
-                                {item.reason && (
-                                    <span className="text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] bg-rose-500/20 text-rose-200 border border-rose-400/30">
-                                        理由: {item.reason}
+                                    <span className="text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] bg-amber-500/20 text-amber-200 border border-amber-400/30">
+                                        {statusLabel(item.status)}
                                     </span>
-                                )}
+                                    {item.reason && (
+                                        <span className="text-[10px] px-2 py-1 rounded-md font-medium tracking-[0.2em] bg-rose-500/20 text-rose-200 border border-rose-400/30">
+                                            理由: {item.reason}
+                                        </span>
+                                    )}
                                     <button
                                         onClick={() => approvePending(item.id)}
                                         className="text-[10px] px-2 py-1 rounded-md font-medium uppercase tracking-[0.2em] bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/30 transition"
@@ -354,7 +492,6 @@ export default function MemoryExplorer() {
 
                             <h3 className="font-semibold text-lg text-slate-100 mb-3">{item.summary}</h3>
 
-                            {/* Metadata Toggle */}
                             <div className="mt-4 pt-4 border-t border-white/5">
                                 <details className="group">
                                     <summary className="text-xs text-slate-500 cursor-pointer list-none flex items-center gap-2 hover:text-slate-300">
@@ -373,10 +510,12 @@ export default function MemoryExplorer() {
             {/* Content: Approved List */}
             {activeTab === 'approved' && (
                 <div className="grid gap-4">
-                    {memories.length === 0 && (
-                        <div className="text-slate-400 italic">まだ記憶が記録されていません。</div>
+                    {filteredMemories.length === 0 && (
+                        <div className="text-slate-400 italic">
+                            {debouncedQuery ? '検索結果がありません。' : 'まだ記憶が記録されていません。'}
+                        </div>
                     )}
-                    {memories.map((m, index) => (
+                    {filteredMemories.map((m, index) => (
                         <div
                             key={m.id}
                             className="relative overflow-hidden rounded-2xl border border-white/10 bg-[rgba(16,20,26,0.92)] p-5 transition-all duration-300 hover:border-emerald-400/30 animate-rise"
@@ -428,12 +567,17 @@ export default function MemoryExplorer() {
                 </div>
             )}
 
+            {/* Content: Semantic List */}
             {activeTab === 'long_term' && (
                 <div className="grid gap-4">
-                    {semanticMemories.length === 0 && (
-                        <div className="text-slate-400 italic">まだセマンティック記憶が記録されていません。</div>
+                    {filteredSemantic.length === 0 && (
+                        <div className="text-slate-400 italic">
+                            {debouncedQuery || statusFilter !== 'all' || tagFilter !== 'all'
+                                ? '検索結果がありません。'
+                                : 'まだセマンティック記憶が記録されていません。'}
+                        </div>
                     )}
-                    {semanticMemories.map((m, index) => (
+                    {filteredSemantic.map((m, index) => (
                         <div
                             key={m.id}
                             className="relative overflow-hidden rounded-2xl border border-white/10 bg-[rgba(16,20,26,0.92)] p-5 transition-all duration-300 hover:border-sky-400/30 animate-rise"
@@ -460,8 +604,10 @@ export default function MemoryExplorer() {
                                         const tag = m.metadata.state_tag as string;
                                         const catMap: Record<string, { label: string; cls: string }> = {
                                             origin: { label: "Origin", cls: "bg-violet-500/20 text-violet-200 border-violet-400/30" },
+                                            nero:   { label: "Nero",   cls: "bg-emerald-500/20 text-emerald-200 border-emerald-400/30" },
                                             nia:    { label: "Nia",    cls: "bg-pink-500/20 text-pink-200 border-pink-400/30" },
                                             shared: { label: "共有",   cls: "bg-amber-500/20 text-amber-200 border-amber-400/30" },
+                                            insight: { label: "Insight", cls: "bg-cyan-500/20 text-cyan-200 border-cyan-400/30" },
                                         };
                                         const info = catMap[tag] || { label: tag, cls: "bg-slate-600/40 text-slate-300 border-white/10" };
                                         return (

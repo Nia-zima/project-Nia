@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,7 @@ def _vector_search_failures(
         from backend.core import embedding_model
 
         # Get all failure memories
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             rows = conn.execute(
                 """
                 SELECT content, confidence, created_at
@@ -52,8 +51,6 @@ def _vector_search_failures(
                 """,
                 (thread_id,),
             ).fetchall()
-        finally:
-            conn.close()
 
         if not rows:
             return []
@@ -82,25 +79,23 @@ def _sql_recent_failures(
     *, limit: int = 5, thread_id: str = "minecraft"
 ) -> list[dict]:
     """Get most recent failures from semantic_memories via SQL."""
-    conn = get_conn()
-    try:
-        rows = conn.execute(
-            """
-            SELECT content, confidence, created_at
-            FROM semantic_memories
-            WHERE thread_id = ? AND state_tag = 'game_skill_failure'
-              AND status IN ('inferred', 'confirmed')
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (thread_id, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        logger.warning("[FailureMemory] SQL search failed", exc_info=True)
-        return []
-    finally:
-        conn.close()
+    with managed_conn() as conn:
+        try:
+            rows = conn.execute(
+                """
+                SELECT content, confidence, created_at
+                FROM semantic_memories
+                WHERE thread_id = ? AND state_tag = 'game_skill_failure'
+                  AND status IN ('inferred', 'confirmed')
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (thread_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            logger.warning("[FailureMemory] SQL search failed", exc_info=True)
+            return []
 
 
 def format_failures_for_prompt(failures: list[dict]) -> str:

@@ -4,18 +4,15 @@
  */
 import { useRef } from 'react';
 import { quantizeVolume, shouldEmitVolume } from './audioPlaybackUtils';
+import { useAvatarStore } from '@/lib/stores/avatarStore';
 
 export interface UseAudioPlaybackOptions {
-    onStateChange: (isTalking: boolean, emotion: string, isThinking?: boolean) => void;
-    onVolumeChange?: (volume: number) => void;
     currentEmotionRef: React.MutableRefObject<string>;
     isThinkingRef: React.MutableRefObject<boolean>;
     micVadRef: React.MutableRefObject<any>;
 }
 
 export function useAudioPlayback({
-    onStateChange,
-    onVolumeChange,
     currentEmotionRef,
     isThinkingRef,
     micVadRef,
@@ -34,7 +31,7 @@ export function useAudioPlayback({
         if (!shouldEmitVolume(now, lastVolumeEmitMsRef.current, quantized, lastVolumeSentRef.current, force)) {
             return;
         }
-        onVolumeChange?.(quantized);
+        useAvatarStore.getState().setAudioVolume(quantized);
         lastVolumeEmitMsRef.current = now;
         lastVolumeSentRef.current = quantized;
     };
@@ -55,7 +52,7 @@ export function useAudioPlayback({
         }
         audioQueueRef.current = [];
         isPlayingRef.current = false;
-        onStateChange(false, currentEmotionRef.current, isThinkingRef.current);
+        useAvatarStore.getState().updateState(false, currentEmotionRef.current, isThinkingRef.current);
         micVadRef.current?.start().catch(() => {});
     };
 
@@ -66,7 +63,7 @@ export function useAudioPlayback({
         const audioUrl = audioQueueRef.current.shift();
         if (!audioUrl) {
             isPlayingRef.current = false;
-            onStateChange(false, "neutral", isThinkingRef.current);
+            useAvatarStore.getState().updateState(false, "neutral", isThinkingRef.current);
             emitVolume(0, true);
             resumeVadAfterPlayback();
             return;
@@ -75,7 +72,7 @@ export function useAudioPlayback({
         // Pause VAD during TTS playback (echo loop prevention)
         micVadRef.current?.pause().catch(() => {});
 
-        onStateChange(true, "happy", isThinkingRef.current);
+        useAvatarStore.getState().updateState(true, "happy", isThinkingRef.current);
 
         const audio = new Audio(audioUrl);
         audio.crossOrigin = "anonymous";

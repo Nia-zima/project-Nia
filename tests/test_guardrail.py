@@ -22,6 +22,7 @@ from backend.services.memory.guardrail import (
 )
 from backend.services.memory.models import SemanticMemory, WorkingItem
 from backend.services.memory.commit_executor import CommitPlan, execute
+from conftest import make_semantic as _make_semantic, make_working as _make_working
 
 
 @pytest.fixture(autouse=True)
@@ -36,52 +37,6 @@ def _setup_db():
     finally:
         conn.close()
     yield
-
-
-def _make_semantic(
-    *,
-    id: str = None,
-    thread_id: str = "t1",
-    content: str = "test fact",
-    status: str = "confirmed",
-    confidence: float = 0.8,
-    supersedes_id: str = None,
-) -> SemanticMemory:
-    now = time.time()
-    return SemanticMemory(
-        id=id or str(uuid.uuid4()),
-        thread_id=thread_id,
-        content=content,
-        valid_from=now,
-        created_at=now,
-        updated_at=now,
-        status=status,
-        confidence=confidence,
-        supersedes_id=supersedes_id,
-    )
-
-
-def _make_working(
-    *,
-    id: str = None,
-    thread_id: str = "t1",
-    item_type: str = "question",
-    content: str = "pending question",
-    priority: int = 3,
-    stale_turn_count: int = 0,
-) -> WorkingItem:
-    now = time.time()
-    return WorkingItem(
-        id=id or str(uuid.uuid4()),
-        thread_id=thread_id,
-        item_type=item_type,
-        content=content,
-        priority=priority,
-        created_turn_id="turn0",
-        created_at=now,
-        updated_at=now,
-        stale_turn_count=stale_turn_count,
-    )
 
 
 def _insert_semantic(mem: SemanticMemory):

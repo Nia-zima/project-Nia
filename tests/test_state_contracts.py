@@ -54,6 +54,7 @@ def _base_state(**overrides) -> AgentState:
         "hold_required": False,
         "hold_kind": None,
         "review_token": None,
+        "review_pending_actions": [],
         "suppressed_actions": [],
         "confidence": 0.5,
         "confidence_metrics": {},
@@ -148,7 +149,7 @@ class _CaptureNonStreamApp:
 # =====================================================================
 # 契約 1: WAIT 透過契約
 #   draft=="WAIT" かつ depth1_text/depth2_text が空 → final_text="WAIT",
-#   hold_required=False, review_token=None, pending_actions=[]
+#   hold_required=False, review_token=None, review_pending_actions=[]
 # =====================================================================
 class TestContract1_WaitPassthrough:
     """WAIT 透過契約: 「何もしない」がそのまま通過する。"""
@@ -174,7 +175,7 @@ class TestContract1_WaitPassthrough:
         assert result["final_text"] == "WAIT"
         assert result["hold_required"] is False
         assert result["review_token"] is None
-        assert result["pending_actions"] == []
+        assert result["review_pending_actions"] == []
         assert "system_wait_passthrough" in result["reason_codes"]
 
     def test_review_window_state_clean_on_wait(self):
@@ -183,7 +184,7 @@ class TestContract1_WaitPassthrough:
             final_text="WAIT",
             hold_required=False,
             review_token=None,
-            pending_actions=[],
+            review_pending_actions=[],
         )
         assert get_review_token(state) is None
 
@@ -191,7 +192,7 @@ class TestContract1_WaitPassthrough:
 # =====================================================================
 # 契約 2: Hold 開始契約
 #   Hold トリガー → final_text="WAIT", review_token が設定,
-#   pending_actions に kind="say" が ≥1
+#   review_pending_actions に kind="say" が ≥1
 # =====================================================================
 class TestContract2_HoldStart:
     """Hold 開始契約: set_review_token が全必須フィールドを設定する。"""
@@ -205,7 +206,7 @@ class TestContract2_HoldStart:
         assert update["hold_required"] is True
         assert update["review_token"] is not None
         assert len(update["review_token"]) > 0
-        say_items = [a for a in update["pending_actions"] if a.get("kind") == "say"]
+        say_items = [a for a in update["review_pending_actions"] if a.get("kind") == "say"]
         assert len(say_items) >= 1
 
     def test_hold_sets_merge_mode_prefix(self):
@@ -240,13 +241,13 @@ class TestContract3_HoldCancel:
             review_token=token,
             merge_mode=f"review:{token}",
             hold_required=True,
-            pending_actions=[{"kind": "say", "text": "旧発話"}],
+            review_pending_actions=[{"kind": "say", "text": "旧発話"}],
         )
         cancel_update = cancel_review_on_new_input(state, user_text="新しい入力です")
 
         assert cancel_update["review_token"] is None
         assert cancel_update["hold_required"] is False
-        assert cancel_update["pending_actions"] == []
+        assert cancel_update["review_pending_actions"] == []
 
     @pytest.mark.asyncio
     async def test_stale_approve_does_not_commit_after_cancel_race(self, monkeypatch):
@@ -259,7 +260,7 @@ class TestContract3_HoldCancel:
             merge_mode=f"review:{token}",
             hold_required=True,
             final_text="WAIT",
-            pending_actions=[{"kind": "say", "text": "旧承認文"}],
+            review_pending_actions=[{"kind": "say", "text": "旧承認文"}],
         )
         first_read_taken = asyncio.Event()
         release_first_read = asyncio.Event()
@@ -287,7 +288,7 @@ class TestContract3_HoldCancel:
             return None
 
         monkeypatch.setattr(review_router.workflow, "compile", lambda checkpointer: race_app)
-        monkeypatch.setattr(review_router.memory_manager, "get_async_checkpointer_conn", lambda: _DummyAsyncCtx())
+        monkeypatch.setattr(review_router.checkpointer_service, "get_async_checkpointer_conn", lambda: _DummyAsyncCtx())
         monkeypatch.setattr(review_router, "emit_commit_log", _noop_emit_commit_log)
         monkeypatch.setattr(review_router, "s5_commit", lambda state: {"commit_result": None})
 
@@ -311,7 +312,7 @@ class TestContract3_HoldCancel:
             review_token=token,
             merge_mode=f"review:{token}",
             hold_required=True,
-            pending_actions=[{"kind": "say", "text": "発話"}],
+            review_pending_actions=[{"kind": "say", "text": "発話"}],
             rejected_actions=[],
         )
         cancel_update = cancel_review_on_new_input(state, user_text="新入力")
@@ -342,7 +343,7 @@ class TestContract4_TokenMatch:
         state = _base_state(
             review_token=token,
             merge_mode=f"review:{token}",
-            pending_actions=[{"kind": "say", "text": "承認テスト"}],
+            review_pending_actions=[{"kind": "say", "text": "承認テスト"}],
         )
         result = apply_review_decision(state, token=token, decision="approve")
         assert result != {}
@@ -354,7 +355,7 @@ class TestContract4_TokenMatch:
         state = _base_state(
             review_token=real_token,
             merge_mode=f"review:{real_token}",
-            pending_actions=[{"kind": "say", "text": "テスト"}],
+            review_pending_actions=[{"kind": "say", "text": "テスト"}],
         )
         result = apply_review_decision(state, token=wrong_token, decision="approve")
         assert result == {}
@@ -378,7 +379,7 @@ class TestContract5_CommitAtomicity:
         state = _base_state(
             review_token=token,
             merge_mode=f"review:{token}",
-            pending_actions=[{"kind": "say", "text": "実行テキスト"}],
+            review_pending_actions=[{"kind": "say", "text": "実行テキスト"}],
             dissonance=0.2,
         )
         result = apply_review_decision(state, token=token, decision="approve")
@@ -386,7 +387,7 @@ class TestContract5_CommitAtomicity:
         assert result["final_text"] == "実行テキスト"
         assert result["review_token"] is None
         assert result["hold_required"] is False
-        assert result["pending_actions"] == []
+        assert result["review_pending_actions"] == []
         assert result["merge_mode"] == "B"
 
     def test_reject_keeps_wait_and_records(self):
@@ -394,7 +395,7 @@ class TestContract5_CommitAtomicity:
         state = _base_state(
             review_token=token,
             merge_mode=f"review:{token}",
-            pending_actions=[{"kind": "say", "text": "却下テキスト"}],
+            review_pending_actions=[{"kind": "say", "text": "却下テキスト"}],
             dissonance=0.2,
         )
         result = apply_review_decision(state, token=token, decision="reject")
@@ -402,7 +403,7 @@ class TestContract5_CommitAtomicity:
         assert result["final_text"] == "WAIT"
         assert result["review_token"] is None
         assert result["hold_required"] is False
-        assert result["pending_actions"] == []
+        assert result["review_pending_actions"] == []
         assert result["merge_mode"] == "wait"
         assert len(result["rejected_actions"]) >= 1
         assert result["rejected_actions"][-1]["text"] == "却下テキスト"
@@ -412,19 +413,19 @@ class TestContract5_CommitAtomicity:
         state = _base_state(
             review_token=token,
             merge_mode=f"review:{token}",
-            pending_actions=[{"kind": "say", "text": "テスト"}],
+            review_pending_actions=[{"kind": "say", "text": "テスト"}],
             dissonance=0.3,
         )
         result = apply_review_decision(state, token=token, decision="reject")
         assert result["dissonance"] == pytest.approx(0.3 + K_REJECT)
 
     def test_approve_with_no_say_defaults_to_wait(self):
-        """pending_actions に say がない場合、approve でも WAIT になる。"""
+        """review_pending_actions に say がない場合、approve でも WAIT になる。"""
         token = uuid.uuid4().hex
         state = _base_state(
             review_token=token,
             merge_mode=f"review:{token}",
-            pending_actions=[{"kind": "action", "text": "not say"}],
+            review_pending_actions=[{"kind": "action", "text": "not say"}],
         )
         result = apply_review_decision(state, token=token, decision="approve")
         assert result["final_text"] == "WAIT"
@@ -533,7 +534,7 @@ class TestContract7_SSEPayloadCompat:
         update = {
             "review_token": token,
             "hold_kind": "speech_preview",
-            "pending_actions": [{"kind": "say", "text": "テスト"}],
+            "review_pending_actions": [{"kind": "say", "text": "テスト"}],
             "reason_codes": ["risk_long_text"],
         }
         ev = build_hold_request_event(update)
@@ -566,11 +567,11 @@ class TestContract7_SSEPayloadCompat:
         assert event["name"] == "final_result"
 
     def test_hold_request_preview_text_from_pending(self):
-        """pending_actions の say テキストが preview_text に反映される。"""
+        """review_pending_actions の say テキストが preview_text に反映される。"""
         token = uuid.uuid4().hex
         update = {
             "review_token": token,
-            "pending_actions": [{"kind": "say", "text": "プレビュー文"}],
+            "review_pending_actions": [{"kind": "say", "text": "プレビュー文"}],
             "reason_codes": [],
         }
         ev = build_hold_request_event(update)
@@ -593,7 +594,6 @@ class TestContract8_DepthPriority:
         _, _, need_depth1, dissonance_on, reason_codes = _resolve_depth_decision(
             action=DepthAction.USE_DEPTH0,
             confidence=0.9,
-            confidence_metrics={},
             dissonance=0.65,
             reason_codes=[],
             need_depth2=False,
@@ -609,7 +609,7 @@ class TestContract8_DepthPriority:
         _, _, need_depth1, dissonance_on, _ = _resolve_depth_decision(
             action=DepthAction.USE_DEPTH0,
             confidence=0.9,
-            confidence_metrics={},
+
             dissonance=0.1,
             reason_codes=[],
             need_depth2=False,
@@ -624,7 +624,7 @@ class TestContract8_DepthPriority:
         _, _, need_depth1, dissonance_on, _ = _resolve_depth_decision(
             action=DepthAction.USE_DEPTH0,
             confidence=0.9,
-            confidence_metrics={},
+
             dissonance=0.1,
             reason_codes=[],
             need_depth2=True,
@@ -639,7 +639,7 @@ class TestContract8_DepthPriority:
         _, _, need_depth1, _, _ = _resolve_depth_decision(
             action=DepthAction.USE_DEPTH0,
             confidence=0.9,
-            confidence_metrics={},
+
             dissonance=0.1,
             reason_codes=["user_request"],
             need_depth2=False,
@@ -654,7 +654,7 @@ class TestContract8_DepthPriority:
         _, _, need_depth1, dissonance_on, _ = _resolve_depth_decision(
             action=DepthAction.USE_DEPTH0,
             confidence=0.99,
-            confidence_metrics={},
+
             dissonance=0.70,
             reason_codes=[],
             need_depth2=False,
@@ -772,7 +772,8 @@ class TestContract9_TurnInit:
 class TestContract10_MemoryWriteBoundary:
     """記憶書き込み境界契約: WAIT/Hold = 記憶保存なし。"""
 
-    def test_s5_skips_when_hold_required(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_s5_skips_when_hold_required(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.actions.settings",
             type("S", (), {"ORCHESTRATOR_S5_ENABLED": True})(),
@@ -780,10 +781,11 @@ class TestContract10_MemoryWriteBoundary:
         from backend.core.agent_graph.nodes.actions import s5_commit
 
         state = _base_state(hold_required=True, final_text="WAIT")
-        result = s5_commit(state)
+        result = await s5_commit(state)
         assert result["commit_result"]["skipped"] is True
 
-    def test_s5_skips_when_final_text_wait(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_s5_skips_when_final_text_wait(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.actions.settings",
             type("S", (), {"ORCHESTRATOR_S5_ENABLED": True})(),
@@ -791,10 +793,11 @@ class TestContract10_MemoryWriteBoundary:
         from backend.core.agent_graph.nodes.actions import s5_commit
 
         state = _base_state(hold_required=False, final_text="WAIT")
-        result = s5_commit(state)
+        result = await s5_commit(state)
         assert result["commit_result"]["skipped"] is True
 
-    def test_s5_skips_when_final_text_empty(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_s5_skips_when_final_text_empty(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.actions.settings",
             type("S", (), {"ORCHESTRATOR_S5_ENABLED": True})(),
@@ -802,10 +805,11 @@ class TestContract10_MemoryWriteBoundary:
         from backend.core.agent_graph.nodes.actions import s5_commit
 
         state = _base_state(hold_required=False, final_text="")
-        result = s5_commit(state)
+        result = await s5_commit(state)
         assert result["commit_result"]["skipped"] is True
 
-    def test_s5_noop_when_disabled(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_s5_noop_when_disabled(self, monkeypatch):
         monkeypatch.setattr(
             "backend.core.agent_graph.nodes.actions.settings",
             type("S", (), {"ORCHESTRATOR_S5_ENABLED": False})(),
@@ -813,10 +817,11 @@ class TestContract10_MemoryWriteBoundary:
         from backend.core.agent_graph.nodes.actions import s5_commit
 
         state = _base_state(final_text="こんにちは", hold_required=False)
-        result = s5_commit(state)
+        result = await s5_commit(state)
         assert result["commit_result"] is None
 
-    def test_s5_executes_when_enabled_and_not_wait(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_s5_executes_when_enabled_and_not_wait(self, monkeypatch):
         """S5 有効 + 非WAIT → commit 実行（モック）。"""
 
         class FakeResult:
@@ -839,7 +844,7 @@ class TestContract10_MemoryWriteBoundary:
         from backend.core.agent_graph.nodes.actions import s5_commit
 
         state = _base_state(final_text="こんにちは", hold_required=False)
-        result = s5_commit(state)
+        result = await s5_commit(state)
         assert result["orchestrator_stage"] == "S5"
         assert result["commit_result"] is not None
         assert result["commit_result"].get("skipped") is not True
@@ -874,4 +879,4 @@ class TestContractConstants:
         assert result["review_token"] is None
         assert result["hold_required"] is False
         assert result["hold_kind"] is None
-        assert result["pending_actions"] == []
+        assert result["review_pending_actions"] == []

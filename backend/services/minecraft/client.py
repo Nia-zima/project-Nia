@@ -29,9 +29,11 @@ class MinecraftBotClient:
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.get(f"{self.base_url}/state") as resp:
+                    if resp.status != 200:
+                        logger.warning("[MC_CLIENT] get_state HTTP %d", resp.status)
+                        return {"connected": False, "error": f"HTTP {resp.status}"}
                     data = await resp.json()
-                    self._state_cache = data
-                    self._cache_ts = now
+                    self._state_cache, self._cache_ts = data, now
                     return data
         except Exception as e:
             logger.warning("[MC_CLIENT] get_state failed: %s", e)
@@ -45,6 +47,8 @@ class MinecraftBotClient:
                     f"{self.base_url}/action",
                     json={"action": action, "params": params or {}},
                 ) as resp:
+                    if resp.status != 200:
+                        return {"success": False, "error": f"HTTP {resp.status}"}
                     return await resp.json()
         except Exception as e:
             logger.warning("[MC_CLIENT] execute_action failed: %s", e)
@@ -55,6 +59,8 @@ class MinecraftBotClient:
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.get(f"{self.base_url}/health") as resp:
+                    if resp.status != 200:
+                        return False
                     data = await resp.json()
                     return data.get("connected", False)
         except Exception:

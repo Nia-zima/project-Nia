@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -105,8 +106,6 @@ class LanguageGate:
             query=str(parsed.get("query") or "").strip(),
             category=category,  # type: ignore[arg-type]
         )
-        if not request.validate():
-            return None
         request.query = self._generate_safe_query(thought=thought, reason=request.reason, query=request.query)
         return request if request.validate() else None
 
@@ -126,6 +125,7 @@ class LanguageGate:
         try:
             parsed = json.loads(text)
         except Exception:
+            logger.debug("[ExternalData] JSON parse failed: %s", text[:200], exc_info=True)
             return None
         return parsed if isinstance(parsed, dict) else None
 
@@ -163,12 +163,13 @@ class ExternalDataBroker:
 
     def __init__(self, enabled: bool = False, max_log_size: int = 200):
         self.enabled = enabled
+        self._log_lock = threading.Lock()
         self._fetch_log: deque[dict[str, Any]] = deque(maxlen=max(1, max_log_size))
         self._feedback_log: deque[dict[str, Any]] = deque(maxlen=max(1, max_log_size))
-        self.provider = str(getattr(settings, "EXTERNAL_SEARCH_PROVIDER", "auto") or "auto").strip().lower()
-        self.timeout_sec = int(getattr(settings, "EXTERNAL_SEARCH_TIMEOUT_SEC", 8) or 8)
-        self.result_limit = int(getattr(settings, "EXTERNAL_SEARCH_RESULT_LIMIT", 3) or 3)
-        self.min_confidence = float(getattr(settings, "EXTERNAL_MIN_CONFIDENCE", 0.65) or 0.65)
+        self.provider = settings.EXTERNAL_SEARCH_PROVIDER
+        self.timeout_sec = settings.EXTERNAL_SEARCH_TIMEOUT_SEC
+        self.result_limit = settings.EXTERNAL_SEARCH_RESULT_LIMIT
+        self.min_confidence = settings.EXTERNAL_MIN_CONFIDENCE
         self._source_scores = {
             "google_custom_search": 0.80,
             "wikipedia": 0.65,
@@ -177,7 +178,8 @@ class ExternalDataBroker:
 
     @property
     def fetch_log(self) -> list[dict[str, Any]]:
-        return list(self._fetch_log)
+        with self._log_lock:
+            return list(self._fetch_log)
 
     def fetch(self, request: ExternalDataRequest) -> Optional[ExternalDataResult]:
         if not self.enabled:
@@ -187,19 +189,19 @@ class ExternalDataBroker:
 
         result = self._execute_search(request)
         if result is not None:
-            self._fetch_log.append(
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "reason": request.reason,
-                    "query": request.query,
-                    "category": request.category,
-                    "data_length": len(result.data or ""),
-                    "source": result.source,
-                    "error": result.error,
-                    "confidence": float(result.confidence or 0.0),
-                    "contradiction_flag": bool(result.contradiction_flag),
-                }
-            )
+            entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "reason": request.reason,
+                "query": request.query,
+                "category": request.category,
+                "data_length": len(result.data or ""),
+                "source": result.source,
+                "error": result.error,
+                "confidence": float(result.confidence or 0.0),
+                "contradiction_flag": bool(result.contradiction_flag),
+            }
+            with self._log_lock:
+                self._fetch_log.append(entry)
         return result
 
     def prioritize_requests(
@@ -243,22 +245,30 @@ class ExternalDataBroker:
         return self._aggregate_results(request.query, results)
 
     def _search_google(self, query: str) -> Optional[ExternalDataResult]:
+        from backend.core.retry import retry_sync
+
         key = str(getattr(settings, "GOOGLE_API_KEY", "") or "").strip()
         cx = str(getattr(settings, "GOOGLE_CSE_ID", "") or "").strip()
         if not key or not cx:
             return None
         try:
-            resp = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params={
-                    "key": key,
-                    "cx": cx,
-                    "q": query,
-                    "num": self.result_limit,
-                    "lr": "lang_ja",
-                    "safe": "off",
-                },
-                timeout=self.timeout_sec,
+            resp = retry_sync(
+                lambda: requests.get(
+                    "https://www.googleapis.com/customsearch/v1",
+                    params={
+                        "key": key,
+                        "cx": cx,
+                        "q": query,
+                        "num": self.result_limit,
+                        "lr": "lang_ja",
+                        "safe": "off",
+                    },
+                    timeout=self.timeout_sec,
+                ),
+                max_retries=1,
+                base_delay=1.0,
+                retryable_exceptions=(requests.ConnectionError, requests.Timeout),
+                service_name="google_search",
             )
             data = resp.json()
             if isinstance(data, dict) and data.get("error"):
@@ -296,18 +306,26 @@ class ExternalDataBroker:
             return ExternalDataResult(data="", source="google_custom_search", error=str(e))
 
     def _search_wikipedia(self, query: str) -> Optional[ExternalDataResult]:
+        from backend.core.retry import retry_sync
+
         try:
-            resp = requests.get(
-                "https://ja.wikipedia.org/w/api.php",
-                params={
-                    "action": "query",
-                    "list": "search",
-                    "srsearch": query,
-                    "format": "json",
-                    "srlimit": self.result_limit,
-                    "utf8": 1,
-                },
-                timeout=self.timeout_sec,
+            resp = retry_sync(
+                lambda: requests.get(
+                    "https://ja.wikipedia.org/w/api.php",
+                    params={
+                        "action": "query",
+                        "list": "search",
+                        "srsearch": query,
+                        "format": "json",
+                        "srlimit": self.result_limit,
+                        "utf8": 1,
+                    },
+                    timeout=self.timeout_sec,
+                ),
+                max_retries=1,
+                base_delay=1.0,
+                retryable_exceptions=(requests.ConnectionError, requests.Timeout),
+                service_name="wikipedia_search",
             )
             data = resp.json()
             items = ((data or {}).get("query") or {}).get("search") or []
@@ -342,17 +360,25 @@ class ExternalDataBroker:
             return ExternalDataResult(data="", source="wikipedia", error=str(e))
 
     def _search_duckduckgo(self, query: str) -> Optional[ExternalDataResult]:
+        from backend.core.retry import retry_sync
+
         try:
-            resp = requests.get(
-                "https://api.duckduckgo.com/",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "no_redirect": "1",
-                    "no_html": "1",
-                    "kl": "jp-jp",
-                },
-                timeout=self.timeout_sec,
+            resp = retry_sync(
+                lambda: requests.get(
+                    "https://api.duckduckgo.com/",
+                    params={
+                        "q": query,
+                        "format": "json",
+                        "no_redirect": "1",
+                        "no_html": "1",
+                        "kl": "jp-jp",
+                    },
+                    timeout=self.timeout_sec,
+                ),
+                max_retries=1,
+                base_delay=1.0,
+                retryable_exceptions=(requests.ConnectionError, requests.Timeout),
+                service_name="duckduckgo_search",
             )
             data = resp.json() or {}
             lines: list[str] = []
@@ -487,8 +513,6 @@ class ExternalDataBroker:
             snippets_by_source.setdefault(src, "")
             snippets_by_source[src] += " " + txt
 
-        all_snippets = " ".join(snippets_by_source.values())
-
         # 1. Year contradiction (cross-source)
         years_by_source: dict[str, set[str]] = {}
         for src, txt in snippets_by_source.items():
@@ -537,18 +561,19 @@ class ExternalDataBroker:
         source: str = "",
         error: Optional[str] = None,
     ) -> None:
-        self._feedback_log.append(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "category": category,
-                "useful": bool(useful),
-                "source": source,
-                "error": error,
-            }
-        )
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "category": category,
+            "useful": bool(useful),
+            "source": source,
+            "error": error,
+        }
+        with self._log_lock:
+            self._feedback_log.append(entry)
 
     def category_feedback(self, category: ExternalCategory) -> dict[str, float]:
-        rows = [r for r in self._feedback_log if r.get("category") == category]
+        with self._log_lock:
+            rows = [r for r in self._feedback_log if r.get("category") == category]
         total = len(rows)
         useful = sum(1 for r in rows if bool(r.get("useful")))
         success_rate = (useful / total) if total > 0 else 0.0
@@ -757,7 +782,7 @@ class ThinkingProcess:
     def _integrate_external_data(self, thought: str, data: str) -> str:
         prompt = (
             "外部データをもとに、質問への回答を日本語で1〜3文にまとめてください。\n"
-            "柔らかいタメ口で、表やリストは使わず自然な文章で答えること。\n"
+            "タメ口で、表やリストは使わず自然な文章で答えること。\n"
             "データに含まれない情報は推測せず、わかる範囲だけ伝えること。\n\n"
             f"質問の文脈: {thought}\n"
             f"外部データ: {data}\n"

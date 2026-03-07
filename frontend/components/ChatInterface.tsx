@@ -13,16 +13,13 @@ import {
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useVoiceMode } from '@/hooks/useVoiceMode';
 import { useChatStore } from '@/lib/stores/chatStore';
+import { useAvatarStore } from '@/lib/stores/avatarStore';
 
 interface ChatInterfaceProps {
-    onStateChange: (isTalking: boolean, emotion: string, isThinking?: boolean) => void;
-    onAgentStateChange?: (state: string) => void;
-    onGestureChange?: (gesture: string) => void;
-    onVolumeChange?: (volume: number) => void;
     agentMode: string;
 }
 
-export default function ChatInterface({ onStateChange, onAgentStateChange, onGestureChange, onVolumeChange, agentMode }: ChatInterfaceProps) {
+export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
     const {
         messages, setMessages, addMessage, updateMessageContent, upsertMessage, clearMessages,
         input, setInput, appendInput,
@@ -50,6 +47,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
     const activeStreamIdRef = useRef<number>(0);
     const sseStreamIdRef = useRef<string | null>(null);
     const finalTextLockedRef = useRef<boolean>(false);
+    const turnStartedAtMsRef = useRef<number>(0);
     const abortControllerRef = useRef<AbortController | null>(null);
     const currentStateRef = useRef<string>("");
     const ttsEsRef = useRef<EventSource | null>(null);
@@ -63,8 +61,6 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
         interruptAudioPlayback,
         processAudioQueue,
     } = useAudioPlayback({
-        onStateChange,
-        onVolumeChange,
         currentEmotionRef,
         isThinkingRef,
         micVadRef,
@@ -88,7 +84,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
 
     const syncThinking = (next: boolean) => {
         isThinkingRef.current = next;
-        onStateChange(isPlayingRef.current, currentEmotion, next);
+        useAvatarStore.getState().updateState(isPlayingRef.current, currentEmotion, next);
     };
 
     const addSystemMessage = (content: string) => {
@@ -259,7 +255,20 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
         try {
             const data = await apiClient.fetchRecentHistory(threadId || "default_thread", 10);
             const hist = Array.isArray(data?.history) ? data.history : [];
-            const last = [...hist].reverse().find((m: any) => m?.role === "assistant" || m?.role === "ai");
+            const sinceMs = Number(turnStartedAtMsRef.current || 0);
+            const last = [...hist].reverse().find((m: any) => {
+                const role = String(m?.role || "");
+                if (role !== "assistant" && role !== "ai") {
+                    return false;
+                }
+                const ts = Number(m?.ts ?? 0);
+                if (!Number.isFinite(ts)) {
+                    return false;
+                }
+                // Guard against stale replay: only backfill assistant messages
+                // created after this turn started.
+                return ts >= sinceMs;
+            });
             if (!last) {
                 if (attempt < 2) {
                     setTimeout(() => backfillLastAssistantMessage(attempt + 1), 250);
@@ -341,19 +350,19 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
                 const tag = String(msg.tag || "").toLowerCase();
                 if (tag) {
                     currentStateRef.current = tag;
-                    onAgentStateChange?.(tag);
-                    onStateChange(true, currentEmotionRef.current, isThinkingRef.current);
+                    useAvatarStore.getState().setAgentState(tag);
+                    useAvatarStore.getState().updateState(true, currentEmotionRef.current, isThinkingRef.current);
                 }
             } else if (msg.type === "emotion") {
                 const tag = String(msg.tag || "").toLowerCase();
                 if (tag) {
                     setCurrentEmotion(tag);
-                    onStateChange(true, tag, isThinkingRef.current);
+                    useAvatarStore.getState().updateState(true, tag, isThinkingRef.current);
                 }
             } else if (msg.type === "gesture") {
                 const tag = String(msg.tag || "").toLowerCase();
                 if (tag) {
-                    onGestureChange?.(tag);
+                    useAvatarStore.getState().triggerGesture(tag);
                 }
             } else if (msg.type === "thinking") {
                 const nextThinking = Boolean(msg.value ?? msg.thinking ?? true);
@@ -451,7 +460,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
         } catch (e) {
             console.error("handleMessage crashed:", e, msg);
         }
-    }, [onAgentStateChange, onStateChange]);
+    }, []);
 
     useEffect(() => {
         const tid = threadId || "default_thread";
@@ -485,6 +494,8 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
             }
         };
 
+        let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
         es.onerror = (e) => {
             console.warn("[TTS_ES] error", e);
             // EventSource should auto-reconnect, but add manual reconnect as fallback
@@ -492,11 +503,19 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
                 es.close();
                 if (ttsEsRef.current === es) ttsEsRef.current = null;
                 // Reconnect after 2 seconds
-                setTimeout(() => {
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null;
                     if (!ttsEsRef.current) {
                         const newEs = new EventSource(sseUrl);
                         ttsEsRef.current = newEs;
-                        newEs.onmessage = es.onmessage;
+                        newEs.onmessage = (ev) => {
+                            try {
+                                const msg = JSON.parse(ev.data);
+                                handleMessage(msg);
+                            } catch (err) {
+                                console.warn("[TTS_ES] bad json", ev.data);
+                            }
+                        };
                         newEs.onerror = es.onerror;
                     }
                 }, 2000);
@@ -504,6 +523,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
         };
 
         return () => {
+            if (reconnectTimer) clearTimeout(reconnectTimer);
             es.close();
             if (ttsEsRef.current === es) ttsEsRef.current = null;
         };
@@ -516,7 +536,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
         // keyboard input respects the loading guard.
         if (!overrideText && isLoading) return;
 
-        onAgentStateChange?.("");
+        useAvatarStore.getState().setAgentState("");
         syncThinking(false);
         setThinkingHint(null);
         finalTextLockedRef.current = false;
@@ -534,6 +554,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
 
         activeStreamIdRef.current += 1;
         sseStreamIdRef.current = null;
+        turnStartedAtMsRef.current = Date.now();
 
         const id = newId();
         const userMsg: ChatMessage = { id, role: 'user', content: textToSend };
@@ -626,7 +647,7 @@ export default function ChatInterface({ onStateChange, onAgentStateChange, onGes
                 if (isThinkingRef.current) {
                     syncThinking(false);
                 }
-                onStateChange(false, currentEmotionRef.current, isThinkingRef.current);
+                useAvatarStore.getState().updateState(false, currentEmotionRef.current, isThinkingRef.current);
             }
         }
     };

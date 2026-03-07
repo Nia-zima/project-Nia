@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 from backend.core.config import settings
 from backend.services.public_status import read_public_status
 
-logger = logging.getLogger("AI_Buddy")
+logger = logging.getLogger("nia")
 
 # ===== Config =====
 OLLAMA_URL = settings.OLLAMA_BASE_URL
@@ -61,6 +61,7 @@ def _safe_b64decode(s: str) -> bytes:
             compact = "".join(s.split())
             return base64.b64decode(compact, validate=True)
         except Exception:
+            logger.debug("[VISION] Base64 fallback decode also failed", exc_info=True)
             return b""
 
 
@@ -74,9 +75,7 @@ def _resize_and_reencode_to_jpeg_bytes(image_bytes: bytes, max_size: int = MAX_I
     img = ImageOps.exif_transpose(img)  # iPhone系の回転事故対策
 
     # JPEG化のためRGBへ
-    if img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
-    elif img.mode == "L":
+    if img.mode != "RGB":
         img = img.convert("RGB")
 
     w, h = img.size
@@ -193,25 +192,26 @@ async def analyze_image_openai(
     timeout_sec: float
 ) -> str:
     """OpenAI互換 (LM Studio) 用"""
-    from backend.core.config import settings
-    
-    # settingsからURL/Key/Modelを取得
-    # .envで VISION_BASE_URL, VISION_API_KEY を設定可能にする想定
-    # 指定なければ通常の OPENAI_BASE_URL をフォールバック利用
     base_url = getattr(settings, "VISION_BASE_URL", None) or settings.OPENAI_BASE_URL
     api_key = getattr(settings, "VISION_API_KEY", None) or settings.OPENAI_API_KEY
     model = settings.VISION_MODEL
-    
+
+    if not api_key:
+        logger.warning("[VISION] No API key set for OpenAI/LMStudio vision")
+        return "[APIキーが設定されていません]"
+
+    # URL正規化: 末尾スラッシュ除去後に /v1 を付与
+    base_url = base_url.rstrip("/")
     if not base_url.endswith("/v1"):
-        base_url = f"{base_url}/v1" if not base_url.endswith("/") else f"{base_url}v1"
+        base_url = f"{base_url}/v1"
 
     url = f"{base_url}/chat/completions"
-    
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "model": model,
         "messages": [
@@ -232,20 +232,26 @@ async def analyze_image_openai(
         "temperature": VISION_TEMPERATURE,
     }
 
+    t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             r = await client.post(url, json=payload, headers=headers)
             r.raise_for_status()
             data = r.json()
-            
+
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
         content = message.get("content", "")
+        dt = time.time() - t0
+        logger.info("[VISION] OpenAI/LMStudio OK (%.2fs). response_len=%d", dt, len(content))
         return content.strip() or "[画像の説明を生成できませんでした]"
 
     except httpx.TimeoutException:
         logger.warning("[VISION] OpenAI/LMStudio Timeout (%.1fs)", timeout_sec)
         return "[画像の解析がタイムアウトしました]"
+    except httpx.HTTPStatusError as e:
+        logger.error("[VISION] OpenAI/LMStudio HTTP error: %s | body=%s", e, getattr(e.response, "text", ""))
+        return "[画像の解析に失敗しました（Vision APIエラー）]"
     except Exception as e:
         logger.exception("[VISION] OpenAI/LMStudio Error: %s", e)
         return "[画像の解析に失敗しました]"

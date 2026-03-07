@@ -7,8 +7,6 @@ import uuid
 
 import pytest
 
-os.environ.setdefault("RETENTION_PROFILE", "fast")
-
 from backend.core.db import get_conn, init_schema
 
 

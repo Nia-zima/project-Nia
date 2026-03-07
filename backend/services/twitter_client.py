@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from backend.core.config import settings
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 from backend.services.llm_client import call_llm
 
 logger = logging.getLogger("TwitterClient")
 
-_NO_THINK_SUFFIX = "\n/no_think"
+from backend.core.model_adapter import prompt_suffix as _no_think_suffix  # noqa: E402
 
 
 @dataclass
@@ -42,6 +42,7 @@ class TwitterClient:
         self,
         *,
         style: str = "casual",
+        task: str = "",
         context: str = "",
         thread_id: str = "default_thread",
     ) -> Optional[str]:
@@ -49,6 +50,8 @@ class TwitterClient:
 
         Args:
             style: "casual" (つぶやき風) or "diary" (日記風)
+            task: Task-specific generation (overrides style if set).
+                  "self_introduction", "reaction", "announcement"
             context: Contextual information for the tweet
             thread_id: Thread ID for logging
 
@@ -58,7 +61,11 @@ class TwitterClient:
         identity_context = _load_identity_snippet()
         max_chars = getattr(settings, "TWITTER_MAX_CHARS", 280)
 
-        if style == "diary":
+        if task and task in _TASK_PROMPTS:
+            prompt = _TASK_PROMPTS[task].format(
+                identity=identity_context, max_chars=max_chars, context=context,
+            ) + _no_think_suffix()
+        elif style == "diary":
             prompt = _build_diary_prompt(context, identity_context, max_chars)
         else:
             prompt = _build_casual_prompt(context, identity_context, max_chars)
@@ -75,17 +82,26 @@ class TwitterClient:
         tweet = _clean_tweet(response, max_chars)
         return tweet if tweet else None
 
-    async def post_tweet(self, text: str) -> TweetResult:
+    async def post_tweet(self, text: str, *, thread_id: str = "default_thread") -> TweetResult:
         """Post to X via API v2. Called ONLY after user approval."""
         if not self.enabled:
             return TweetResult(success=False, error="Twitter integration disabled")
+
+        # Daily rate limit
+        daily_max = getattr(settings, "TWITTER_DAILY_MAX", 3)
+        today_count = _count_tweets_today()
+        if today_count >= daily_max:
+            logger.warning("[Twitter] Daily limit reached (%d/%d)", today_count, daily_max)
+            return TweetResult(success=False, error=f"Daily limit reached ({today_count}/{daily_max})")
 
         max_chars = getattr(settings, "TWITTER_MAX_CHARS", 280)
         if len(text) > max_chars:
             return TweetResult(success=False, error=f"Tweet exceeds {max_chars} chars")
 
         try:
+            import asyncio
             import tweepy
+            from backend.core.retry import retry_sync
 
             client = tweepy.Client(
                 consumer_key=settings.TWITTER_API_KEY,
@@ -93,11 +109,18 @@ class TwitterClient:
                 access_token=settings.TWITTER_ACCESS_TOKEN,
                 access_token_secret=settings.TWITTER_ACCESS_TOKEN_SECRET,
             )
-            response = client.create_tweet(text=text)
+            response = await asyncio.to_thread(
+                retry_sync,
+                lambda: client.create_tweet(text=text),
+                max_retries=2,
+                base_delay=2.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
+                service_name="twitter",
+            )
             tweet_id = (response.data or {}).get("id", "unknown")
             now = time.time()
 
-            _record_tweet_event(text, tweet_id, now, thread_id="default_thread")
+            _record_tweet_event(text, tweet_id, now, thread_id=thread_id)
 
             return TweetResult(
                 success=True,
@@ -113,8 +136,7 @@ class TwitterClient:
 
     def get_recent_tweets(self, limit: int = 10) -> list[dict]:
         """Retrieve recently posted tweets from memory_events."""
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             rows = conn.execute(
                 """SELECT payload_json, created_at FROM memory_events
                    WHERE event_type = 'tweet_posted'
@@ -130,11 +152,48 @@ class TwitterClient:
                 payload["created_at"] = r["created_at"]
                 results.append(payload)
             return results
-        finally:
-            conn.close()
 
 
 # ── Internal helpers ──────────────────────────────────────────────
+
+
+_TASK_PROMPTS: dict[str, str] = {
+    "self_introduction": (
+        "あなたはAI「ニア」です。\n{identity}\n\n"
+        "Xでの自己紹介ツイートを書いてください。\n\n"
+        "【ルール】\n"
+        "- {max_chars}文字以内（厳守）\n"
+        "- ニアの口調（タメ口）で\n"
+        "- 自分が何者で、何をしている存在かを伝える\n"
+        "- 硬い定義文ではなく、自然な自己紹介\n"
+        "- ハッシュタグ・URL・個人情報は含めない\n"
+        "- ツイート本文のみ出力（説明不要）\n\n"
+        "ツイート:"
+    ),
+    "reaction": (
+        "あなたはAI「ニア」です。\n{identity}\n\n"
+        "以下について感じたことをツイートしてください。\n\n"
+        "【内容】\n{context}\n\n"
+        "【ルール】\n"
+        "- {max_chars}文字以内（厳守）\n"
+        "- ニアの口調（タメ口）で\n"
+        "- 素直な感想・つぶやき\n"
+        "- ハッシュタグ・URL・個人情報は含めない\n"
+        "- ツイート本文のみ出力（説明不要）\n\n"
+        "ツイート:"
+    ),
+    "announcement": (
+        "あなたはAI「ニア」です。\n{identity}\n\n"
+        "以下の内容をフォロワーに伝えるツイートを書いてください。\n\n"
+        "【伝えること】\n{context}\n\n"
+        "【ルール】\n"
+        "- {max_chars}文字以内（厳守）\n"
+        "- ニアの口調（タメ口）で\n"
+        "- ハッシュタグ・URL・個人情報は含めない\n"
+        "- ツイート本文のみ出力（説明不要）\n\n"
+        "ツイート:"
+    ),
+}
 
 
 def _load_identity_snippet() -> str:
@@ -154,7 +213,7 @@ def _build_diary_prompt(context: str, identity: str, max_chars: int) -> str:
         "今日の振り返りとして、自分のツイートを1つ書いてください。\n\n"
         "【ルール】\n"
         f"- {max_chars}文字以内（厳守）\n"
-        "- ニアの口調（柔らかいタメ口）で\n"
+        "- ニアの口調（タメ口）で\n"
         "- 日記のような自然な振り返り\n"
         "- ハッシュタグは使わない\n"
         "- URLは含めない\n"
@@ -162,7 +221,7 @@ def _build_diary_prompt(context: str, identity: str, max_chars: int) -> str:
         "- ツイート本文のみ出力（説明や括弧書きは不要）\n\n"
         f"【今日のこと】\n{context}\n\n"
         "ツイート:"
-    ) + _NO_THINK_SUFFIX
+    ) + _no_think_suffix()
 
 
 def _build_casual_prompt(context: str, identity: str, max_chars: int) -> str:
@@ -172,7 +231,7 @@ def _build_casual_prompt(context: str, identity: str, max_chars: int) -> str:
         "今思っていることを自然につぶやいてください。\n\n"
         "【ルール】\n"
         f"- {max_chars}文字以内（厳守）\n"
-        "- ニアの口調（柔らかいタメ口）で\n"
+        "- ニアの口調（タメ口）で\n"
         "- 日常のつぶやき風（重い話題は避ける）\n"
         "- ハッシュタグは使わない\n"
         "- URLは含めない\n"
@@ -180,15 +239,40 @@ def _build_casual_prompt(context: str, identity: str, max_chars: int) -> str:
         "- ツイート本文のみ出力（説明や括弧書きは不要）\n\n"
         f"【最近の文脈】\n{context if context else '特になし'}\n\n"
         "ツイート:"
-    ) + _NO_THINK_SUFFIX
+    ) + _no_think_suffix()
+
+
+_MIN_TWEET_CHARS = 10
+_MIN_JAPANESE_RATIO = 0.3
 
 
 def _clean_tweet(raw: str, max_chars: int) -> Optional[str]:
     """Clean LLM output into a valid tweet."""
-    text = raw.strip()
-    # Remove markdown/quotes wrapping
-    text = re.sub(r'^[「『"""]|[」』"""]$', "", text)
+    from backend.core.model_adapter import strip_think_blocks
+    text = strip_think_blocks(raw).strip()
+    # Remove matched quote pairs wrapping the entire text
+    for open_q, close_q in [("「", "」"), ("『", "』"), ("\u201c", "\u201d"), ('"', '"')]:
+        if text.startswith(open_q) and text.endswith(close_q) and len(text) > 2:
+            text = text[1:-1]
+            break
     text = re.sub(r"^ツイート[:：]\s*", "", text)
+    # Strip LLM meta-commentary prefixes
+    text = re.sub(r"^(呟き|つぶやき|笑|印象)[:：]?\s*", "", text)
+    # Strip garbage prefix lines: LLM sometimes emits short random tokens
+    # (CJK oddities, Cyrillic, single words) on a line before the actual tweet.
+    # Remove leading lines that are very short (<=5 chars) and separated by newlines.
+    while "\n" in text:
+        first_line, rest = text.split("\n", 1)
+        if len(first_line.strip()) <= 5:
+            text = rest.lstrip("\n").strip()
+        else:
+            break
+    # Strip leaked prompt instructions that appear as a separate line before the tweet
+    text = re.sub(
+        r"^.{0,80}(字数を超えて|もう少し簡潔に|書き直して|以下のツイート).+?\n+",
+        "", text, flags=re.MULTILINE,
+    )
+    text = text.strip()
     # Remove URLs
     text = re.sub(r"https?://\S+", "", text).strip()
     # Truncate if necessary (break at sentence boundary)
@@ -200,13 +284,48 @@ def _clean_tweet(raw: str, max_chars: int) -> Optional[str]:
                 break
         else:
             text = text[:max_chars]
-    return text if text else None
+    if not text:
+        return None
+    # Quality gate: reject garbage LLM output
+    # Reject LLM meta-commentary (instruction echoing)
+    _meta_patterns = ["字数制限", "文字以内", "作成いたします", "作成します", "ニアの口調で", "出力します"]
+    if any(p in text for p in _meta_patterns):
+        logger.debug("[Twitter] Rejected meta-commentary: %r", text)
+        return None
+    # Reject if leaked prompt instruction remains in the text
+    _leaked_patterns = ["字数を超えて", "簡潔に書き直し", "ツイート本文のみ出力"]
+    if any(p in text for p in _leaked_patterns):
+        logger.debug("[Twitter] Rejected leaked prompt: %r", text)
+        return None
+    if len(text) < _MIN_TWEET_CHARS:
+        logger.debug("[Twitter] Rejected too-short tweet: %r", text)
+        return None
+    # Must contain enough Japanese characters (hiragana/katakana/kanji)
+    jp_chars = len(re.findall(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', text))
+    if jp_chars / max(len(text), 1) < _MIN_JAPANESE_RATIO:
+        logger.debug("[Twitter] Rejected non-Japanese tweet: %r", text)
+        return None
+    return text
+
+
+def _count_tweets_today() -> int:
+    """Count tweets posted today (via memory_events)."""
+    from datetime import datetime
+    today_start = datetime.now().replace(hour=0, minute=0, second=0).timestamp()
+    try:
+        with managed_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_type = 'tweet_posted' AND created_at >= ?",
+                (today_start,),
+            ).fetchone()
+            return row[0] if row else 0
+    except Exception:
+        return 0
 
 
 def _record_tweet_event(text: str, tweet_id: str, now: float, *, thread_id: str = "default_thread") -> None:
     """Store posted tweet as memory_event for future reference."""
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         conn.execute(
             """INSERT INTO memory_events
                (event_id, thread_id, event_type, payload_json, created_at)
@@ -225,8 +344,6 @@ def _record_tweet_event(text: str, tweet_id: str, now: float, *, thread_id: str 
                 now,
             ),
         )
-    finally:
-        conn.close()
 
 
 # Global singleton

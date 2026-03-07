@@ -137,42 +137,41 @@ def _save_to_memory(
     try:
         from backend.services.memory.semantic_store import upsert
         from backend.services.memory.models import SemanticMemory
-        from backend.core.db import get_conn
+        from backend.core.db import managed_conn
     except ImportError:
         logger.warning("[VideoLearner] Could not import semantic_store")
         return []
 
     now = time.time()
     ids: list[str] = []
-    conn = get_conn()
-    try:
-        for strategy in strategies:
-            mem_id = str(uuid.uuid4())
-            mem = SemanticMemory(
-                id=mem_id,
-                thread_id=thread_id,
-                content=f"[動画学習] {strategy}",
-                status="inferred",
-                confidence=0.6,
-                state_tag="video_knowledge",
-                source_turn_ids="",
-                source_event_ids="",
-                note=f"auto:video_learn:{source_video}",
-                seed_retention=0.6,
-                vector_sync_pending=1,
-                created_at=now,
-                updated_at=now,
-            )
-            upsert(conn, mem)
-            ids.append(mem_id)
+    with managed_conn() as conn:
+        try:
+            for strategy in strategies:
+                mem_id = str(uuid.uuid4())
+                mem = SemanticMemory(
+                    id=mem_id,
+                    thread_id=thread_id,
+                    content=f"[動画学習] {strategy}",
+                    valid_from=now,
+                    created_at=now,
+                    updated_at=now,
+                    status="inferred",
+                    confidence=0.6,
+                    state_tag="video_knowledge",
+                    source_turn_ids="",
+                    source_event_ids="",
+                    note=f"auto:video_learn:{source_video}",
+                    seed_retention=0.6,
+                    vector_sync_pending=1,
+                )
+                upsert(conn, mem)
+                ids.append(mem_id)
 
-        logger.info(
-            "[VideoLearner] Saved %d strategies to semantic memory", len(ids),
-        )
-    except Exception:
-        logger.exception("[VideoLearner] Failed to save strategies")
-    finally:
-        conn.close()
+            logger.info(
+                "[VideoLearner] Saved %d strategies to semantic memory", len(ids),
+            )
+        except Exception:
+            logger.exception("[VideoLearner] Failed to save strategies")
 
     return ids
 

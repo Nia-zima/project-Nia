@@ -63,8 +63,7 @@ export default function ChatInput({
                     <ImageIcon size={18} className="sm:hidden" />
                     <ImageIcon size={20} className="hidden sm:block" />
                 </button>
-                <input
-                    type="text"
+                <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => {
@@ -74,8 +73,15 @@ export default function ChatInput({
                         }
                     }}
                     placeholder="メッセージを入力..."
-                    className="flex-1 min-w-0 bg-transparent border-none outline-none text-white px-1 sm:px-2 placeholder-gray-500"
+                    className="flex-1 min-w-0 bg-transparent border-none outline-none text-white px-1 sm:px-2 placeholder-gray-500 resize-none"
                     disabled={isLoading}
+                    rows={1}
+                    style={{ maxHeight: '6rem', overflowY: 'auto' }}
+                    onInput={(e) => {
+                        const el = e.currentTarget;
+                        el.style.height = 'auto';
+                        el.style.height = `${Math.min(el.scrollHeight, 96)}px`;
+                    }}
                 />
                 <button
                     onClick={onToggleVoiceMode}

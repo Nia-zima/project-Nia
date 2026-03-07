@@ -24,6 +24,8 @@ export default function DrawLab() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const observeTimerRef = useRef<number | null>(null);
   const pollTimerRef = useRef<number | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const sinceSeqRef = useRef(0);
   const [prompt, setPrompt] = useState("抽象的で静かな夜の線画");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -87,8 +89,9 @@ export default function DrawLab() {
     async (emergency = false) => {
       stopLoopTimers();
       setRunning(false);
+      const sid = sessionIdRef.current;
       try {
-        if (sessionId) await apiClient.drawSessionStop(sessionId, emergency);
+        if (sid) await apiClient.drawSessionStop(sid, emergency);
       } catch (_e) {
         // noop
       }
@@ -97,30 +100,33 @@ export default function DrawLab() {
         setStatus(st as SessionState);
       } catch { /* ignore */ }
     },
-    [sessionId, stopLoopTimers]
+    [stopLoopTimers]
   );
 
   const postObservation = useCallback(async () => {
-    if (!sessionId) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
       const imageData = canvas.toDataURL("image/jpeg", 0.55);
-      await apiClient.drawObserve(sessionId, imageData);
+      await apiClient.drawObserve(sid, imageData);
     } catch (_e) {
       // noop
     }
-  }, [sessionId]);
+  }, []);
 
   const pollCommands = useCallback(async () => {
-    if (!sessionId) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
     try {
-      const payload = await apiClient.drawCommands(sessionId, sinceSeq, 100) as Record<string, any>;
+      const payload = await apiClient.drawCommands(sid, sinceSeqRef.current, 100) as Record<string, any>;
       const items = Array.isArray(payload.items) ? payload.items : [];
       for (const item of items) {
         applyCommand((item?.command || {}) as DrawCommand);
       }
       if (typeof payload.next_seq === "number") {
+        sinceSeqRef.current = payload.next_seq;
         setSinceSeq(payload.next_seq);
       }
       setStatus((prev) => ({
@@ -138,7 +144,7 @@ export default function DrawLab() {
     } catch (_e) {
       // noop
     }
-  }, [applyCommand, sessionId, sinceSeq, stopLoopTimers]);
+  }, [applyCommand, stopLoopTimers]);
 
   const startSession = useCallback(async () => {
     setError(null);
@@ -156,6 +162,8 @@ export default function DrawLab() {
       })) as SessionState;
       const sid = state.session_id ? String(state.session_id) : null;
       if (!sid) throw new Error("session_id missing");
+      sessionIdRef.current = sid;
+      sinceSeqRef.current = 0;
       setSessionId(sid);
       setStatus(state);
       setRunning(Boolean(state.active));

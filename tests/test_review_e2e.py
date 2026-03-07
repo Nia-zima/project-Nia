@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 import requests
 
+from backend.core.config import settings
+
 BASE_URL = os.getenv("E2E_BASE_URL")
 
 pytestmark = pytest.mark.e2e
@@ -67,7 +69,7 @@ def _collect_hold_request_token(thread_id: str, stream_id: str) -> str:
 
 
 def _get_commit_log_line(thread_id: str) -> str | None:
-    db_path = Path("data") / "nia.sqlite3"
+    db_path = Path(settings.DB_PATH)
     if not db_path.exists():
         return None
     for _ in range(20):
@@ -89,7 +91,7 @@ def _get_commit_log_line(thread_id: str) -> str | None:
 
 
 def _get_commit_log_count(thread_id: str) -> int:
-    db_path = Path("data") / "nia.sqlite3"
+    db_path = Path(settings.DB_PATH)
     if not db_path.exists():
         return 0
     with sqlite3.connect(db_path) as conn:

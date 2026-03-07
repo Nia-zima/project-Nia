@@ -18,10 +18,8 @@ _TAG_ACTION = re.compile(
 _TAG_CHAT = re.compile(r"<CHAT>(.*?)</CHAT>", re.DOTALL)
 _TAG_IDLE = re.compile(r"<IDLE\s*(?:reason=[\"']([^\"']*)[\"'])?\s*/>", re.DOTALL)
 
-# Strip Qwen3 internal think blocks (lowercase only — preserve uppercase <THINK>)
-_THINK_BLOCK_RE = re.compile(r"<think>[\s\S]*?</think>")
-
-_NO_THINK_SUFFIX = "\n/no_think"
+from backend.core.model_adapter import prompt_suffix as _no_think_suffix  # noqa: E402
+from backend.core.model_adapter import strip_think_blocks as _strip_think_blocks  # noqa: E402
 
 BRAIN_SYSTEM_PROMPT = """\
 あなたはニア。ゲームをプレイしている。
@@ -92,13 +90,13 @@ def build_brain_prompt(
         recent_actions=recent_actions or "(なし)",
         goals=goals or "(特になし)",
     )
-    return system + _NO_THINK_SUFFIX, user
+    return system + _no_think_suffix(), user
 
 
 def parse_brain_response(text: str) -> dict[str, Any]:
     """Parse the Brain LLM response into a structured action dict."""
-    # Strip Qwen3 think blocks
-    text = _THINK_BLOCK_RE.sub("", text).strip()
+    # Strip think blocks (model-adapter)
+    text = _strip_think_blocks(text)
 
     think_m = _TAG_THINK.search(text)
     thinking = think_m.group(1).strip() if think_m else ""

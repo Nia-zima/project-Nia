@@ -12,13 +12,12 @@ from unittest.mock import patch, AsyncMock, MagicMock
 # --- video_analyzer ---
 
 class TestVideoAnalyzer:
-    def test_extract_frames_missing_file(self):
+    @pytest.mark.asyncio
+    async def test_extract_frames_missing_file(self):
         """Non-existent video returns empty list."""
         from backend.services.video_analyzer import extract_frames
 
-        result = asyncio.get_event_loop().run_until_complete(
-            extract_frames("/nonexistent/video.mp4")
-        )
+        result = await extract_frames("/nonexistent/video.mp4")
         assert result == []
 
     @pytest.mark.asyncio

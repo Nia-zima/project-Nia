@@ -8,8 +8,6 @@ import uuid
 
 import pytest
 
-os.environ.setdefault("RETENTION_PROFILE", "fast")
-
 from backend.core.db import get_conn, init_schema
 
 
@@ -22,6 +20,7 @@ def _setup_db():
         conn.execute("DELETE FROM memory_index")
         conn.execute("DELETE FROM memory_events")
         conn.execute("DELETE FROM semantic_memories")
+        conn.execute("DELETE FROM daily_reflections")
         conn.execute("DELETE FROM telemetry_kv")
         conn.commit()
     finally:
@@ -85,11 +84,11 @@ class TestExtractSemanticsFromEpisodic:
         _insert_episodic_event("t1", "Pythonでよく開発してる", "いいね")
 
         # Mock call_llm to return structured facts
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             return '[{"content": "Originはコーヒーが好き"}, {"content": "OriginはPythonで開発している"}]'
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic
@@ -113,11 +112,11 @@ class TestExtractSemanticsFromEpisodic:
     @pytest.mark.asyncio
     async def test_no_extraction_when_no_events(self, monkeypatch):
         """No episodic events → 0 semantic memories."""
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             raise AssertionError("LLM should not be called")
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic
@@ -138,7 +137,7 @@ class TestExtractSemanticsFromEpisodic:
         # New event (after last sleep)
         _insert_episodic_event("t1", "俺は猫が好き", "かわいいよね", created_at=new_ts)
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             # Only new conversation should be in the prompt
             prompt_text = messages[0]["content"]
             assert "猫が好き" in prompt_text
@@ -146,7 +145,7 @@ class TestExtractSemanticsFromEpisodic:
             return '[{"content": "Originは猫が好き"}]'
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic
@@ -159,11 +158,11 @@ class TestExtractSemanticsFromEpisodic:
         """LLM returns [] → no semantic memories created."""
         _insert_episodic_event("t1", "うん", "うん")
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             return "[]"
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic
@@ -176,11 +175,11 @@ class TestExtractSemanticsFromEpisodic:
         """LLM returns garbage → graceful fallback, no crash."""
         _insert_episodic_event("t1", "テスト", "テスト")
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             return "これはJSONではありません"
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic
@@ -193,13 +192,13 @@ class TestExtractSemanticsFromEpisodic:
         """Max 5 semantic memories per thread per extraction."""
         _insert_episodic_event("t1", "たくさん情報", "了解")
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             return json.dumps([
                 {"content": f"fact_{i}"} for i in range(10)
             ])
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic
@@ -215,13 +214,13 @@ class TestExtractSemanticsFromEpisodic:
 
         call_count = 0
 
-        async def mock_llm(messages):
+        async def mock_llm(messages, **kwargs):
             nonlocal call_count
             call_count += 1
             return '[{"content": "テスト事実"}]'
 
         monkeypatch.setattr(
-            "backend.scripts.sleep_cycle.call_llm", mock_llm
+            "backend.scripts.sleep_cycle.extraction.call_llm", mock_llm
         )
 
         from backend.scripts.sleep_cycle import _extract_semantics_from_episodic

@@ -9,7 +9,11 @@ import math
 from typing import Optional
 
 from backend.core.logger import logger
-from backend.core.db import get_conn  # Centralized DB Access
+from backend.core.db import managed_conn  # Centralized DB Access
+from backend.services.memory.capture_event import (
+    build_capture_recorded_payload,
+    find_existing_capture_event_id,
+)
 
 import threading
 
@@ -28,8 +32,7 @@ class ChatHistoryStore:
         since_ts = time.time() - (since_hours * 60 * 60)
 
         def _sync() -> list[str]:
-            conn = get_conn()
-            try:
+            with managed_conn() as conn:
                 conn.row_factory = None
                 if self._legacy_tables_enabled():
                     rows = conn.execute(
@@ -55,8 +58,6 @@ class ChatHistoryStore:
                         """,
                         (float(since_ts), int(limit)),
                     ).fetchall()
-            finally:
-                conn.close()
             return [str(r[0]) for r in rows if r and r[0]]
 
         return await asyncio.to_thread(_sync)
@@ -79,20 +80,18 @@ class ChatHistoryStore:
         attachments_json: str,
         created_at: int,
     ) -> str:
-        conn = get_conn()
-        try:
-            msg_id = str(uuid.uuid4())
-            conn.execute(
-                "INSERT INTO messages (id, created_at, thread_id, turn_id, role, content_json, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (msg_id, created_at, thread_id, turn_id, role, content_json, attachments_json),
-            )
-            # get_conn implies autocommit (isolation_level=None), safety checks:
-            return msg_id
-        except Exception as e:
-            logger.error(f"[ChatHistory] Insert failed: {e}")
-            raise
-        finally:
-            conn.close()
+        with managed_conn() as conn:
+            try:
+                msg_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO messages (id, created_at, thread_id, turn_id, role, content_json, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (msg_id, created_at, thread_id, turn_id, role, content_json, attachments_json),
+                )
+                # managed_conn implies autocommit (isolation_level=None), safety checks:
+                return msg_id
+            except Exception as e:
+                logger.error(f"[ChatHistory] Insert failed: {e}")
+                raise
 
     async def append_message(
         self,
@@ -118,8 +117,7 @@ class ChatHistoryStore:
         return await asyncio.to_thread(self._read_sync, thread_id, limit)
 
     def _read_sync(self, thread_id: str, limit_turns: int) -> list[dict]:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             # Stable sort: turn (int), time, role priority, and tie-breaker ID
             # Subquery gets the latest N unique turn_ids for this thread.
             rows = conn.execute(
@@ -127,22 +125,20 @@ class ChatHistoryStore:
                 SELECT id, created_at, turn_id, role, content_json, attachments_json
                 FROM messages
                 WHERE thread_id = ? AND turn_id IN (
-                    SELECT DISTINCT turn_id 
-                    FROM messages 
-                    WHERE thread_id = ? 
-                    ORDER BY CAST(turn_id AS INTEGER) DESC 
+                    SELECT DISTINCT turn_id
+                    FROM messages
+                    WHERE thread_id = ?
+                    ORDER BY CAST(turn_id AS INTEGER) DESC
                     LIMIT ?
                 )
-                ORDER BY 
-                    CAST(turn_id AS INTEGER) ASC, 
-                    created_at ASC, 
-                    CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC, 
+                ORDER BY
+                    CAST(turn_id AS INTEGER) ASC,
+                    created_at ASC,
+                    CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 ELSE 2 END ASC,
                     id ASC
                 """,
                 (thread_id, thread_id, limit_turns),
             ).fetchall()
-        finally:
-            conn.close()
 
         from backend.services.speech_sanitizer import finalize_output
         out = []
@@ -168,8 +164,7 @@ class ChatHistoryStore:
         return out
 
     def _get_max_turn_sync(self, thread_id: str) -> int:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             cur = conn.execute("SELECT MAX(CAST(turn_id AS INTEGER)) FROM messages WHERE thread_id=?", (thread_id,))
             val = cur.fetchone()[0]
             if val is None:
@@ -178,71 +173,73 @@ class ChatHistoryStore:
                 return int(val)
             except (TypeError, ValueError):
                 return 0
-        finally:
-            conn.close()
 
     async def get_next_turn_id(self, thread_id: str) -> int:
         current_max = await asyncio.to_thread(self._get_max_turn_sync, thread_id)
         return current_max + 1
 
     def _clear_thread_sync(self, thread_id: str) -> None:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             conn.execute("DELETE FROM messages WHERE thread_id=?", (thread_id,))
-        finally:
-            conn.close()
 
     async def clear_thread(self, thread_id: str) -> None:
         await asyncio.to_thread(self._clear_thread_sync, thread_id)
 
     def _insert_capture_sync(self, capture: dict) -> str:
-        conn = get_conn()
-        try:
-            cap_id = capture.get("id") or str(uuid.uuid4())
-            capture["id"] = cap_id
-            cols = [
-                "id", "thread_id", "created_at", "raw_text", "state_tag",
-                "emotion_tags", "stream_id", "message_id", "origin_message_id", "surprise", "keywords", "entities", "tags", "refs",
-                "retention", "stage", "text_hash",
-            ]
-            placeholders = ",".join(["?"] * len(cols))
-            q = f"INSERT OR IGNORE INTO episodic_captures ({','.join(cols)}) VALUES ({placeholders})"
-            cursor = conn.execute(q, [capture.get(c) for c in cols])
-            
-            if cursor.rowcount == 0:
-                logger.info("[CAPTURE_DEDUP] ignored thread_id=%s message_id=%s (already exists) stream_id=%s", 
-                            capture.get("thread_id"), capture.get("message_id"), capture.get("stream_id"))
-                # If ignored, we return the existing ID if possible? 
-                # For now just return the cap_id we generated, though it won't be in DB.
-            
-            return cap_id
-        except Exception as e:
-            logger.error(f"[ChatHistory] capture insert failed: {e}")
-            raise
-        finally:
-            conn.close()
+        with managed_conn() as conn:
+            try:
+                cap_id = capture.get("id") or str(uuid.uuid4())
+                capture["id"] = cap_id
+                cols = [
+                    "id", "thread_id", "created_at", "raw_text", "state_tag",
+                    "emotion_tags", "stream_id", "message_id", "origin_message_id", "surprise", "keywords", "entities", "tags", "refs",
+                    "retention", "stage", "text_hash",
+                ]
+                placeholders = ",".join(["?"] * len(cols))
+                q = f"INSERT OR IGNORE INTO episodic_captures ({','.join(cols)}) VALUES ({placeholders})"
+                cursor = conn.execute(q, [capture.get(c) for c in cols])
+
+                if cursor.rowcount == 0:
+                    logger.info("[CAPTURE_DEDUP] ignored thread_id=%s message_id=%s (already exists) stream_id=%s",
+                                capture.get("thread_id"), capture.get("message_id"), capture.get("stream_id"))
+                    # If ignored, we return the existing ID if possible?
+                    # For now just return the cap_id we generated, though it won't be in DB.
+
+                return cap_id
+            except Exception as e:
+                logger.error(f"[ChatHistory] capture insert failed: {e}")
+                raise
 
     async def insert_capture(self, capture: dict) -> str | None:
         if getattr(settings, "LEGACY_MEMORY_READ_ONLY", False) or not self._legacy_tables_enabled():
             try:
                 from backend.services.memory import memory_service
-                payload = {
-                    "legacy_capture_id": capture.get("id"),
-                    "raw_text": capture.get("raw_text") or "",
-                    "state_tag": capture.get("state_tag"),
-                    "tags": self._normalize_refs(capture.get("tags")),
-                    "refs": self._normalize_refs(capture.get("refs")),
-                    "retention": float(capture.get("retention") or 0.0),
-                    "stage": capture.get("stage") or "capture",
-                    "scope": str(capture.get("stage") or "capture"),
-                }
+                thread_id = str(capture.get("thread_id") or "default_thread")
+                message_id = str(capture.get("message_id") or capture.get("id") or "") or None
+                existing_event_id = await asyncio.to_thread(
+                    lambda: find_existing_capture_event_id(
+                        thread_id=thread_id,
+                        text_hash=str(capture.get("text_hash") or "") or None,
+                        message_id=message_id,
+                    )
+                )
+                if existing_event_id:
+                    logger.info(
+                        "[CAPTURE_DEDUP] event path thread_id=%s message_id=%s existing_event_id=%s",
+                        thread_id,
+                        message_id,
+                        existing_event_id,
+                    )
+                    return existing_event_id
+
+                payload = build_capture_recorded_payload(capture)
                 event_id = await asyncio.to_thread(
                     lambda: memory_service.append_event(
-                        thread_id=str(capture.get("thread_id") or "default_thread"),
+                        thread_id=thread_id,
                         event_type="capture_recorded",
                         payload=payload,
                         turn_id=str(capture.get("origin_message_id") or capture.get("message_id") or "") or None,
-                        message_id=str(capture.get("message_id") or capture.get("id") or "") or None,
+                        message_id=message_id,
                         created_at=float(capture.get("created_at") or time.time()),
                     )
                 )
@@ -260,8 +257,7 @@ class ChatHistoryStore:
     def _get_long_term_captures_sync(self, thread_id: Optional[str] = None, limit: int = 500) -> list[dict]:
         if not self._legacy_tables_enabled():
             return []
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             if thread_id:
                 rows = conn.execute(
                     """
@@ -286,8 +282,6 @@ class ChatHistoryStore:
                     (limit,),
                 ).fetchall()
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     async def get_long_term_captures(self, thread_id: Optional[str] = None, limit: int = 500) -> list[dict]:
         return await asyncio.to_thread(self._get_long_term_captures_sync, thread_id, limit)
@@ -297,8 +291,7 @@ class ChatHistoryStore:
             return []
         if not self._legacy_tables_enabled():
             return []
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             placeholders = ",".join(["?"] * len(capture_ids))
             q = (
                 "SELECT l.capture_id, l.retention AS seed, c.created_at, c.state_tag, c.raw_text, c.refs "
@@ -308,8 +301,6 @@ class ChatHistoryStore:
             )
             rows = conn.execute(q, [thread_id, *capture_ids]).fetchall()
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     async def get_long_term_captures_by_ids(self, thread_id: str, capture_ids: list[str]) -> list[dict]:
         return await asyncio.to_thread(self._get_long_term_captures_by_ids_sync, thread_id, capture_ids)
@@ -317,8 +308,7 @@ class ChatHistoryStore:
     def _get_recent_captures_sync(self, thread_id: str, limit: int = 2, window_hours: int = 24) -> list[dict]:
         if not self._legacy_tables_enabled():
             return []
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             now = time.time()
             rows = conn.execute(
                 """
@@ -331,8 +321,6 @@ class ChatHistoryStore:
                 (thread_id, now - window_hours * 3600, limit),
             ).fetchall()
             return [dict(r) for r in rows]
-        finally:
-            conn.close()
 
     async def get_recent_captures(self, thread_id: str, limit: int = 2, window_hours: int = 24) -> list[dict]:
         return await asyncio.to_thread(self._get_recent_captures_sync, thread_id, limit, window_hours)
@@ -502,14 +490,11 @@ class ChatHistoryStore:
     def _update_capture_retention_sync(self, capture_id: str, retention: float, stage: str) -> None:
         if not self._legacy_tables_enabled():
             return
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             conn.execute(
                 "UPDATE episodic_captures SET retention=?, stage=? WHERE id=?",
                 (float(retention), stage, capture_id),
             )
-        finally:
-            conn.close()
 
     async def update_capture_retention(self, capture_id: str, retention: float, stage: str) -> None:
         await asyncio.to_thread(self._update_capture_retention_sync, capture_id, retention, stage)
@@ -518,7 +503,7 @@ class ChatHistoryStore:
         if not self._legacy_tables_enabled():
             logger.info("[RETENTION_SWEEP] skipped (LEGACY_MEMORY_TABLES_ENABLED=0) thread_id=%s", thread_id)
             return
-        log = self.logger if hasattr(self, 'logger') else __import__('logging').getLogger('AI_Buddy')
+        log = self.logger if hasattr(self, 'logger') else __import__('logging').getLogger('nia')
         cfg = get_retention_config()
         # modeガード
         if mode not in ("light", "full"):
@@ -545,133 +530,131 @@ class ChatHistoryStore:
             cfg.half_life_days.get("DEFAULT", 0.0),
             cfg.grace_days,
         )
-        conn = get_conn()
-        try:
-            from backend.services.memory_judge import effective_retention
+        with managed_conn() as conn:
+            try:
+                from backend.services.memory_judge import effective_retention
 
-            if mode == "full":
-                rows = conn.execute(
-                    "SELECT id, thread_id, state_tag, retention, created_at, stage, raw_text "
-                    "FROM episodic_captures WHERE thread_id=? ORDER BY created_at DESC",
-                    (thread_id,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id, thread_id, state_tag, retention, created_at, stage, raw_text "
-                    "FROM episodic_captures WHERE thread_id=? ORDER BY created_at DESC LIMIT ?",
-                    (thread_id, limit),
-                ).fetchall()
-            log.info("[RETENTION_SWEEP] rows=%d", len(rows))
+                if mode == "full":
+                    rows = conn.execute(
+                        "SELECT id, thread_id, state_tag, retention, created_at, stage, raw_text "
+                        "FROM episodic_captures WHERE thread_id=? ORDER BY created_at DESC",
+                        (thread_id,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT id, thread_id, state_tag, retention, created_at, stage, raw_text "
+                        "FROM episodic_captures WHERE thread_id=? ORDER BY created_at DESC LIMIT ?",
+                        (thread_id, limit),
+                    ).fetchall()
+                log.info("[RETENTION_SWEEP] rows=%d", len(rows))
 
-            promoted_n = 0
-            shadow_n = 0
-            background_n = 0
-            kept_capture_n = 0
+                promoted_n = 0
+                shadow_n = 0
+                background_n = 0
+                kept_capture_n = 0
 
-            now = time.time()
-            for row in rows:
-                try:
-                    r = dict(row)  # sqlite3.Row -> dict
-                    cap_id = str(r.get("id") or "")
-                    thread_id = str(r.get("thread_id") or "")
-                    raw_text = r.get("raw_text") or ""
-                    created_at = float(r.get("created_at") or 0.0)
-                    state_tag = str(r.get("state_tag") or "").upper()
-                    stage = str(r.get("stage") or "capture")
-                    seed_retention = float(r.get("retention") or 0.0)
+                now = time.time()
+                for row in rows:
+                    try:
+                        r = dict(row)  # sqlite3.Row -> dict
+                        cap_id = str(r.get("id") or "")
+                        thread_id = str(r.get("thread_id") or "")
+                        raw_text = r.get("raw_text") or ""
+                        created_at = float(r.get("created_at") or 0.0)
+                        state_tag = str(r.get("state_tag") or "").upper()
+                        stage = str(r.get("stage") or "capture")
+                        seed_retention = float(r.get("retention") or 0.0)
 
-                    eff = effective_retention(
-                        seed_retention,
-                        created_at=created_at,
-                        state_tag=state_tag,
-                        now_ts=now,
-                    )
-                    age_days = (now - created_at) / 86400 if created_at else 0.0
-
-                    cfg = get_retention_config()
-                    promote_eff_th = cfg.th_promote
-                    background_eff_th = cfg.th_background
-                    new_stage = stage
-                    should_promote = (eff >= promote_eff_th)
-                    if stage != "long_term" and should_promote:
-                        new_stage = "long_term"
-                    elif stage != "long_term" and eff < background_eff_th:
-                        new_stage = "shadow" if state_tag == "DISSONANCE" else "background"
-                    elif stage != "long_term" and state_tag == "DISSONANCE":
-                        new_stage = "shadow"
-
-                    log.debug(
-                        "[RETENTION_SWEEP] cap=%s seed=%.3f eff=%.3f tag=%s age_days=%.2f stage=%s",
-                        cap_id, seed_retention, eff, state_tag, age_days, stage
-                    )
-
-                    if stage != "long_term" and new_stage == "long_term":
-                        promoted_n += 1
-                        conn.execute(
-                            """
-                            INSERT INTO long_term_memories (id, capture_id, thread_id, created_at, retention)
-                            VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(capture_id) DO UPDATE SET retention=excluded.retention
-                            """,
-                            (str(uuid.uuid4()), cap_id, thread_id, now, seed_retention),
+                        eff = effective_retention(
+                            seed_retention,
+                            created_at=created_at,
+                            state_tag=state_tag,
+                            now_ts=now,
                         )
-                        try:
-                            from backend.services.memory_manager import memory_manager
-                            vs = memory_manager.vector_store
-                            if vs and getattr(vs, "is_active", False):
-                                target = vs._get_collection("episodic")
-                                if target is None:
-                                    log.warning("[VECTOR_PROMOTE] episodic collection missing; skip cap_id=%s", cap_id)
-                                else:
-                                    meta = {
-                                        "capture_id": cap_id,
-                                        "thread_id": thread_id,
-                                        "stage": "long_term",
-                                        "state_tag": state_tag,
-                                        "created_at": created_at,
-                                    }
-                                    target.upsert(
-                                        ids=[cap_id],
-                                        documents=[raw_text],
-                                        metadatas=[meta],
-                                    )
-                                    log.info("[VECTOR_PROMOTE] target=%s cap_id=%s", getattr(target, "name", "?"), cap_id)
-                        except Exception:
-                            log.exception("[VECTOR_PROMOTE] upsert failed cap_id=%s (SQL is source of truth)", cap_id)
+                        age_days = (now - created_at) / 86400 if created_at else 0.0
+
+                        cfg = get_retention_config()
+                        promote_eff_th = cfg.th_promote
+                        background_eff_th = cfg.th_background
+                        new_stage = stage
+                        should_promote = (eff >= promote_eff_th)
+                        if stage != "long_term" and should_promote:
+                            new_stage = "long_term"
+                        elif stage != "long_term" and eff < background_eff_th:
+                            new_stage = "shadow" if state_tag == "DISSONANCE" else "background"
+                        elif stage != "long_term" and state_tag == "DISSONANCE":
+                            new_stage = "shadow"
+
+                        log.debug(
+                            "[RETENTION_SWEEP] cap=%s seed=%.3f eff=%.3f tag=%s age_days=%.2f stage=%s",
+                            cap_id, seed_retention, eff, state_tag, age_days, stage
+                        )
+
+                        if stage != "long_term" and new_stage == "long_term":
+                            promoted_n += 1
+                            conn.execute(
+                                """
+                                INSERT INTO long_term_memories (id, capture_id, thread_id, created_at, retention)
+                                VALUES (?, ?, ?, ?, ?)
+                                ON CONFLICT(capture_id) DO UPDATE SET retention=excluded.retention
+                                """,
+                                (str(uuid.uuid4()), cap_id, thread_id, now, seed_retention),
+                            )
                             try:
-                                self._enqueue_vector_sync_sync(cap_id, thread_id, "long_term")
+                                from backend.services.memory_manager import memory_manager
+                                vs = memory_manager.vector_store
+                                if vs and getattr(vs, "is_active", False):
+                                    target = vs._get_collection("episodic")
+                                    if target is None:
+                                        log.warning("[VECTOR_PROMOTE] episodic collection missing; skip cap_id=%s", cap_id)
+                                    else:
+                                        meta = {
+                                            "capture_id": cap_id,
+                                            "thread_id": thread_id,
+                                            "stage": "long_term",
+                                            "state_tag": state_tag,
+                                            "created_at": created_at,
+                                        }
+                                        target.upsert(
+                                            ids=[cap_id],
+                                            documents=[raw_text],
+                                            metadatas=[meta],
+                                        )
+                                        log.info("[VECTOR_PROMOTE] target=%s cap_id=%s", getattr(target, "name", "?"), cap_id)
                             except Exception:
-                                log.exception("[VECTOR_PROMOTE] enqueue failed cap_id=%s", cap_id)
-                        log.info(
-                            "[RETENTION_PROMOTE] cap=%s tag=%s seed=%.3f eff=%.3f old_stage=%s -> new_stage=%s",
-                            cap_id, state_tag, seed_retention, eff, stage, new_stage
-                        )
-                    if new_stage == "shadow":
-                        shadow_n += 1
-                    elif new_stage == "background":
-                        background_n += 1
-                    elif new_stage == "capture":
-                        kept_capture_n += 1
+                                log.exception("[VECTOR_PROMOTE] upsert failed cap_id=%s (SQL is source of truth)", cap_id)
+                                try:
+                                    self._enqueue_vector_sync_sync(cap_id, thread_id, "long_term")
+                                except Exception:
+                                    log.exception("[VECTOR_PROMOTE] enqueue failed cap_id=%s", cap_id)
+                            log.info(
+                                "[RETENTION_PROMOTE] cap=%s tag=%s seed=%.3f eff=%.3f old_stage=%s -> new_stage=%s",
+                                cap_id, state_tag, seed_retention, eff, stage, new_stage
+                            )
+                        if new_stage == "shadow":
+                            shadow_n += 1
+                        elif new_stage == "background":
+                            background_n += 1
+                        elif new_stage == "capture":
+                            kept_capture_n += 1
 
-                    if new_stage != stage:
-                        conn.execute(
-                            "UPDATE episodic_captures SET stage=? WHERE id=?",
-                            (new_stage, cap_id),
-                        )
+                        if new_stage != stage:
+                            conn.execute(
+                                "UPDATE episodic_captures SET stage=? WHERE id=?",
+                                (new_stage, cap_id),
+                            )
 
-                except Exception:
-                    log.exception("[RETENTION_SWEEP] row failed cap=%s", r.get("id", "?"))
-                    continue
-            # ループ終了後に集計summaryログ
-            log.info(
-                "[RETENTION_SWEEP] done thread_id=%s promoted=%d shadow=%d background=%d kept=%d",
-                thread_id, promoted_n, shadow_n, background_n, kept_capture_n
-            )
-        except Exception as e:
-            log.error(f"[ChatHistory] sweep/promote failed: {e}")
-            raise
-        finally:
-            conn.close()
+                    except Exception:
+                        log.exception("[RETENTION_SWEEP] row failed cap=%s", r.get("id", "?"))
+                        continue
+                # ループ終了後に集計summaryログ
+                log.info(
+                    "[RETENTION_SWEEP] done thread_id=%s promoted=%d shadow=%d background=%d kept=%d",
+                    thread_id, promoted_n, shadow_n, background_n, kept_capture_n
+                )
+            except Exception as e:
+                log.error(f"[ChatHistory] sweep/promote failed: {e}")
+                raise
 
     async def sweep_and_promote(
         self,
@@ -708,8 +691,7 @@ class ChatHistoryStore:
         logger.info("[RETENTION_FULL] done sweep for %d threads", len(threads))
 
     def _enqueue_vector_sync_sync(self, capture_id: str, thread_id: str, stage: str) -> None:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             now = time.time()
             conn.execute(
                 """
@@ -727,8 +709,6 @@ class ChatHistoryStore:
                 """,
                 (now, capture_id, stage),
             )
-        finally:
-            conn.close()
 
     async def enqueue_vector_sync(self, capture_id: str, thread_id: str, stage: str) -> None:
         await asyncio.to_thread(self._enqueue_vector_sync_sync, capture_id, thread_id, stage)
@@ -738,8 +718,7 @@ class ChatHistoryStore:
             return 0
         from backend.services.memory_manager import memory_manager
 
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             # Prune old/over-attempted rows first
             now = time.time()
             conn.execute(
@@ -823,8 +802,6 @@ class ChatHistoryStore:
                 processed += 1
 
             return processed
-        finally:
-            conn.close()
 
     async def process_vector_sync_queue(self, limit: int = 50, max_attempts: int = 5, max_age_days: float = 7.0) -> int:
         return await asyncio.to_thread(self._process_vector_sync_queue_sync, limit, max_attempts, max_age_days)

@@ -39,13 +39,18 @@ async def analyze_video(
     if ext not in (".mp4", ".webm", ".mkv", ".avi", ".mov"):
         raise HTTPException(400, f"Unsupported video format: {ext}")
 
+    # Size check: reject before reading full body if Content-Length is available
+    max_bytes = 200 * 1024 * 1024  # 200MB
+    if file.size is not None and file.size > max_bytes:
+        raise HTTPException(status_code=413, detail="Video file too large (max 200MB)")
+
     # Save upload to temp file
     with tempfile.NamedTemporaryFile(
         suffix=ext, prefix="nia_video_", delete=False,
     ) as tmp:
         content = await file.read()
-        if len(content) > 200 * 1024 * 1024:  # 200MB limit
-            raise HTTPException(413, "Video file too large (max 200MB)")
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail="Video file too large (max 200MB)")
         tmp.write(content)
         tmp_path = tmp.name
 

@@ -1,5 +1,5 @@
 /**
- * Unified API Client for AI_Buddy frontend.
+ * Unified API Client for project-nia frontend.
  * Centralizes all fetch() calls with typed responses.
  */
 
@@ -448,10 +448,6 @@ class APIClient {
         await this.adminRequest("/system/sleep", { method: "POST" });
     }
 
-    async systemReflect(): Promise<void> {
-        await this.adminRequest("/system/reflect", { method: "POST" });
-    }
-
     // ── Draw ──
 
     async drawSessionStart(params: {
@@ -546,6 +542,16 @@ class APIClient {
             method: "POST",
             body: JSON.stringify({ review_note: reviewNote || null }),
         });
+    }
+
+    // ── Diary ──
+
+    async fetchDiaries(limit: number = 14): Promise<Array<{
+        date: string;
+        content: { text: string; mood: string; topics: string[] };
+        created_at: number;
+    }>> {
+        return this.request(`/diary/recent?limit=${limit}`);
     }
 
     // ── Twitter (X) ──

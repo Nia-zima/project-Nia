@@ -78,13 +78,30 @@ class TestBuildBrainPrompt:
         assert "attack" in system
         assert "HP: 100" in user
 
-    def test_includes_no_think_suffix(self):
+    def test_includes_no_think_suffix_for_qwen(self):
+        from unittest.mock import patch, MagicMock
         from backend.services.gaming.brain import build_brain_prompt
-        system, _ = build_brain_prompt(
-            game_state="test",
-            available_actions="- test",
-        )
-        assert "/no_think" in system
+        import backend.core.model_adapter as ma
+        # /no_think is Qwen-specific; only added when model name contains "qwen"
+        mock_settings = MagicMock(OPENAI_MODEL="qwen3-8b", REPETITION_PENALTY=1.12)
+        with patch.object(ma, "settings", mock_settings):
+            ma._cached_family = None
+            ma._cached_model_name = ""
+            system, _ = build_brain_prompt(
+                game_state="test",
+                available_actions="- test",
+            )
+            assert "/no_think" in system
+        # Non-Qwen model should NOT include /no_think
+        mock_settings2 = MagicMock(OPENAI_MODEL="gpt-oss-20b", REPETITION_PENALTY=1.12)
+        with patch.object(ma, "settings", mock_settings2):
+            ma._cached_family = None
+            ma._cached_model_name = ""
+            system, _ = build_brain_prompt(
+                game_state="test",
+                available_actions="- test",
+            )
+            assert "/no_think" not in system
 
     def test_includes_recent_actions(self):
         from backend.services.gaming.brain import build_brain_prompt

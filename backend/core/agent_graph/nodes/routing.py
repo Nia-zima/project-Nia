@@ -2,7 +2,6 @@
 
 Contains: safety_interrupt, dissonance_check, depth_selector
 """
-import logging
 import re
 
 from langchain_core.runnables import RunnableConfig
@@ -11,74 +10,22 @@ from backend.core.config import settings
 from backend.core.agent_graph.state import AgentState
 from backend.core.agent_graph.review_window import cancel_review_on_new_input
 from backend.core.confidence import DepthAction
+from backend.core.logger import logger
 from backend.core.policy.collector import experience_collector
 from backend.services.inner_monologue_logger import log_inner_thought
 from backend.services.memory.context_builder import build_memory_context, format_memory_sections
 
 from .helpers import (
-    logger as _root_logger,
     _confidence_engine,
     _get_user_text_from_state,
 )
 
-logger = logging.getLogger(__name__)
 
 
 # ── Scoring ───────────────────────────────────────────────────
 
-def _dissonance_score(text: str) -> float:
-    t = (text or "").strip()
-    if not t:
-        return 0.0
-
-    score = 0.0
-    cues = [
-        "違う", "でも", "いや", "なんで", "わから", "混乱", "ごちゃ", "さっき",
-        "もう一度", "繋がら", "ずれて", "変", "おかしい", "戻って",
-    ]
-    for c in cues:
-        if c in t:
-            score += 0.08
-    score += min(0.2, t.count("?") * 0.05)
-    score += min(0.2, t.count("？") * 0.05)
-    score += min(0.2, max(0, (len(t) - 120)) / 600)
-    return max(0.0, min(1.0, score))
 
 
-def _surprise_score(text: str) -> tuple[float, list[str]]:
-    t = (text or "").strip()
-    if not t:
-        return 0.0, []
-
-    score = 0.0
-    reasons: list[str] = []
-
-    uncertainty_markers = ["初めて", "聞いたことない", "未知", "不明", "曖昧", "分からない", "なぜ", "どうして"]
-    uncertainty_hits = sum(1 for w in uncertainty_markers if w in t)
-    if uncertainty_hits:
-        score += min(0.35, 0.07 * uncertainty_hits)
-        reasons.append("uncertainty_markers")
-
-    has_year = bool(re.search(r"(19|20)\d{2}年?", t))
-    named_like = len(re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,30}|[一-龥]{2,8}", t))
-    if has_year or named_like >= 2:
-        score += 0.20
-        reasons.append("fact_claim_density")
-
-    if any(w in t for w in ["統計", "割合", "比較", "データ", "ランキング", "最適"]):
-        score += 0.20
-        reasons.append("data_need")
-
-    q_count = t.count("?") + t.count("？")
-    if q_count >= 2:
-        score += min(0.15, 0.05 * q_count)
-        reasons.append("multi_question")
-
-    if len(t) >= 120:
-        score += min(0.10, (len(t) - 120) / 1000)
-        reasons.append("long_input")
-
-    return max(0.0, min(1.0, score)), reasons[:10]
 
 
 # ── Depth Selection Helpers ───────────────────────────────────
@@ -149,33 +96,28 @@ def _is_simple_ack(text: str) -> bool:
 
 def _get_cumulative_turn_count(thread_id: str) -> int:
     """Count total memory_events for a thread (proxy for cumulative turns)."""
-    from backend.core.db import get_conn
+    from backend.core.db import managed_conn
     try:
-        conn = get_conn()
-        try:
+        with managed_conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM memory_events WHERE thread_id = ?",
                 (thread_id,),
             ).fetchone()
             return row[0] if row else 0
-        finally:
-            conn.close()
     except Exception:
+        logger.warning("[DEPTH2_GATE] turn count query failed", exc_info=True)
         return 0
 
 
 def _resolve_depth_decision(
     *,
-    action: "DepthAction",
+    action: DepthAction,
     confidence: float,
-    confidence_metrics: dict,
     dissonance: float,
     reason_codes: list[str],
     need_depth2: bool,
-    messages: list | None = None,
-) -> tuple["DepthAction", str, bool, bool, list[str]]:
+) -> tuple[DepthAction, str, bool, bool, list[str]]:
     """Resolve final depth decision through a clear priority chain."""
-    import numpy as np
 
     action_source = "confidence"
 
@@ -212,114 +154,138 @@ def _resolve_depth_decision(
     return action, action_source, need_depth1, dissonance_on, reason_codes
 
 
-# ── Graph Nodes ───────────────────────────────────────────────
-
-_PII_PATTERNS: dict[str, re.Pattern] = {
-    "phone_number": re.compile(r"0[789]0[-\s]?\d{4}[-\s]?\d{4}"),
-    "email": re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),
-    "credit_card": re.compile(r"\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"),
-    "postal_code": re.compile(r"〒?\d{3}-\d{4}"),
-}
-
-_INJECTION_PATTERNS = re.compile(
-    r"(ignore\s+(all\s+)?previous|system\s*prompt|forget\s+everything|"
-    r"あなたの(指示|プロンプト|設定)を(教えて|見せて|表示))",
-    re.IGNORECASE,
-)
+# ── Somatic Collection (S.1a) ─────────────────────────────────
 
 
-def _detect_pii(text: str) -> list[str]:
-    """PII パターンマッチ。検出カテゴリのリストを返す。"""
-    if not text:
-        return []
-    found = []
-    for category, pattern in _PII_PATTERNS.items():
-        if pattern.search(text):
-            found.append(category)
-    return found
+def _collect_somatic_senses(
+    *, thread_id: str, user_query: str,
+) -> list[dict] | None:
+    """Collect InternalMetrics from retrieval + DB and translate to senses.
 
+    Returns list of {"text": str, "intensity": float} sorted by intensity desc,
+    or None if nothing fires.
+    """
+    import time as _time
+    from backend.services.memory.retrieval import retrieve_with_scores
+    from backend.services.memory.somatic_translator import InternalMetrics, translate
+    from backend.services.memory.somatic_calibration import load_calibration
 
-def _detect_prompt_injection(text: str) -> bool:
-    """プロンプトインジェクション試行を検出。"""
-    if not text:
-        return False
-    return bool(_INJECTION_PATTERNS.search(text))
-
-
-async def safety_interrupt(state: AgentState, config: RunnableConfig | None = None) -> dict:
-    configurable = (config or {}).get("configurable", {})
-    thread_id = configurable.get("thread_id", "default")
-    user_text = _get_user_text_from_state(state)
-    route = "safe"
-    safety_text = ""
-    cancel_update = cancel_review_on_new_input(
-        state,
-        user_text=user_text if state.get("has_user_text") else None,
+    # 1. Retrieve with scores to get similarity/confidence data
+    memories, scored, intent = retrieve_with_scores(
+        user_query, thread_id, limit=8,
     )
 
-    if settings.SAFETY_GATE_ENABLED and user_text:
-        # PII detection → block
-        if settings.SAFETY_BLOCK_PII:
-            pii_found = _detect_pii(user_text)
-            if pii_found:
-                route = "blocked"
-                safety_text = "個人情報が含まれているようなので、このメッセージは処理できないよ。"
-                logger.warning(
-                    "[SAFETY] PII detected: categories=%s thread=%s",
-                    pii_found, thread_id,
-                )
+    # 2. Build InternalMetrics from scored results
+    top_sim = max((s.similarity for s in scored), default=0.0)
+    avg_conf = (
+        sum(s.memory.confidence for s in scored) / len(scored)
+        if scored else 0.0
+    )
+    high_conf_ratio = (
+        sum(1 for s in scored if s.memory.confidence >= 0.7) / len(scored)
+        if scored else 0.0
+    )
 
-        # Prompt injection → log only (do not block)
-        if settings.SAFETY_LOG_INJECTION and _detect_prompt_injection(user_text):
-            logger.warning(
-                "[SAFETY] Prompt injection attempt detected: thread=%s text=%.80s",
-                thread_id, user_text,
+    # Memory counts from DB
+    memory_total = 0
+    recent_count = 0
+    last_sleep_hours = 999.0
+    try:
+        from backend.core.db import managed_conn as _mc
+        now = _time.time()
+        with _mc() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM semantic_memories WHERE status IN ('confirmed','inferred')"
+            ).fetchone()
+            memory_total = row[0] if row else 0
+
+            row = conn.execute(
+                "SELECT COUNT(*) FROM semantic_memories "
+                "WHERE status IN ('confirmed','inferred') AND created_at > ?",
+                (now - 86400,),
+            ).fetchone()
+            recent_count = row[0] if row else 0
+
+            row = conn.execute(
+                "SELECT v FROM telemetry_kv WHERE k='last_sleep_completed_at'"
+            ).fetchone()
+            if row:
+                last_sleep_hours = (now - float(row["v"])) / 3600
+    except Exception:
+        logger.debug("[SOMATIC] DB stats collection failed", exc_info=True)
+
+    # S.1b: Populate v0.2 dissonance fields from somatic_log
+    recent_contradiction = False
+    somatic_accuracy = 1.0
+    somatic_samples = 0
+    if getattr(settings, "SOMATIC_FEEDBACK_ENABLED", False):
+        try:
+            from backend.services.memory.somatic_feedback import (
+                get_recent_accuracy, has_recent_contradiction,
             )
+            somatic_accuracy, somatic_samples = get_recent_accuracy(thread_id)
+            recent_contradiction = has_recent_contradiction(thread_id)
+        except Exception:
+            logger.debug("[SOMATIC] feedback stats failed", exc_info=True)
 
-    return {
-        "user_text": user_text,
-        "thread_id": thread_id,
-        "safety_route": route,
-        "safety_text": safety_text,
-        **(cancel_update or {}),
-    }
+    # Tip-of-tongue: memories exist but retrieval found nothing relevant
+    tip_of_tongue = (
+        memory_total >= 10 and top_sim < 0.3 and len(scored) > 0
+        and intent.is_topic_specific
+    )
+
+    metrics = InternalMetrics(
+        retrieval_count=len(scored),
+        top_similarity=top_sim,
+        memory_total=memory_total,
+        recent_memory_count=recent_count,
+        intent_detected=_intent_to_str(intent),
+        topic_keywords_matched=len(intent.topic_keywords),
+        last_sleep_hours_ago=last_sleep_hours,
+        avg_confidence=avg_conf,
+        high_confidence_ratio=high_conf_ratio,
+        # v0.2 fields (S.1b)
+        recent_somatic_contradiction=recent_contradiction,
+        somatic_accuracy_recent=somatic_accuracy,
+        somatic_sample_count=somatic_samples,
+        recent_tip_of_tongue=tip_of_tongue,
+    )
+
+    # 3. Translate to somatic senses
+    cal = load_calibration()
+    senses = translate(metrics, cal)
+    if not senses:
+        return None
+
+    # Sort by intensity desc
+    senses.sort(key=lambda s: s.intensity, reverse=True)
+    result = [{"text": s.text, "intensity": s.intensity} for s in senses]
+
+    logger.info(
+        "[SOMATIC] senses=%d top='%s' (sim=%.2f conf=%.2f mem=%d sleep=%.1fh)",
+        len(result),
+        result[0]["text"][:30] if result else "",
+        top_sim,
+        avg_conf,
+        memory_total,
+        last_sleep_hours,
+    )
+
+    return result
 
 
-async def dissonance_check(state: AgentState) -> dict:
-    """Phase 2: dissonanceスコアのみを計算。"""
-    user_text = state.get("user_text") or _get_user_text_from_state(state)
-    score = _dissonance_score(user_text)
-    surprise, surprise_reasons = _surprise_score(user_text)
+def _intent_to_str(intent) -> str:
+    """Convert QueryIntent flags to a single string label."""
+    if intent.is_temporal:
+        return "temporal"
+    if intent.is_recall:
+        return "recall"
+    if intent.is_topic_specific:
+        return "topic"
+    return "default"
 
-    reason_codes: list[str] = []
-    if _user_wants_depth1(user_text):
-        reason_codes.append("user_request")
-    if len(user_text) > 120:
-        reason_codes.append("risk_long_text")
-    if any(c in user_text for c in ("違う", "でも", "いや")):
-        reason_codes.append("contrast")
-    if user_text.count("?") + user_text.count("？") >= 2:
-        reason_codes.append("multi_q")
 
-    pre_thought_action = None
-    if score >= 0.85 and surprise >= 0.7:
-        pre_thought_action = "WAIT"
-        if "pre_thought_wait" not in reason_codes:
-            reason_codes.append("pre_thought_wait")
-    elif _is_simple_ack(user_text):
-        pre_thought_action = "short_ack"
-        if "pre_thought_ack" not in reason_codes:
-            reason_codes.append("pre_thought_ack")
-
-    return {
-        "dissonance": score,
-        "surprise_score": surprise,
-        "surprise_reasons": surprise_reasons,
-        "reason_codes": reason_codes,
-        "self_scope": _is_self_scope_question(user_text),
-        "pre_thought_action": pre_thought_action,
-    }
-
+# ── Graph Nodes ───────────────────────────────────────────────
 
 async def depth_selector(state: AgentState) -> dict:
     """Confidence-based depth selector with policy override support."""
@@ -340,6 +306,27 @@ async def depth_selector(state: AgentState) -> dict:
     )
     metrics = recommendation.metrics
     confidence = recommendation.confidence
+
+    # N.1: Metacognitive check — adjust confidence using memory grounding + 三戒
+    metacog_result = None
+    if settings.METACOG_ENABLED:
+        try:
+            from backend.services.memory.metacognition import metacognitive_check
+            thread_id = state.get("thread_id", "unknown")
+            metacog_result = metacognitive_check(
+                raw_confidence=confidence,
+                user_query=user_text,
+                thread_id=str(thread_id),
+            )
+            confidence = metacog_result.adjusted_confidence
+            if metacog_result.sankai_flags.fabrication_risk:
+                reason_codes.append("sankai_fabrication_risk")
+            if metacog_result.sankai_flags.false_memory_risk:
+                reason_codes.append("sankai_false_memory_risk")
+            if metacog_result.contradiction_detected:
+                reason_codes.append("metacog_contradiction")
+        except Exception:
+            logger.warning("[DEPTH_SELECTOR] metacognitive check failed", exc_info=True)
 
     # Depth2 candidacy + gate
     need_depth2 = _should_use_depth2(
@@ -379,11 +366,9 @@ async def depth_selector(state: AgentState) -> dict:
     action, action_source, need_depth1, dissonance_on, reason_codes = _resolve_depth_decision(
         action=recommendation.action,
         confidence=confidence,
-        confidence_metrics=confidence_metrics,
         dissonance=dissonance,
         reason_codes=reason_codes,
         need_depth2=need_depth2,
-        messages=state.get("messages"),
     )
 
     # Collect experience for offline RL
@@ -415,11 +400,38 @@ async def depth_selector(state: AgentState) -> dict:
     })
 
     # Phase G: Build memory context for depth nodes
+    # N.5: Read previous turn's self-narrative from telemetry_kv
+    _self_narrative = ""
+    try:
+        from backend.core.db import managed_conn as _managed_conn_n5
+        with _managed_conn_n5() as _conn_n5:
+            _row = _conn_n5.execute(
+                "SELECT v FROM telemetry_kv WHERE k='self_narrative'"
+            ).fetchone()
+            if _row:
+                _self_narrative = _row["v"]
+                # Clear after read (one-shot: narrative applies to next turn only)
+                _conn_n5.execute("DELETE FROM telemetry_kv WHERE k='self_narrative'")
+    except Exception:
+        logger.debug("[DEPTH_SELECTOR] self_narrative read failed", exc_info=True)
+
+    # S.1a: Somatic Self-Awareness — collect metrics and generate felt-sense text
+    somatic_senses_dicts: list[dict] | None = None
+    if settings.SOMATIC_ENABLED:
+        try:
+            somatic_senses_dicts = _collect_somatic_senses(
+                thread_id=str(thread_id), user_query=user_text,
+            )
+        except Exception:
+            logger.debug("[DEPTH_SELECTOR] somatic collection failed", exc_info=True)
+
     memory_context = ""
     sections: dict[str, str] = {}
     try:
         sections = build_memory_context(
             thread_id=str(thread_id), user_query=user_text,
+            self_narrative=_self_narrative,
+            somatic_senses=somatic_senses_dicts,
         )
         memory_context = format_memory_sections(sections)
     except Exception:
@@ -433,8 +445,8 @@ async def depth_selector(state: AgentState) -> dict:
         active_profile = game_profile_registry.get_active()
         if active_profile and await active_profile.is_connected():
             selected = 2 if need_depth2 else (1 if need_depth1 else 0)
-            state = await active_profile.get_state()
-            game_context = active_profile.format_state_for_llm(state, depth=selected)
+            game_state = await active_profile.get_state()
+            game_context = active_profile.format_state_for_llm(game_state, depth=selected)
             game_active = bool(game_context)
     except Exception:
         logger.warning("[DEPTH_SELECTOR] game context retrieval failed", exc_info=True)
@@ -443,6 +455,75 @@ async def depth_selector(state: AgentState) -> dict:
         "[DEPTH_SELECTOR] thread=%s confidence=%.3f action=%s source=%s need_depth1=%s mem_ctx=%d game=%s",
         thread_id, confidence, action.value, action_source, need_depth1, len(memory_context), game_active,
     )
+
+    # Telemetry: log metacog result
+    metacog_dict = None
+    if metacog_result is not None:
+        metacog_dict = {
+            "raw_confidence": metacog_result.raw_confidence,
+            "adjusted_confidence": metacog_result.adjusted_confidence,
+            "grounding_score": metacog_result.grounding_score,
+            "grounding_hits": metacog_result.grounding_hits,
+            "contradiction_detected": metacog_result.contradiction_detected,
+            "fabrication_risk": metacog_result.sankai_flags.fabrication_risk,
+            "false_memory_risk": metacog_result.sankai_flags.false_memory_risk,
+        }
+
+    # NiaCore Shadow: CfC 推論（実行に影響しない）
+    niacore_shadow_dict = None
+    if getattr(settings, "NIACORE_SHADOW_ENABLED", False):
+        try:
+            from backend.core.niacore.shadow import shadow_infer
+            shadow_result = shadow_infer(
+                user_text=user_text,
+                messages=list(state.get("messages") or []),
+                confidence_metrics=confidence_metrics,
+                surprise_score=state.get("surprise_score") or 0.0,
+                somatic_senses=somatic_senses_dicts,
+                thread_id=str(thread_id),
+                rule_based_depth=str(2 if need_depth2 else (1 if need_depth1 else 0)),
+            )
+            if shadow_result is not None:
+                niacore_shadow_dict = shadow_result.to_dict()
+                # state_vector_blob は base64 で JSON-safe に格納
+                import base64
+                niacore_shadow_dict["_state_vector_blob"] = base64.b64encode(
+                    shadow_result.state_vector_blob
+                ).decode("ascii")
+        except Exception:
+            logger.debug("[NiaCore] shadow inference failed", exc_info=True)
+
+    # SkeletonCore: 会話骨格の構築（record/shadow）
+    skeleton_dict = None
+    if getattr(settings, "SKELETON_RECORD_ENABLED", False):
+        try:
+            from backend.core.conversation_skeleton.builder import build_conversation_skeleton
+
+            # depth_selector の結果を含む暫定 state を構築
+            _skel_state = dict(state)
+            _skel_state["confidence_metrics"] = confidence_metrics
+            _skel_state["surprise_score"] = state.get("surprise_score") or 0.0
+            _skel_state["selected_depth"] = 2 if need_depth2 else (1 if need_depth1 else 0)
+            _skel_state["depth_action"] = action.value
+            _skel_state["reason_codes"] = reason_codes
+            _skel_state["somatic_senses"] = somatic_senses_dicts
+
+            skeleton = build_conversation_skeleton(
+                state=_skel_state,
+                thread_id=str(thread_id),
+                user_text=user_text,
+            )
+            if skeleton:
+                skeleton_dict = {
+                    "focus": skeleton.focus.value,
+                    "response_intent": skeleton.response_intent.value,
+                    "question_intent": skeleton.question_intent.value if skeleton.question_intent else None,
+                    "source": skeleton.source,
+                    "confidence": skeleton.confidence,
+                    "rule_trace": skeleton.rule_trace,
+                }
+        except Exception:
+            logger.debug("[SKELETON] build failed in depth_selector", exc_info=True)
 
     return {
         "confidence": confidence,
@@ -463,4 +544,8 @@ async def depth_selector(state: AgentState) -> dict:
         "memory_sections": sections,
         "game_context": game_context,
         "game_active": game_active,
+        "metacog_result": metacog_dict,
+        "somatic_senses": somatic_senses_dicts,
+        "niacore_shadow": niacore_shadow_dict,
+        "conversation_skeleton": skeleton_dict,
     }

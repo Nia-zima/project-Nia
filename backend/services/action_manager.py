@@ -37,8 +37,6 @@ class ActionManager:
         try:
             if action_id == "update_obs_text":
                 # obs_writerが監視している public_status.json を更新する
-                # ※ 本来は chapter_reflection 経由推奨だが、
-                #    「今見ているもの」をリアルタイム表示する等の用途ならここから書き換えるのもアリ
                 self._update_public_status(payload)
                 return {"status": "executed", "msg": "OBS updated"}
             

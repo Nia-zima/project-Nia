@@ -1,5 +1,8 @@
+import logging
+
 from fastapi import APIRouter
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -67,7 +70,7 @@ def get_memory_graph(limit: int = 50, threshold: float = 0.7):
 
     except Exception as e:
         import traceback
-        print(f"Error in memory_graph: {traceback.format_exc()}")
+        logger.warning("Error in memory_graph", exc_info=True)
         return {"nodes": [], "edges": [], "error": str(e)}
 
 
@@ -133,5 +136,5 @@ def get_memory_timeline(days: int = 30):
 
     except Exception as e:
         import traceback
-        print(f"Error in memory_timeline: {traceback.format_exc()}")
+        logger.warning("Error in memory_timeline", exc_info=True)
         return {"timeline": [], "error": str(e)}

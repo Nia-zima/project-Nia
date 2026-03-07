@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("RETENTION_PROFILE", "fast")
 
 import pytest
-from backend.core.agent_graph.nodes.routing import (
+from backend.core.agent_graph.nodes import (
     _detect_pii,
     _detect_prompt_injection,
 )

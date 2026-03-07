@@ -1,6 +1,6 @@
 # セットアップガイド
 
-このガイドでは、AI_Buddy (Nia) を開発環境でセットアップする手順を説明します。
+このガイドでは、project-nia を開発環境でセットアップする手順を説明します。
 
 ---
 
@@ -34,12 +34,12 @@
 
 ```bash
 # HTTPS経由でクローン
-git clone https://github.com/yourusername/AI_Buddy.git
-cd AI_Buddy
+git clone https://github.com/yourusername/project-nia.git
+cd project-nia
 
 # または SSH経由
-git clone git@github.com:yourusername/AI_Buddy.git
-cd AI_Buddy
+git clone git@github.com:yourusername/project-nia.git
+cd project-nia
 ```
 
 ---
@@ -477,4 +477,4 @@ python -m backend.server
 
 ---
 
-**セットアップに問題がある場合は、[Issues](https://github.com/yourusername/AI_Buddy/issues) で報告してください。**
+**セットアップに問題がある場合は、[Issues](https://github.com/yourusername/project-nia/issues) で報告してください。**

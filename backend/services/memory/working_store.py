@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from backend.core.db import get_conn
+from backend.core.db import managed_conn
 from backend.core.logger import logger
 from backend.services.memory.models import WorkingItem
 
@@ -182,19 +182,15 @@ def close_expired(conn, thread_id: str) -> int:
 
 
 def get_by_id(id: str) -> Optional[WorkingItem]:
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         row = conn.execute(
             "SELECT * FROM working_items WHERE id=?", (id,)
         ).fetchone()
         return _row_to_model(row) if row else None
-    finally:
-        conn.close()
 
 
 def list_open(thread_id: str, *, limit: int = 20) -> list[WorkingItem]:
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         rows = conn.execute(
             """
             SELECT * FROM working_items
@@ -205,20 +201,15 @@ def list_open(thread_id: str, *, limit: int = 20) -> list[WorkingItem]:
             (thread_id, limit),
         ).fetchall()
         return [_row_to_model(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def count_open(thread_id: str) -> int:
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM working_items WHERE thread_id=? AND status='open'",
             (thread_id,),
         ).fetchone()
         return row[0]
-    finally:
-        conn.close()
 
 
 # ── Stagnation tracking (Phase E) ────────────────────────────────
@@ -246,8 +237,7 @@ def reset_stale_count(conn, item_id: str) -> None:
 
 def list_stagnant(thread_id: str, *, threshold: int = 3) -> list[WorkingItem]:
     """Return open items whose stale_turn_count >= threshold."""
-    conn = get_conn()
-    try:
+    with managed_conn() as conn:
         rows = conn.execute(
             """
             SELECT * FROM working_items
@@ -257,5 +247,3 @@ def list_stagnant(thread_id: str, *, threshold: int = 3) -> list[WorkingItem]:
             (thread_id, threshold),
         ).fetchall()
         return [_row_to_model(r) for r in rows]
-    finally:
-        conn.close()

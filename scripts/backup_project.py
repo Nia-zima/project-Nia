@@ -9,7 +9,7 @@ def backup_project() -> None:
     backup_dir = project_root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
-    backup_filename = f"AI_Buddy_Backup_{timestamp}.zip"
+    backup_filename = f"project_nia_backup_{timestamp}.zip"
     backup_path = backup_dir / backup_filename
 
     exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "backups", ".vscode", ".idea"}

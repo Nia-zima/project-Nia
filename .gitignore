@@ -117,3 +117,9 @@ backend/chroma_db_storage/
 
 # Somatic calibration runtime data
 data/somatic_calibration.json
+
+# Unity project (separate repo)
+nia_room/
+
+# Temporary split/debug scripts
+tmp_split_*.py

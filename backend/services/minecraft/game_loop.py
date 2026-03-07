@@ -224,7 +224,7 @@ class NiaGameLoop:
             if db_failures:
                 past_issues_parts.append(format_failures_for_prompt(db_failures))
         except Exception:
-            pass  # failure memory is optional
+            logger.debug("[GameLoop] Failure memory unavailable", exc_info=True)
         past_issues = "\n".join(past_issues_parts)
 
         system_prompt, user_prompt = build_brain_prompt(

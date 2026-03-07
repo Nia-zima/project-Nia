@@ -39,7 +39,8 @@ class Comment:
     steering_risk: float = 0.0
     info_sufficiency: float = 0.5
     addressed_to_nia: bool = False
-    
+    source: str = "manual"  # "manual" | "youtube" | "twitch"
+
     def is_expired(self, max_age_seconds: float = 60.0) -> bool:
         """コメントが期限切れかどうか"""
         return (time.time() - self.timestamp) > max_age_seconds

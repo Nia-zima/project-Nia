@@ -3,6 +3,7 @@ import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, VRM } from '@pixiv/three-vrm';
+import { useAvatarStore } from '@/lib/stores/avatarStore';
 
 // ── Gesture System Types ─────────────────────────────────────────
 
@@ -134,19 +135,8 @@ function easeInOut(t: number): number {
 
 // ── Component ─────────────────────────────────────────────────────
 
-interface AvatarProps {
-    isTalking: boolean;
-    emotion: string;
-    isThinking?: boolean;
-    stateTag?: string;
-    gesture?: string;
-    gestureTick?: number;
-    audioVolume?: number;
-}
-
-export default function AvatarView({
-    isTalking, emotion, isThinking = false, stateTag = "", gesture = "", gestureTick = 0, audioVolume,
-}: AvatarProps) {
+export default function AvatarView() {
+    const { isTalking, emotion, isThinking, agentState: stateTag, gesture, gestureTick, audioVolume } = useAvatarStore();
     const containerRef = useRef<HTMLDivElement>(null);
     const vrmRef = useRef<VRM | null>(null);
     const clockRef = useRef(new THREE.Clock());
@@ -375,8 +365,11 @@ export default function AvatarView({
         };
 
         // ── Main animation loop ──────────────────────────────────
+        let animFrameId = 0;
+        let destroyed = false;
+        const blinkTimers: ReturnType<typeof setTimeout>[] = [];
         const animate = () => {
-            requestAnimationFrame(animate);
+            animFrameId = requestAnimationFrame(animate);
             const delta = clockRef.current.getDelta();
             const vrm = vrmRef.current;
 
@@ -445,7 +438,10 @@ export default function AvatarView({
                 // Auto blink
                 if (Math.random() < 0.005) {
                     vrm.expressionManager?.setValue('blink', 1.0);
-                    setTimeout(() => vrm.expressionManager?.setValue('blink', 0.0), 100);
+                    const t = setTimeout(() => {
+                        if (!destroyed) vrm.expressionManager?.setValue('blink', 0.0);
+                    }, 100);
+                    blinkTimers.push(t);
                 }
             }
 
@@ -462,6 +458,9 @@ export default function AvatarView({
         window.addEventListener('resize', handleResize);
 
         return () => {
+            destroyed = true;
+            cancelAnimationFrame(animFrameId);
+            blinkTimers.forEach(clearTimeout);
             window.removeEventListener('resize', handleResize);
             renderer.dispose();
             if (containerRef.current?.contains(renderer.domElement)) {

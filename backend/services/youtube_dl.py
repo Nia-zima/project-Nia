@@ -47,7 +47,13 @@ def _download_sync(
     max_height: int = 720,
 ) -> dict:
     """Synchronous download implementation."""
-    import yt_dlp
+    try:
+        import yt_dlp
+    except Exception:
+        return {
+            "success": False,
+            "error": "yt_dlp がインストールされていません",
+        }
 
     # First, extract info to check duration
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
@@ -101,6 +107,7 @@ def _download_sync(
     return {
         "success": True,
         "path": filepath,
+        "tmp_dir": tmp_dir,
         "title": title,
         "duration": duration,
     }

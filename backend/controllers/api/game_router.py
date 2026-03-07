@@ -6,9 +6,10 @@ import json
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, status
 from pydantic import BaseModel
 
+from backend.controllers.ws_security import is_ws_origin_allowed
 from backend.core.auth import verify_system_token
 
 router = APIRouter()
@@ -124,6 +125,11 @@ async def game_events(limit: int = Query(20, ge=1, le=100)):
 @router.websocket("/game/ws")
 async def game_ws(websocket: WebSocket):
     """WebSocket for real-time game events to frontend."""
+    origin = websocket.headers.get("origin")
+    if not is_ws_origin_allowed(origin):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
 
     events = _get_event_listener()
@@ -156,15 +162,27 @@ async def game_ws(websocket: WebSocket):
             data = await websocket.receive()
             logger.debug("[GAME_WS] Received: %s", data)
 
+    sender_task = asyncio.create_task(_sender())
+    receiver_task = asyncio.create_task(_receiver())
     try:
-        await asyncio.gather(_sender(), _receiver())
+        done, pending = await asyncio.wait(
+            [sender_task, receiver_task],
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            exc = task.exception()
+            if exc and not isinstance(exc, WebSocketDisconnect):
+                logger.warning("[GAME_WS] Connection closed: %s", exc)
     except WebSocketDisconnect:
         logger.info("[GAME_WS] Client disconnected (WebSocketDisconnect)")
     except Exception as e:
         logger.warning("[GAME_WS] Connection closed: %s: %s", type(e).__name__, e)
     finally:
-        if on_event in events._frontend_callbacks:
-            events._frontend_callbacks.remove(on_event)
+        sender_task.cancel()
+        receiver_task.cancel()
+        events.remove_callback(on_event)
         logger.info("[GAME_WS] Cleanup done")
 
 

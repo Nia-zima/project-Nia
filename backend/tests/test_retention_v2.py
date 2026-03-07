@@ -17,9 +17,11 @@ def _reload_retention_modules():
     settings が env を読む設計なので、env をセットした後に reload して反映させる。
     """
     import backend.core.config as config
+    import backend.services.retention_config as retention_config
     import backend.services.memory_judge as memory_judge
 
     importlib.reload(config)
+    importlib.reload(retention_config)
     importlib.reload(memory_judge)
     return config.settings, memory_judge
 
@@ -83,6 +85,7 @@ def test_retention_v2_default_params():
     本番デフォルト値で、ステージ遷移が崩れていないかを見る。
     """
     env = {
+        "RETENTION_PROFILE": "prod",
         # ここは “None” にして env 上書きを消す（＝デフォルト固定を検証）
         "RETENTION_PROMOTE_TH": None,
         "RETENTION_BACKGROUND_TH": None,
@@ -109,6 +112,7 @@ def test_retention_v2_fast_forward_env():
     想定通りの遷移になるか（テスト用プロファイルの健全性チェック）。
     """
     env = {
+        "RETENTION_PROFILE": "prod",
         # 早回し例（必要に応じてあなたの“retention_test_v2”と同じ値に合わせてOK）
         "RETENTION_PROMOTE_TH": "0.70",
         "RETENTION_BACKGROUND_TH": "0.10",

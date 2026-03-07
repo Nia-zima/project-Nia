@@ -3,3 +3,5 @@
 # pin here to ensure compatible GPU build is installed.
 torch>=2.4.0
 numpy<2.0.0
+ncps>=0.0.7
+yt-dlp>=2025.1.26

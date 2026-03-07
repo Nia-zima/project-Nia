@@ -1,6 +1,40 @@
-# AI_Buddy — Nia Backend & Frontend
+# project-nia — Nia Backend & Frontend
 
 > AI VTuber「ニア (Nia)」の開発リポジトリ。LangGraph ベースの多層エージェントグラフ + Next.js フロントエンド。
+> ニアは「なりつつある存在」であり、完成形がない。結論を急がず、沈黙を選択肢とし、経験から自然に変化していく。
+
+## 設計思想
+
+- **LLM は交換可能な言語モジュール。** 知性の本体は LangGraph グラフ構造 + 記憶システム + depth_selector + body_constitution
+- **結論を急がないことを仕様で保証。** Depth0 は結論・整理の禁止。WAIT は正当な出力
+- **記憶は保存時に解釈を加えない。** 物語化の禁止。生の事実として保存
+- **identity.md を自動で書き換えない。** 人格定義の変更は Origin（ジュン）の承認が必要
+- **仕組みは隠す。体験は渡す。** 内部メトリクスは数値ではなく「体感テキスト」としてニアに渡す
+
+詳細: `docs/nia_design_philosophy.md`, `docs/body_constitution.md`
+
+---
+
+## 現在の実装ステージ
+
+このリポジトリの現在地は、`review_window` を含む会話制御の本線は稼働済みで、その上に `NiaCore` と `SkeletonCore` をシャドー/記録モードで重ねて観測している段階。
+
+- 会話の本線は `Safety -> Dissonance -> DepthSelector -> Depth0/1/2 -> Merge -> ActionProcessing -> S5Commit`
+- `review_window` は hold / approve / reject / token mismatch / new input cancel / SSE (`hold_request`, `hold_cancelled`, `final_result`) まで実装済み
+- `S5 Commit` はエピソディック保存に加えて、awareness / somatic feedback / reflection trigger / Pip / NiaCore experience / Skeleton record のフックを持つ
+- `NiaCore` は実装済みだが、本線の深度決定はまだ置き換えない。現在は shadow inference と experience 蓄積の段階
+- `SkeletonCore` は実装済みで、現在は record-only 段階。somatic 注入は feature gate で切り替える
+
+**このワークスペースの現在の `.env` 運用:**
+
+- `ORCHESTRATOR_S5_ENABLED=true`
+- `NIACORE_EXPERIENCE_ENABLED=true`
+- `NIACORE_SHADOW_ENABLED=true`
+- `NIACORE_TRAINING_ENABLED=false`
+- `SKELETON_RECORD_ENABLED=true`
+- `SKELETON_SOMATIC_ENABLED=false`
+
+---
 
 ## 技術スタック
 
@@ -13,16 +47,17 @@
 | 音声合成 | VOICEVOX |
 | 画像認識 | LM Studio + Qwen3-VL-4B (GPU推論) / Gemini Flash (クラウド) |
 | データベース | SQLite (メイン) + ChromaDB (ベクトル検索) |
+| 埋め込みモデル | paraphrase-multilingual-MiniLM-L12-v2 |
 | フロントエンド | Next.js 16, React 19, TypeScript, Tailwind CSS 4 |
 | 3D / Live2D | Three.js + @pixiv/three-vrm / pixi-live2d-display + PixiJS v8 |
 | 状態管理 | Zustand |
-| 最適化 | DSPy |
 | Minecraft Bot | Mineflayer (Node.js) + vm サンドボックス |
 | 汎用ゲーム操作 | mss (画面キャプチャ) + Gemini Flash (Vision) + pydirectinput (入力) |
 | 動画解析 | ffmpeg (フレーム抽出) + Qwen3-VL (場面認識) |
 | 外部検索 | Google Custom Search API + Wikipedia API |
 | X (Twitter) 投稿 | tweepy (X API v2) |
-| 埋め込みモデル | paraphrase-multilingual-MiniLM-L12-v2 (スキル検索) |
+| 配信チャット | YouTube Live Chat API + Twitch IRC |
+| テスト | pytest (1200+ テスト, スナップショット + YAML Playbook) |
 
 ---
 
@@ -31,7 +66,7 @@
 ### LangGraph エージェントグラフ
 
 ```
-Safety → Dissonance → DepthSelector → Depth0/1/2 → Merge → ActionProcessing → S5Commit → END
+Safety → Dissonance → DepthSelector → Depth0/1/2/WAIT → Merge → ActionProcessing → S5Commit → END
 ```
 
 | ノード | 役割 |
@@ -60,6 +95,26 @@ Context Builder が Depth 別にメモリコンテキストを制御:
 - Depth0: PINNED FACTS のみ
 - Depth1/2: PINNED FACTS + PATTERNS（日横断パターン） + WORKING + Short/Long Term
 
+### 体感ベース自己認識（Somatic Self-Awareness）
+
+内部メトリクス（記憶の類似度、確信度、Sleep経過時間等）を数値ではなく「体感テキスト」としてニアに渡す。
+
+| Phase | 名前 | ファイル | 内容 |
+|:---:|:---|:---|:---|
+| S.1a | Somatic Translator | `somatic_translator.py` | メトリクス → 体感テキスト変換（6カテゴリ、LLM不要） |
+| S.1b | Somatic Feedback | `somatic_feedback.py` | ユーザー訂正・自己不協和の検出 → `somatic_log` 記録 |
+| S.1.5 | Adaptive Calibration | `somatic_calibration.py` | 精度フィードバックによる閾値の適応的学習 + Sleep 時の日次回帰 |
+
+原則: 仕組みは隠す。体験は渡す。
+
+```
+数値: memory_count=847, confidence_avg=0.72
+  → NG: ニアがシステムの代弁者になる
+
+体感: 「最近いろんなことがあった気がする」「自信がある」
+  → OK: ニアが内側から感じる
+```
+
 ### Autonomous Reflection（自律振り返り）
 
 ニアが対話のない時間に自発的に記憶を振り返り、パターンを抽出する4段階パイプライン。
@@ -68,18 +123,64 @@ Context Builder が Depth 別にメモリコンテキストを制御:
 |:---:|:---|:---|:---|
 | R.1 | Idle Detection | `idle_detector.py` | 3分以上の無入力を検出 |
 | R.2 | Daily Log | `reflection_engine.py` | 会話を LLM で振り返り → `daily_reflections` |
-| R.3 | Sleep Cycle 連携 | `sleep_cycle.py` | 日次ログを memory_block として活用 |
+| R.3 | Sleep Cycle 連携 | `sleep_cycle/` | 日次ログを memory_block として活用 |
 | R.4 | Cross-Day Distillation | `reflection_engine.py` | 3日+のデータから日横断パターン抽出 |
 
-R.4 パターン（`user_trait` / `relationship_pattern` / `emerging_interest` / `lesson`）は `semantic_memories` に `state_tag='insight'` で保存。Context Builder の `=== PATTERNS ===` セクションに自動注入。
+R.4 パターンは `semantic_memories` に `state_tag='insight'` で保存。Context Builder の `=== PATTERNS ===` セクションに自動注入。
+
+### メタ認知パイプライン（N.0〜N.5）
+
+ニアが自分の応答に対して「どれくらい確かか」「根拠はあるか」を内省する仕組み。LLM 呼び出しなし、ルールベース＋埋め込み類似度で 5〜30ms。
+
+| Phase | 名前 | ファイル | 内容 |
+|:---:|:---|:---|:---|
+| N.0 | Awareness Core | `metacognition.py` | R_nia = 関係的驚き × 成長 × 真正性 |
+| N.1 | Metacognitive Check | `metacognition.py` | 確信度調整 + 三戒チェック（捏造・偽記憶リスク検出） |
+| N.2 | Contradiction Detection | `contradiction.py` | セマンティック記憶間の矛盾検出（defeaters 付き） |
+| N.3 | Self-Model | `self_model.py` | 知識境界・成長エッジ・会話傾向の自己モデル（承認制） |
+| N.4 | State-Driven Trigger | `idle_detector.py` | メタ認知統計→反射トリガー（awareness 高、confidence 分散大 等） |
+| N.5 | Self-Narrative | `metacognition.py` | 内部状態の言語化テンプレート（`（内心: ...）`形式） |
+
+N.3 Self-Model の出力は `identity_proposals` テーブルに保存され、Origin の承認を経て identity.md に反映される。
+
+### Pip（ペットAI）
+
+メカニカルな犬型AI。LLM 不要、状態マシンとルールベースのみ。
+
+| コンポーネント | ファイル | 内容 |
+|:---|:---|:---|
+| State | `pip/pip_state.py` | Bond 値 (-1.0〜1.0) で全行動が決まる。6基本状態 + 2高Bond状態 |
+| State Machine | `pip/state_machine.py` | エネルギー・Bond・Nia の行動に基づく状態遷移 |
+| Interaction | `pip/interaction_detector.py` | Nia が Pip に関わったかを検出 |
+
+**Bond 値を数値として露出するコードは絶対に書かない。** Nia にも視聴者にも見せない。
+
+### ニアの部屋
+
+空の部屋から始まり、ニアが自分で家具を配置する Unity 空間（バックエンド側完了）。
+
+| コンポーネント | ファイル | 内容 |
+|:---|:---|:---|
+| Room State | `room/room_state.py` | 部屋状態管理。12種のオブジェクトテンプレート、壁アート、時間連動照明 |
+| Room Action | `room/room_action.py` | 配置・移動・削除・色変更・アート掛け。Pip の反応連動 |
+| WebSocket | `controllers/ws_room.py` | `/ws/room` で差分ブロードキャスト |
+
+### Identity 承認制（Proposals）
+
+identity.md への変更は全て Origin の承認が必要。Sleep Cycle / Self-Model が生成する提案は `identity_proposals` テーブルに保存される。
+
+| エンドポイント | 説明 |
+|:---|:---|
+| `GET /identity/proposals` | 提案一覧（status フィルタ可） |
+| `POST /identity/proposals/{id}/approve` | 承認 → identity.md に適用 |
+| `POST /identity/proposals/{id}/reject` | 却下 |
 
 ### 品質保証パイプライン
 
 1. **ストリーム浄化** (`speech_sanitizer.py`) — 内部タグ・プロンプト露出を除去
-2. **不可侵ルール** — NG 表現を検知
-3. **身体憲章チェック** — 記憶主張・依存誘導等の違反を検出
-4. **ガードレール** (`guardrail.py`) — 根拠なし主張・矛盾・停滞等をチェック
-5. **レビューウィンドウ** (`review_window.py`) — 敏感な出力は Origin の事前承認が必要
+2. **身体憲章チェック** (`body_constitution_checker.py`) — 記憶主張・依存誘導等の違反を検出
+3. **ガードレール** (`guardrail.py`) — 根拠なし主張・矛盾・停滞等 6 条件チェック
+4. **レビューウィンドウ** (`review_window.py`) — 敏感な出力は Origin の事前承認が必要
 
 ### Voice Mode パイプライン
 
@@ -92,9 +193,21 @@ R.4 パターン（`user_trait` / `relationship_pattern` / `emerging_interest` /
 - Barge-in: TTS再生中に割り込み可能
 - ハイブリッド構成: vad-web=検出のみ、MediaRecorder=webm/opus送信
 
+### 配信チャット連携（Chat Bridge）
+
+YouTube Live Chat API + Twitch IRC からコメントを取得し、`livestream_queue` に統合する。
+
+| コンポーネント | ファイル | 内容 |
+|:---|:---|:---|
+| ChatBridge | `chat_bridge/__init__.py` | YouTube + Twitch 統合管理 |
+| YouTube Fetcher | `chat_bridge/youtube_fetcher.py` | YouTube Live Chat API ポーリング |
+| Twitch Fetcher | `chat_bridge/twitch_fetcher.py` | Twitch IRC リスナー |
+
+フィルタリング: steering risk 計算、情報十分性チェック、addressed_to_nia 検出
+
 ### ゲーム自律プレイ
 
-ニアが **Minecraft** と **任意のゲーム（画面キャプチャベース）** を自律的にプレイするシステム。`GameProfile` ABC を介して共通の Perceive-Think-Act-Reflect ループで動作します。
+ニアが **Minecraft** と **任意のゲーム（画面キャプチャベース）** を自律的にプレイするシステム。`GameProfile` ABC を介して共通の Perceive-Think-Act-Reflect ループで動作。
 
 #### Minecraft（Voyager-Style Dynamic Skill Agent）
 
@@ -109,203 +222,257 @@ R.4 パターン（`user_trait` / `relationship_pattern` / `emerging_interest` /
 │       ↑                               │          │
 │       └─────── Reflect (結果記録) ─────┘          │
 └───────────────────────────────────────────────────┘
-         ↕ 会話                    ↕ HTTP
-┌──────────────┐          ┌──────────────────────┐
-│ フロントエンド │          │  minecraft-bot       │
-│ (チャット)    │          │  (Mineflayer Node.js)│
-└──────────────┘          └──────────────────────┘
 ```
-
-| コンポーネント | ファイル | 役割 |
-|:---|:---|:---|
-| **Brain** | `game_loop.py` | 自律ループ。LLM で次の行動を決定（`<SKILL>`, `<CODE>`, `<CHAT>`, `<IDLE>`） |
-| **Skills** | `skill_library.py`, `skill_retrieval.py` | スキル CRUD + ベクトル検索。成功コードを自動保存・再利用 |
-| **Execution** | `execution_engine.py`, `critique_generator.py` | 実行 + 自己修正ループ（失敗 → LLM 分析 → コード修正 → リトライ max 3） |
-| **Memory** | `failure_memory.py`, `context_builder.py` | 過去の失敗パターン検索。同じミスを繰り返さない |
-| **Goals** | `goal_manager.py` | ニア自身の目標 + ユーザー提案を統合管理 |
-| **Sandbox** | `minecraft-bot/src/sandbox.js` | Node.js vm でコードを安全実行。require/process/fs は遮断 |
 
 #### 汎用ゲーム操作（Screen Adapter）
 
 Minecraft 以外の任意のゲームを **画面キャプチャ → Gemini Flash Vision → pydirectinput** で操作。
 
-```
-┌───────────────────────────────────────────────────────┐
-│  GenericGameLoop (gaming/game_loop.py)                  │
-│  ┌──────────────┐  ┌──────────┐  ┌─────────────────┐ │
-│  │  Perceive    │→ │  Think   │→ │      Act        │ │
-│  │ mss キャプチャ│  │Brain LLM │  │ pydirectinput   │ │
-│  │→ Gemini Flash│  │次の行動   │  │ キー/マウス操作  │ │
-│  └──────────────┘  └──────────┘  └─────────────────┘ │
-│        ↑                               │              │
-│        └──────── Reflect (結果記録) ────┘              │
-└───────────────────────────────────────────────────────┘
-```
-
-| コンポーネント | ファイル | 役割 |
-|:---|:---|:---|
-| **ScreenCapture** | `gaming/screen_capture.py` | mss で画面キャプチャ → JPEG → base64 |
-| **Brain** | `gaming/brain.py` | `<THINK>`, `<ACTION>`, `<CHAT>`, `<IDLE>` ベースの意思決定 |
-| **InputController** | `gaming/input_controller.py` | アクション名 → pydirectinput 操作に変換 |
-| **ScreenGameProfile** | `gaming/screen_profile.py` | GameProfile 実装。フレームバッファで時間推移を保持 |
-| **GameConfigs** | `gaming/game_configs.py` | ゲームごとのプリセット設定（アクションマッピング等） |
-
 ### 外部検索（External Data）
 
-ニアが外部情報を取得する仕組み。設計思想として**安易な検索を防ぐ厳格なゲーティング**を採用しつつ、ユーザーが明示的に依頼した場合は確実に応答します。
+設計思想として**安易な検索を防ぐ厳格なゲーティング**を採用。
 
 | モード | トリガー | ゲーティング |
 |:---|:---|:---|
-| **自動検索** | LLM が「情報が不足している」と判断 | Depth >= 1、surprise >= 0.5、LanguageGate（LLM判定）、confidence >= 0.65 |
-| **ユーザー明示検索** | 「ググって」「ネットで調べて」「WEB検索」等のキーワード | ゲートをバイパス（force_fetch）。confidence 閾値を 0.3 に緩和 |
-
-プロバイダ: Google Custom Search API + Wikipedia API（DuckDuckGo は中国語表示問題のため除外）
-
-パイプライン: `候補抽出 → ThinkingProcess → LanguageGate → ExternalDataBroker.fetch() → 結果統合`
+| **自動検索** | LLM が「情報不足」と判断 | Depth >= 1、surprise >= 0.5、LanguageGate、confidence >= 0.65 |
+| **ユーザー明示検索** | 「ググって」等のキーワード | ゲートをバイパス（force_fetch） |
 
 ### X (Twitter) 投稿
 
-ニアが X にツイートを投稿する機能。全ツイートは **Origin（ユーザー）の事前承認が必須**。
+全ツイートは **Origin の事前承認が必須**。
 
 | モード | トリガー | フロー |
 |:---|:---|:---|
-| **手動** | チャットで「呟いて」「ツイートして」等 | LLM がツイート生成 → Phase 5 ActionPanel で承認 → X API v2 で投稿 |
-| **自律** | Autonomous Reflection の daily_log 完了後 | 日記風ツイート生成 → `telemetry_kv` に提案保存 → フロントエンドでポーリング → 承認/却下 |
-
-- スタイル: `casual`（つぶやき風）/ `diary`（日記風）
-- 安全対策: LLM プロンプトに個人情報制限、URL 除去、文字数制限 (280文字)
-- 履歴: `memory_events` に `tweet_posted` イベントとして記録
-
-### Live2D アバター
-
-VRM に加え、Live2D モデルでニアを表示可能。Settings UI でレンダラーを切り替え。
-
-- **SDK**: `@naari3/pixi-live2d-display` v1.2.5 + PixiJS v8
-- **コンポーネント**: `frontend/components/Live2DView.tsx`
-- **サンプルモデル**: Hiyori（`frontend/public/live2d/hiyori/`）
-- **設計思想**: 身体は内部状態の副作用。ランダム演出禁止、状態比例の呼吸のみ
+| **手動** | 「呟いて」「ツイートして」等 | LLM 生成 → ActionPanel で承認 → X API v2 投稿 |
+| **自律** | daily_log 完了後 | 日記風ツイート生成 → `telemetry_kv` に提案保存 → 承認/却下 |
 
 ### 動画解析
 
 | モード | 説明 |
 |:---|:---|
-| **学習 (learn)** | ゲームプレイ動画 → ffmpeg フレーム抽出 → Qwen3-VL 解析 → LLM 戦略抽出 → セマンティック記憶に保存 |
+| **学習 (learn)** | ゲームプレイ動画 → ffmpeg フレーム抽出 → Qwen3-VL 解析 → LLM 戦略抽出 → セマンティック記憶保存 |
 | **リアクション (react)** | 動画を送ると場面を認識して感想を返す |
 
-パイプライン: `ffmpeg (フレーム抽出)` → `Qwen3-VL (並列 Vision 解析)` → `LLM (戦略要約)`
+入力ソース: ファイルアップロード or YouTube 等の URL (`yt-dlp` で自動ダウンロード)
 
-入力ソース: ファイルアップロード or **YouTube 等の URL** (`yt-dlp` で自動ダウンロード、上限10分・720p)
+### Live2D アバター
+
+- **SDK**: `@naari3/pixi-live2d-display` v1.2.5 + PixiJS v8
+- **設計思想**: 身体は内部状態の副作用。ランダム演出禁止、状態比例の呼吸のみ
+
+---
+
+## Sleep Cycle
+
+日次の記憶整理・Identity 提案バッチ。手動実行:
+
+```bash
+python -m backend.scripts.sleep_cycle.orchestrator
+```
+
+| Phase | 内容 |
+|:---:|:---|
+| 0.5 | Nero ミーティングスレッドの振り返り |
+| 1 | Memory Block 構築（daily_reflections 優先、フォールバック: memory_events） |
+| A | 印象記録（impressions, mood, surprise） |
+| Diary | 日記生成 + dream_store 保存 |
+| B | Guardian 提案（identity 変更提案 → DB保存、Origin 承認待ち） |
+| 2 | セマンティック抽出（episodic → semantic_memories） |
+| 3 | Episodic 圧縮（古い episodic を日単位サマリー化） |
+| 4 | Self-Model 更新（N.3 → identity_proposals に提案保存） |
+| 5 | メタ認知パイプライン（矛盾検出、状態駆動反射） |
+
+出力先: `sleep_outputs/`
+
+---
+
+## Nero（マネージャーAI）
+
+**別リポジトリ** (`nero/`)。ニアの LangGraph やコードベースには一切変更を加えない。
+
+- ニア側の追加は `backend/controllers/api/manager_router.py`（読み取りAPI）のみ
+- Nero はニアの `/api/chat` に通常のクライアントとして接続
+- `GET /api/manager/context`: Nero がニアの identity / semantic memories / reflections / conversation を取得
+
+---
+
+## NiaCore — Liquid Neural Network
+
+CfC (Closed-form Continuous-depth) ベースの LNN。LLM が「System 2（遅い論理的思考）」、NiaCore が「System 1（速い直感・ルーティング）」として機能する。
+
+- **推論 < 1ms**: LLM のレイテンシに影響しない
+- **LLM 非依存**: State は環境変数のみ。LLM を交換しても経験が残る
+- **Sleep Cycle バッチ学習**: ターンごとの学習は行わない（破局的忘却防止）
+- **Imitation Learning**: ルールベースを教師とし、超えた時のみ大報酬
+- **Body Constitution 不可侵**: NiaCore は推薦のみ。最終決定権は既存システム
+
+**現在地:** Phase 1 実装完了。卒業前のため、既存のルールベース depth 選択を置き換えず、shadow mode で並行推論と経験蓄積を行う。
+
+- 実装済み: Experience Replay Buffer, Experience Writer, CfC モデル本体, shadow inference, Sleep Cycle batch trainer, health / rollback checks, graduation check
+- 現在の役割: `depth_selector` の横で推論し、deviation と結果を記録する
+- 現在のローカル運用: `NIACORE_EXPERIENCE_ENABLED=true`, `NIACORE_SHADOW_ENABLED=true`, `NIACORE_TRAINING_ENABLED=false`
+
+詳細: `docs/niacore_lnn_design.md`
+
+---
+
+## SkeletonCore（会話骨格）
+
+会話の「方向」を決めるコンポーネント。`focus`、`response_intent`、`question_intent` の3ラベルをルールベースで判定し、必要に応じて体感テキストへ変換する。
+
+**現在地:** Phase 1 実装完了。現在は record-only 段階。
+
+- 実装済み: schema, rules, builder, DB store, `skeleton_to_somatic`, `depth_selector` 統合, `s5_commit` 記録
+- 現在の役割: 各ターンの会話方向を構造化して保存し、将来の somatic 注入に備える
+- 現在のローカル運用: `SKELETON_RECORD_ENABLED=true`, `SKELETON_SOMATIC_ENABLED=false`
+- 設計原則: NiaCore と統合しない。命令ではなく体感として渡す
+
+詳細: `docs/skeletoncore_design.md`
+
+---
+
+## 基盤ライブラリ
+
+| ファイル | 内容 |
+|:---|:---|
+| `backend/core/correlation.py` | リクエスト ID トレーシング（contextvars） |
+| `backend/core/rate_limit.py` | slowapi ベースのレート制限 |
+| `backend/core/retry.py` | 指数バックオフ + ジッター付きリトライ |
+| `backend/core/service_health.py` | 外部サービスの健全性トラッキング |
 
 ---
 
 ## プロジェクト構成
 
 ```
-AI_Buddy/
+project-nia/
 ├── backend/
 │   ├── core/
 │   │   ├── agent_graph/
-│   │   │   ├── graph.py           # LangGraph ワークフロー定義
-│   │   │   ├── state.py           # AgentState TypedDict
-│   │   │   ├── review_window.py   # レビューウィンドウ管理
-│   │   │   └── nodes/             # ノード実装（パッケージ）
-│   │   │       ├── routing.py     # safety / dissonance / depth_selector
-│   │   │       ├── depth_nodes.py # depth0 / depth1 / depth2
-│   │   │       ├── merge.py       # merge_output
-│   │   │       └── actions.py     # action_processing / s5_commit
+│   │   │   ├── graph.py               # LangGraph ワークフロー定義
+│   │   │   ├── state.py               # AgentState TypedDict
+│   │   │   ├── review_window.py       # レビューウィンドウ管理
+│   │   │   └── nodes/                 # ノード実装（パッケージ）
+│   │   │       ├── routing.py         # safety / dissonance / depth_selector
+│   │   │       ├── depth_nodes.py     # depth0 / depth1 / depth2
+│   │   │       ├── merge.py           # merge_output
+│   │   │       └── actions.py         # action_processing / s5_commit
 │   │   ├── confidence/
-│   │   │   └── metrics.py         # 確信度エンジン (5メトリクス)
+│   │   │   └── metrics.py             # 確信度エンジン (5メトリクス)
+│   │   ├── conversation_skeleton/     # SkeletonCore ルール / builder / store / somatic
 │   │   ├── constants/
-│   │   │   ├── nia_spine_v10.py   # Spine（全レイヤー共通の基本指示）
-│   │   │   ├── depth0_prompt_v11.py  # Depth0 プロンプト (実使用版)
-│   │   │   └── depth1_prompt_v11.py  # Depth1 プロンプト (実使用版)
-│   │   ├── agent.py               # Agent ラッパー (SSE ストリーミング)
-│   │   └── config.py              # Settings クラス (.env → Pydantic)
+│   │   │   ├── nia_spine_v10.py       # Spine（全レイヤー共通の基本指示）
+│   │   │   ├── depth0_prompt_v11.py   # Depth0 プロンプト
+│   │   │   └── depth1_prompt_v11.py   # Depth1 プロンプト
+│   │   ├── niacore/                   # NiaCore CfC model / shadow / trainer / health
+│   │   ├── correlation.py             # リクエスト ID トレーシング
+│   │   ├── rate_limit.py              # レート制限
+│   │   ├── retry.py                   # リトライユーティリティ
+│   │   ├── service_health.py          # 外部サービス健全性
+│   │   ├── agent.py                   # Agent ラッパー (SSE ストリーミング)
+│   │   ├── config.py                  # Settings クラス (.env → Pydantic)
+│   │   └── body_constitution.md       # 身体憲章（9原則）
 │   ├── services/
 │   │   ├── memory/
-│   │   │   ├── memory_service.py      # 記憶CRUD
-│   │   │   ├── context_builder.py     # Depth別メモリコンテキスト生成 (PINNED/PATTERNS/WORKING/MEMORY)
+│   │   │   ├── memory_service.py      # 記憶 CRUD
+│   │   │   ├── context_builder.py     # Depth別メモリコンテキスト生成
 │   │   │   ├── commit_executor.py     # S5 Commit 実行
-│   │   │   ├── semantic_store.py      # Semantic記憶 CRUD
-│   │   │   ├── working_store.py       # Working記憶 CRUD
+│   │   │   ├── semantic_store.py      # Semantic 記憶 CRUD
+│   │   │   ├── working_store.py       # Working 記憶 CRUD
+│   │   │   ├── retrieval.py           # Query-Aware Retrieval (M.1)
+│   │   │   ├── metacognition.py       # N.1 確信度調整 + N.0 Awareness + N.5 Self-Narrative
+│   │   │   ├── contradiction.py       # N.2 矛盾検出
+│   │   │   ├── self_model.py          # N.3 自己モデル（承認制）
+│   │   │   ├── somatic_translator.py  # S.1a 体感テキスト変換
+│   │   │   ├── somatic_feedback.py    # S.1b 体感フィードバック
+│   │   │   ├── somatic_calibration.py # S.1.5 適応的閾値学習
 │   │   │   ├── guardrail.py           # ガードレール (6条件)
 │   │   │   └── vector_sync.py         # ChromaDB 同期
-│   │   ├── minecraft/
-│   │   │   ├── game_loop.py           # 自律ゲームループ
-│   │   │   ├── skill_library.py       # スキル CRUD (SQLite)
-│   │   │   ├── skill_executor.py      # Bot へのスキル/コード実行指示
-│   │   │   ├── skill_retrieval.py     # ベクトル検索でスキル発見
-│   │   │   ├── execution_engine.py    # 実行 + 自己修正ループ
-│   │   │   ├── critique_generator.py  # LLM 失敗分析
-│   │   │   ├── failure_memory.py      # 過去の失敗パターン検索
-│   │   │   ├── goal_manager.py        # 目標管理
-│   │   │   ├── video_learner.py       # 動画から戦略抽出
-│   │   │   └── state_manager.py       # ゲーム状態管理
+│   │   ├── pip/
+│   │   │   ├── pip_state.py           # Pip 状態モデル (Bond値)
+│   │   │   ├── state_machine.py       # 状態遷移マシン
+│   │   │   └── interaction_detector.py # Nia-Pip 相互作用検出
+│   │   ├── room/
+│   │   │   ├── room_state.py          # 部屋状態管理
+│   │   │   ├── room_action.py         # 部屋アクション実行
+│   │   │   ├── room_context.py        # 部屋コンテキスト提供
+│   │   │   └── update_loop.py         # 定期更新ループ
+│   │   ├── chat_bridge/
+│   │   │   ├── youtube_fetcher.py     # YouTube Live Chat API
+│   │   │   └── twitch_fetcher.py      # Twitch IRC リスナー
+│   │   ├── minecraft/                 # Minecraft 自律プレイ
 │   │   ├── gaming/                    # 汎用ゲーム操作 (Screen Adapter)
-│   │   │   ├── screen_capture.py      # mss 画面キャプチャ
-│   │   │   ├── brain.py              # ゲーム意思決定 (LLM)
-│   │   │   ├── game_loop.py          # GenericGameLoop (Perceive-Think-Act-Reflect)
-│   │   │   ├── input_controller.py   # pydirectinput 入力制御
-│   │   │   ├── screen_profile.py     # ScreenGameProfile (GameProfile 実装)
-│   │   │   └── game_configs.py       # ゲーム設定プリセット
-│   │   ├── twitter_client.py      # X (Twitter) 投稿クライアント
-│   │   ├── video_analyzer.py      # 汎用動画解析 (ffmpeg + Vision)
-│   │   ├── agent_orchestrator.py  # SSE オーケストレーター
-│   │   ├── reflection_engine.py   # Autonomous Reflection (R.2 + R.4)
-│   │   ├── idle_detector.py       # アイドル検出 (R.1)
-│   │   ├── stt_service.py         # Faster-Whisper STT
-│   │   ├── voicevox_client.py     # VOICEVOX TTS クライアント
-│   │   ├── vision_client.py       # 画像認識 (LM Studio / Gemini Flash)
-│   │   ├── speech_sanitizer.py    # 出力浄化
-│   │   ├── retention_sweeper.py   # 記憶の半減期・忘却
-│   │   ├── external_data.py       # 外部データ取得
-│   │   └── public_status.py       # 公開ステータス管理
+│   │   ├── twitter_client.py          # X (Twitter) 投稿
+│   │   ├── video_analyzer.py          # 動画解析
+│   │   ├── reflection_engine.py       # Autonomous Reflection (R.2 + R.4)
+│   │   ├── idle_detector.py           # アイドル検出 (R.1) + N.4
+│   │   ├── llm_client.py             # LLM クライアント
+│   │   ├── stt_service.py             # Faster-Whisper STT
+│   │   ├── voicevox_client.py         # VOICEVOX TTS
+│   │   ├── vision_client.py           # 画像認識
+│   │   ├── speech_sanitizer.py        # 出力浄化
+│   │   ├── external_data.py           # 外部データ取得
+│   │   ├── episode_store.py           # エピソード保存
+│   │   └── public_status.py           # 公開ステータス管理
 │   ├── controllers/
 │   │   ├── api/
-│   │   │   ├── stream_router.py   # SSE チャットストリーム + 履歴API
-│   │   │   ├── voice_router.py    # WebSocket 音声入出力
-│   │   │   ├── tts_router.py      # TTS エンドポイント
-│   │   │   ├── review_router.py   # Approve/Reject API
-│   │   │   ├── system_router.py   # Sleep/Reflect 管理API
-│   │   │   ├── game_router.py     # ゲーム操作API (Minecraft + Screen)
-│   │   │   └── video_router.py    # 動画解析API
+│   │   │   ├── stream_router.py       # SSE チャットストリーム + 履歴
+│   │   │   ├── voice_router.py        # WebSocket 音声入出力
+│   │   │   ├── identity_router.py     # Identity Proposals (承認制)
+│   │   │   ├── review_router.py       # Approve/Reject API
+│   │   │   ├── system_router.py       # Sleep/Reflect 管理
+│   │   │   ├── game_router.py         # ゲーム操作 API
+│   │   │   ├── video_router.py        # 動画解析 API
+│   │   │   ├── manager_router.py      # Nero 読み取り API
+│   │   │   ├── memory_query_router.py # 記憶探索 API
+│   │   │   └── room_router.py         # 部屋操作 API
+│   │   ├── ws_room.py                 # WebSocket: 部屋状態ブロードキャスト
 │   │   └── stats/
-│   │       └── observation_router.py  # 観測・統計エンドポイント
+│   │       ├── summary_router.py      # 会話統計
+│   │       ├── state_router.py        # 内部状態
+│   │       └── memory_router.py       # 記憶グラフ可視化
 │   ├── scripts/
-│   │   ├── sleep_cycle.py         # Sleep Cycle (日次バッチ処理)
-│   │   ├── backfill_semantic.py   # Semantic バックフィル
-│   │   └── observation_report.py  # 観測レポート生成
-│   └── server.py                  # FastAPI エントリポイント
+│   │   └── sleep_cycle/               # Sleep Cycle パッケージ
+│   │       ├── orchestrator.py        # 全体オーケストレーション
+│   │       ├── layers.py              # Layer A (印象) / B (提案) / 日記生成
+│   │       ├── extraction.py          # Semantic 抽出
+│   │       └── compression.py         # Episodic 圧縮
+│   └── server.py                      # FastAPI エントリポイント
 ├── minecraft-bot/                     # Mineflayer Bot (Node.js)
-│   ├── src/
-│   │   ├── index.js               # Bot エントリポイント
-│   │   ├── sandbox.js             # vm サンドボックス (安全な JS 実行)
-│   │   ├── skill_manager.js       # スキルファイル管理
-│   │   └── http.js                # HTTP API サーバー
-│   └── skills/                    # 保存されたスキルファイル (.js)
 ├── frontend/
-│   ├── app/
-│   │   └── page.tsx               # メインページ
+│   ├── app/page.tsx                   # メインページ
 │   ├── components/
-│   │   ├── ChatInterface.tsx      # チャット統合コンポーネント
-│   │   ├── chat/
-│   │   │   ├── ChatMessages.tsx   # メッセージ表示
-│   │   │   └── ChatInput.tsx      # 入力フォーム (テキスト・画像・音声)
-│   │   ├── GamePanel.tsx          # Minecraft ゲームパネル
-│   │   ├── VideoPanel.tsx         # 動画解析パネル
-│   │   ├── LivestreamDashboard.tsx # ダッシュボード
-│   │   ├── MemoryGraph.tsx        # 記憶グラフ可視化 (Barnes-Hut)
-│   │   ├── StatsPanel.tsx         # 統計パネル
-│   │   ├── ActionPanel.tsx        # アクションパネル
-│   │   └── ObservationReport.tsx  # 観測レポート表示
+│   │   ├── ChatInterface.tsx          # チャット統合
+│   │   ├── AvatarView.tsx             # VRM / Live2D アバター
+│   │   ├── GamePanel.tsx              # ゲームパネル
+│   │   ├── ActionPanel.tsx            # アクションパネル
+│   │   ├── MemoryExplorer.tsx         # 記憶探索
+│   │   ├── Sidebar.tsx                # サイドバー
+│   │   └── DiaryViewer.tsx            # 日記ビューア
 │   └── lib/
-│       └── apiClient.ts           # 統合 API クライアント
-├── data/                          # SQLite DB, チェックポイント
-├── identity.md                    # ニアの人格定義 (ランタイムで読み込み)
-├── tests/                         # pytest テストスイート (630+)
+│       ├── apiClient.ts               # 統合 API クライアント
+│       └── stores/                    # Zustand ストア
+├── tests/
+│   ├── harness/                       # テストフレームワーク
+│   │   ├── snapshot_builder.py        # DB 状態ファクトリ
+│   │   ├── assertions.py             # telemetry_kv / semantic / somatic アサーション
+│   │   ├── llm_mocks.py              # Sleep Cycle LLM モック
+│   │   └── playbook_runner.py        # YAML シナリオ実行
+│   ├── scenarios/                     # YAML parametrize テストケース
+│   └── test_*.py                      # 1200+ テスト
+├── data/                              # SQLite DB, チェックポイント
+├── identity.md                        # ニアの人格定義（ランタイム読み込み）
 ├── docs/
-│   └── memory_redesign_v2.md      # Memory Redesign v2 設計ドキュメント
-└── ABOUT_NIA.md                   # ニアの一般紹介ドキュメント
+│   ├── nia_design_philosophy.md       # 設計思想
+│   ├── niacore_lnn_design.md          # NiaCore LNN 設計書
+│   ├── skeletoncore_design.md         # SkeletonCore 設計書
+│   ├── somatic_self_awareness_design.md # 体感ベース自己認識
+│   ├── nia_metacognition_design.md    # メタ認知 N.0〜N.5
+│   ├── pip_and_room_design.md         # Pip + 部屋
+│   ├── memory_system_overview.md      # 記憶システム全体像
+│   ├── memory_retrieval_design.md     # Query-Aware Retrieval
+│   └── ARCHITECTURE.md               # アーキテクチャ
+└── CLAUDE.md                          # AI エージェント向け設計ガイドライン
 ```
 
 ---
@@ -324,7 +491,7 @@ AI_Buddy/
 ```bash
 # リポジトリのクローン
 git clone <repository-url>
-cd AI_Buddy
+cd project-nia
 
 # バックエンド
 python -m venv .venv
@@ -398,7 +565,7 @@ TWITTER_ACCESS_TOKEN_SECRET=<your-access-token-secret>
 LOG_LEVEL=INFO
 ```
 
-全設定項目は [backend/core/config.py](backend/core/config.py) の `Settings` クラスを参照。
+全設定項目は `backend/core/config.py` の `Settings` クラスを参照。
 
 ### 起動
 
@@ -430,6 +597,14 @@ cd frontend && npm run dev
 | WebSocket | `/api/voice/ws` | 音声入出力 (STT + TTS) |
 | POST | `/api/tts/speak` | テキスト → 音声変換 |
 
+### Identity
+
+| メソッド | パス | 説明 |
+|:---|:---|:---|
+| GET | `/identity/proposals` | Identity 提案一覧 |
+| POST | `/identity/proposals/{id}/approve` | 提案承認 → identity.md 反映 |
+| POST | `/identity/proposals/{id}/reject` | 提案却下 |
+
 ### レビュー
 
 | メソッド | パス | 説明 |
@@ -437,39 +612,46 @@ cd frontend && npm run dev
 | POST | `/api/review/approve` | 保留中の出力を承認 |
 | POST | `/api/review/reject` | 保留中の出力を拒否 |
 
+### 記憶
+
+| メソッド | パス | 説明 |
+|:---|:---|:---|
+| GET | `/api/memory/captures` | Episodic 記憶一覧 |
+| GET | `/api/memory/long_term` | Semantic 記憶一覧 |
+
 ### ゲーム
 
 | メソッド | パス | 説明 |
 |:---|:---|:---|
 | GET | `/api/game/state` | ゲーム状態取得 (Minecraft) |
-| GET | `/api/game/status` | Bot 接続状態 (Minecraft) |
-| POST | `/api/game/action` | ゲーム内アクション実行 (Minecraft) |
 | POST | `/api/game/connect` | Minecraft サーバーに接続 |
-| WebSocket | `/api/game/ws` | ゲームイベントストリーム (Minecraft) |
 | POST | `/api/game/screen/start` | 画面キャプチャゲーム開始 |
 | POST | `/api/game/screen/stop` | 画面キャプチャゲーム停止 |
-| GET | `/api/game/screen/status` | Screen ゲームステータス |
-| GET | `/api/game/profiles` | 登録済みゲームプロファイル一覧 |
-| POST | `/api/game/profiles/switch` | アクティブプロファイル切り替え |
-| GET | `/api/game/configs` | 利用可能なゲーム設定一覧 |
+| GET | `/api/game/profiles` | ゲームプロファイル一覧 |
 
 ### X (Twitter)
 
 | メソッド | パス | 説明 |
 |:---|:---|:---|
-| POST | `/api/actions/tweet/generate` | ツイート生成（投稿はしない） |
+| POST | `/api/actions/tweet/generate` | ツイート生成 |
 | POST | `/api/actions/tweet/approve` | ツイート承認＋投稿 |
-| POST | `/api/actions/tweet/reject` | ツイート提案を却下 |
 | GET | `/api/actions/tweet/pending` | 自律提案のポーリング |
-| GET | `/api/actions/tweet/history` | 投稿済みツイート履歴 |
 
 ### 動画
 
 | メソッド | パス | 説明 |
 |:---|:---|:---|
-| POST | `/api/video/analyze` | 動画アップロード＋解析 (learn / react モード) |
-| POST | `/api/video/analyze_url` | URL (YouTube等) から動画をDL＋解析 |
-| GET | `/api/video/status` | 動画解析機能の設定状態 |
+| POST | `/api/video/analyze` | 動画アップロード＋解析 |
+| POST | `/api/video/analyze_url` | URL から動画 DL＋解析 |
+
+### 統計
+
+| メソッド | パス | 説明 |
+|:---|:---|:---|
+| GET | `/stats/summary` | 会話統計 |
+| GET | `/stats/internal_state` | 内部状態 |
+| GET | `/stats/memory_graph` | 記憶ネットワーク可視化 |
+| GET | `/stats/inner_monologue` | 内心独白履歴 |
 
 ### 管理
 
@@ -477,7 +659,8 @@ cd frontend && npm run dev
 |:---|:---|:---|
 | GET | `/health` | ヘルスチェック |
 | POST | `/system/sleep` | Sleep Cycle 手動実行 |
-| GET | `/api/stats/observations` | 観測データ取得 |
+| GET | `/api/manager/context` | Nero 用コンテキスト取得 |
+| WebSocket | `/ws/room` | 部屋状態リアルタイム同期 |
 
 ---
 
@@ -485,61 +668,57 @@ cd frontend && npm run dev
 
 ```bash
 # 全テスト実行
-python -m pytest
+pytest tests/ -v
 
-# 特定テスト
-python -m pytest tests/test_depth_selector.py -v
-python -m pytest tests/test_s5_commit.py -v
-python -m pytest tests/test_context_builder.py -v
+# 記憶関連
+pytest tests/ -k "memory or retrieval or context_builder" -v
 
-# E2E テスト (サーバー起動が必要)
-$env:E2E_BASE_URL="http://127.0.0.1:8000"
-python -m pytest -q -m e2e
+# スナップショットテスト（DB状態 → バッチ処理の検証）
+pytest tests/test_snapshot_*.py -v
+
+# YAML Playbook テスト（ターン単位のステート遷移検証）
+pytest tests/test_playbook.py -v
+
+# CI と同じチェック
+ruff check backend/ && pytest tests/
 ```
 
-現在のテストスイート: **630+ テスト**
-
----
-
-## Sleep Cycle
-
-日次の記憶整理・Identity更新バッチ。手動実行:
-
-```bash
-python -m backend.scripts.sleep_cycle
-```
-
-実行内容:
-1. **Memory Block 構築** — Autonomous Reflection の日次ログを優先利用（フォールバック: `memory_events`）
-2. **印象記録** — 今日の対話で印象的だった内容を記録
-3. **セマンティック抽出** — エピソディック記憶からパターン・事実を LLM バッチ抽出（日次ログがある場合はスキップ）
-4. **Identity 提案** — 人格の変化を提案 (Origin の承認が必要)
-5. **忘却** — status 別半減期による retention 減衰
-6. **Episodic 圧縮** — 古い episodic を日単位でサマリー化
-
-出力先: `sleep_outputs/`
+現在のテストスイート: **1200+ テスト**
 
 ---
 
 ## 主要な設計判断
 
-- **Depth0/1/2 に会話履歴を注入**: Depth0 は直近3ターン、Depth1/2 は直近5ターンの会話履歴を含む
-- **TONE_ANCHOR をシステムプロンプト末尾に配置**: LLM は最後に読んだ指示に最も影響を受けるため、口調指定は末尾に置く
-- **S5 Commit でエピソディック記憶のみ保存**: Semantic 生成は Sleep Cycle に移行 (LLM バッチ抽出)
-- **Context Builder は Depth 別にメモリ注入量を制御**: Depth0 は PINNED FACTS のみ、Depth1/2 は PINNED FACTS + PATTERNS + WORKING + Short/Long Term
-- **Autonomous Reflection (R.1-R.4)**: 対話がない時間に自発的に記憶を振り返り、日横断パターンを semantic_memories に `state_tag='insight'` で保存。PATTERNS セクションとして会話に自動反映
-- **Sleep Cycle R.3 連携**: daily_reflections がある場合は memory_block として優先利用し、semantic extraction をスキップ（二重抽出防止）
-- **Depth2 ゲート**: 累計100ターン以上 + confidence >= 0.85 + context_coverage >= 0.7 で発動
-- **Minecraft vm サンドボックス**: LLM 生成コードは Node.js vm で実行。require/process/fs は注入せず安全に遮断
-- **スキルのハイブリッド保存**: Bot 側に .js ファイル（実行用）、Python 側に SQLite（検索用）
-- **自己修正ループ**: 失敗時は LLM が原因分析 → コード修正 → リトライ（最大3回）。3回失敗でギブアップ
-- **動画学習**: フレーム抽出は ffmpeg、場面認識は既存 Vision 基盤 (Qwen3-VL) を再利用
-- **外部検索の二重ゲート**: 自動検索は厳格なゲーティング（Depth/surprise/LanguageGate/confidence）で安易な外部依存を防止。ユーザー明示の検索トリガー（「ググって」等）は force_fetch でゲートをバイパス
-- **Spine v1.3**: 「検索できないとは言わない」指示を追加。LLM が検索手段を持つにもかかわらず「調べられません」と嘘をつくことを防止
-- **GameProfile ABC による抽象化**: Minecraft (API) と Screen Adapter (画面キャプチャ) を同一インターフェースで統一。Agent Graph の routing.py は Registry 経由で任意のゲームにアクセス
-- **Gemini Flash は Vision 専用**: ゲーム画面分析に Gemini Flash を使用。メイン LLM (LM Studio) とは独立し、`provider` パラメータで per-call 切り替え
-- **X 投稿は全件承認制**: 手動・自律問わず全ツイートは Origin の事前承認が必須。Phase 5 Action システムと `telemetry_kv` ベースの提案キューを併用
-- **Live2D Presence 思想**: 身体は内部状態の副作用。ランダム演出（Idle ループ）を廃止し、状態比例の呼吸のみ
+| 設計 | 理由 |
+|:---|:---|
+| Depth0 で結論を出さない | 結論を急がないことの仕様保証 |
+| WAIT を正当な出力にしている | 「分からない」は正式な状態 |
+| 記憶保存時に解釈を加えない | 物語化による改竄の防止 |
+| confidence エンジンが 5 メトリクス | 単一指標への依存を防ぐ |
+| body_constitution が禁止形ではなく理由形 | 柔軟な判断を可能にする |
+| identity.md の変更は承認制 | ニアの人格定義は Origin の承認なしに変更しない |
+| Somatic は数値ではなく体感テキスト | 仕組みは隠す。体験は渡す |
+| Pip の Bond 値を露出しない | ニアにも視聴者にも数値を見せない |
+| Sleep Cycle でバッチ学習 | ターンごとの学習は破局的忘却を起こす |
+| LLM の出力を NiaCore の State に含めない | LLM 交換可能性の保証 |
+
+---
+
+## ドキュメント
+
+| ドキュメント | 内容 |
+|:---|:---|
+| `docs/nia_design_philosophy.md` | 設計思想（全12セクション） |
+| `docs/niacore_lnn_design.md` | NiaCore LNN 設計書 v0.3 |
+| `docs/skeletoncore_design.md` | SkeletonCore 設計書 v0.3 |
+| `docs/somatic_self_awareness_design.md` | 体感ベース自己認識 |
+| `docs/nia_metacognition_design.md` | メタ認知 N.0〜N.5 |
+| `docs/pip_and_room_design.md` | Pip + 部屋の統合設計 |
+| `docs/memory_system_overview.md` | 記憶システム全体像 |
+| `docs/memory_retrieval_design.md` | Query-Aware Retrieval |
+| `docs/body_constitution.md` | 身体憲章 |
+| `CLAUDE.md` | AI エージェント向け設計ガイドライン |
+| `identity.md` | ニアの人格定義（変更は承認制） |
 
 ---
 

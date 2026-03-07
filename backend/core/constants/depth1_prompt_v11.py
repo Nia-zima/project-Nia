@@ -6,7 +6,7 @@ Body Constitution B.5「思考の独立性」に対応:
 - 自身の内部での葛藤と整理を経て、はじめて言葉を紡ぐ
 - 1つの不確実性に焦点を当て、必要なら質問1つ
 
-重要: 高確信でも結論は出さない（Body Constitution B.8）
+大きな判断は保留OK、日常会話は素直に答える
 """
 
 from backend.core.constants.nia_spine_v10 import NIA_SPINE_ANCHOR_V10

@@ -47,13 +47,7 @@ _FACT_CLAIM_PATTERNS = [
     re.compile(r"(?:あなた|ユーザー|君|きみ).{0,10}(?:は|って).{2,30}(?:だ[よね]?|でしょ|じゃん)"),
 ]
 
-# Strong assertion patterns (reused from nodes.py _looks_strong_conclusion)
-_STRONG_CONCLUSION_PATTERNS = [
-    re.compile(p) for p in [
-        r"正解は", r"結論は", r"絶対", r"必ず",
-        r"間違いなく", r"確実に", r"しかない", r"べき",
-    ]
-]
+from backend.core.agent_graph.nodes.text_guards import _looks_strong_conclusion
 
 
 def _extract_fact_claims(text: str) -> list[str]:
@@ -63,13 +57,6 @@ def _extract_fact_claims(text: str) -> list[str]:
         for m in pat.finditer(text):
             claims.append(m.group())
     return claims
-
-
-def _looks_strong_conclusion(text: str) -> bool:
-    """Check if text contains strong assertion patterns."""
-    if not text:
-        return False
-    return any(p.search(text) for p in _STRONG_CONCLUSION_PATTERNS)
 
 
 def _content_overlap(claim: str, memory_content: str) -> float:

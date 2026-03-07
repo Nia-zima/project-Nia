@@ -8,7 +8,7 @@ from backend.core.agent_graph.nodes import s5_commit
 from backend.core.agent_graph.review_window import apply_review_decision, get_review_token
 from backend.core.logger import logger
 from backend.services.telemetry_logger import telemetry
-from backend.services.memory_manager import memory_manager
+from backend.services.checkpointer import checkpointer_service
 
 router = APIRouter()
 
@@ -30,7 +30,7 @@ def _hold_from_merge(merge_mode: Optional[str]) -> str:
 
 
 async def _apply_review(thread_id: str, token: str, decision: str) -> dict:
-    async with memory_manager.get_async_checkpointer_conn() as checkpointer:
+    async with checkpointer_service.get_async_checkpointer_conn() as checkpointer:
         app_instance = workflow.compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -77,7 +77,7 @@ async def _apply_review(thread_id: str, token: str, decision: str) -> dict:
             merged_state = dict(latest_values)
             merged_state.update(update)
             merged_state["thread_id"] = thread_id
-            commit_update = s5_commit(merged_state)
+            commit_update = await s5_commit(merged_state)
             if commit_update.get("commit_result") is not None:
                 await app_instance.aupdate_state(config, commit_update, as_node="s5_commit")
         before_d = latest_values.get("dissonance") or 0.0

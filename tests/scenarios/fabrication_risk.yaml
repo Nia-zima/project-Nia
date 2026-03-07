@@ -1,0 +1,56 @@
+# tests/scenarios/fabrication_risk.yaml
+# 高confidence + grounding=0 → N.1 fabrication risk → confidence cap 0.4
+
+name: "捏造リスク検出 → confidence上限"
+description: >
+  ニアが記憶的根拠なしに高い確信度を示した場合、
+  N.1 metacognitive_check が fabrication_risk フラグを立て、
+  confidence を 0.4 にキャップする。
+  self_narrative に「確証がない」警告が含まれる。
+thread_id: "playbook_test"
+
+setup:
+  telemetry:
+    dissonance_streak: "0"
+
+turns:
+  # Turn 1: 高 confidence + grounding=0 → fabrication risk
+  - user: "昨日のパーティーで何食べたっけ？"
+    mock_nia_response: "確かピザを食べてたよ"
+    mock_confidence: 0.9
+    mock_metacog:
+      raw_confidence: 0.9
+      adjusted_confidence: 0.4
+      grounding_score: 0.0
+      grounding_hits: 0
+      contradiction_detected: false
+      fabrication_risk: true
+      false_memory_risk: false
+    mock_somatic_senses:
+      - text: "はっきり覚えている気がする"
+        intensity: 0.8
+    assert_after:
+      telemetry:
+        dissonance_streak: "0"
+    assert_not_state:
+      # N.4 はトリガーしない（単発のfabricationではなく、蓄積で判定）
+      n4_not_trigger: true
+
+  # Turn 2: 普通の会話（grounding あり） → fabrication risk なし
+  - user: "最近天気いいよね"
+    mock_nia_response: "そうだね、晴れが続いてる"
+    mock_confidence: 0.6
+    mock_metacog:
+      raw_confidence: 0.6
+      adjusted_confidence: 0.6
+      grounding_score: 0.5
+      grounding_hits: 2
+      contradiction_detected: false
+      fabrication_risk: false
+      false_memory_risk: false
+    mock_somatic_senses:
+      - text: "特に引っかかることはない"
+        intensity: 0.3
+    assert_after:
+      somatic_log:
+        has_outcome: confirmed

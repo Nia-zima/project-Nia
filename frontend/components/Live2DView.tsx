@@ -1,18 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useCallback } from "react";
-
-// ── Types ────────────────────────────────────────────────────────
-
-interface AvatarProps {
-  isTalking: boolean;
-  emotion: string;
-  isThinking?: boolean;
-  stateTag?: string;
-  gesture?: string;
-  gestureTick?: number;
-  audioVolume?: number;
-}
+import { useAvatarStore } from '@/lib/stores/avatarStore';
 
 // ── Emotion → Live2D parameter presets ───────────────────────────
 
@@ -216,15 +205,8 @@ function lerp(a: number, b: number, t: number): number {
 
 // ── Component ────────────────────────────────────────────────────
 
-export default function Live2DView({
-  isTalking,
-  emotion,
-  isThinking = false,
-  stateTag = "",
-  gesture = "",
-  gestureTick = 0,
-  audioVolume,
-}: AvatarProps) {
+export default function Live2DView() {
+  const { isTalking, emotion, isThinking, agentState: stateTag, gesture, gestureTick, audioVolume } = useAvatarStore();
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const appRef = useRef<any>(null);
@@ -238,6 +220,7 @@ export default function Live2DView({
   const animFrameRef = useRef(0);
   const gestureQueueRef = useRef("");
   const gestureActiveRef = useRef(false);
+  const gestureFrameRef = useRef(0);
   const initRef = useRef(false);
 
   // Current & target emotion params for smooth interpolation
@@ -270,6 +253,12 @@ export default function Live2DView({
     const model = modelRef.current;
     const def = GESTURE_DEFS[gestureName];
     if (!model || !def) return;
+
+    // Cancel any in-flight gesture animation
+    if (gestureFrameRef.current) {
+      cancelAnimationFrame(gestureFrameRef.current);
+      gestureFrameRef.current = 0;
+    }
 
     gestureActiveRef.current = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -315,12 +304,13 @@ export default function Live2DView({
       }
 
       if (!allDone) {
-        requestAnimationFrame(tick);
+        gestureFrameRef.current = requestAnimationFrame(tick);
       } else {
+        gestureFrameRef.current = 0;
         gestureActiveRef.current = false;
       }
     };
-    requestAnimationFrame(tick);
+    gestureFrameRef.current = requestAnimationFrame(tick);
   }, []);
 
   // ── Main init & animation loop ─────────────────────────────────

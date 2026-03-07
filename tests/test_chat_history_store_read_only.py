@@ -88,3 +88,49 @@ def test_get_memory_context_skips_sql_fallback_in_read_only(monkeypatch):
     finally:
         settings.LEGACY_MEMORY_READ_ONLY = old
         settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl
+
+
+def test_insert_capture_event_path_dedupes_by_text_hash():
+    old = bool(getattr(settings, "LEGACY_MEMORY_READ_ONLY", False))
+    old_tbl = bool(getattr(settings, "LEGACY_MEMORY_TABLES_ENABLED", False))
+    settings.LEGACY_MEMORY_READ_ONLY = True
+    settings.LEGACY_MEMORY_TABLES_ENABLED = False
+    init_schema()
+    tid = _thread("chs_cap")
+    capture = {
+        "id": f"cap_{uuid.uuid4().hex}",
+        "thread_id": tid,
+        "created_at": float(time.time()),
+        "raw_text": "capture body",
+        "state_tag": "CONSENT",
+        "emotion_tags": "[]",
+        "stream_id": None,
+        "message_id": "m_cap",
+        "origin_message_id": "m_cap",
+        "surprise": 0.1,
+        "keywords": "[]",
+        "entities": "[]",
+        "tags": "[]",
+        "refs": "{}",
+        "retention": 0.2,
+        "stage": "capture",
+        "text_hash": f"th_{uuid.uuid4().hex}",
+    }
+    try:
+        first = asyncio.run(chat_history_store.insert_capture(dict(capture)))
+        second = asyncio.run(chat_history_store.insert_capture(dict(capture)))
+        assert first
+        assert second == first
+
+        conn = get_conn()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE thread_id=? AND event_type='capture_recorded'",
+                (tid,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1
+    finally:
+        settings.LEGACY_MEMORY_READ_ONLY = old
+        settings.LEGACY_MEMORY_TABLES_ENABLED = old_tbl

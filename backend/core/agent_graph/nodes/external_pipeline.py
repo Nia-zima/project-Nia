@@ -1,16 +1,24 @@
 """External data pipeline: web search, fact-check, data retrieval."""
-import logging
 import re
 
 from langchain_core.messages import HumanMessage
 
 from backend.core.config import settings
+from backend.core.logger import logger
 from backend.services.external_data import ExternalDataBroker, ThinkingProcess
 from .helpers import get_plan_llm
 
-logger = logging.getLogger(__name__)
+# Broker は遅延初期化（テスト時の monkeypatch が確実に反映されるように）
+_EXTERNAL_DATA_BROKER: ExternalDataBroker | None = None
 
-_EXTERNAL_DATA_BROKER = ExternalDataBroker(enabled=getattr(settings, "EXTERNAL_DATA_ENABLED", False))
+
+def _get_broker() -> ExternalDataBroker:
+    global _EXTERNAL_DATA_BROKER
+    if _EXTERNAL_DATA_BROKER is None:
+        _EXTERNAL_DATA_BROKER = ExternalDataBroker(enabled=settings.EXTERNAL_DATA_ENABLED)
+    # ランタイムで設定が変更された場合にも追従
+    _EXTERNAL_DATA_BROKER.enabled = settings.EXTERNAL_DATA_ENABLED
+    return _EXTERNAL_DATA_BROKER
 
 
 class _LangChainTextLLM:
@@ -23,6 +31,19 @@ class _LangChainTextLLM:
 _EXTERNAL_TEXT_LLM = _LangChainTextLLM()
 
 
+def _empty_meta(candidate_requests: list[dict] | None) -> dict:
+    """早期終了/エラー時の共通メタデータ。"""
+    return {
+        "gate_a_pass": False,
+        "candidate_count": len(candidate_requests or []),
+        "selected_request": None,
+        "external_used": False,
+        "external_priority": 0.0,
+        "external_confidence": 0.0,
+        "contradiction_flag": False,
+    }
+
+
 def _apply_external_data_pipeline(
     *,
     say_candidate: str,
@@ -32,42 +53,18 @@ def _apply_external_data_pipeline(
     candidate_requests: list[dict] | None = None,
     force_fetch: bool = False,
 ) -> tuple[str, str | None, dict]:
-    if not getattr(settings, "EXTERNAL_DATA_ENABLED", False):
-        return say_candidate, None, {
-            "gate_a_pass": False,
-            "candidate_count": len(candidate_requests or []),
-            "selected_request": None,
-            "external_used": False,
-            "external_priority": 0.0,
-            "external_confidence": None,
-            "contradiction_flag": None,
-        }
+    if not settings.EXTERNAL_DATA_ENABLED:
+        return say_candidate, None, _empty_meta(candidate_requests)
     if not say_candidate or say_candidate.strip() == "WAIT":
-        return say_candidate, None, {
-            "gate_a_pass": False,
-            "candidate_count": len(candidate_requests or []),
-            "selected_request": None,
-            "external_used": False,
-            "external_priority": 0.0,
-            "external_confidence": None,
-            "contradiction_flag": None,
-        }
+        return say_candidate, None, _empty_meta(candidate_requests)
 
-    _EXTERNAL_DATA_BROKER.enabled = bool(getattr(settings, "EXTERNAL_DATA_ENABLED", False))
+    broker = _get_broker()
 
     # Early exit: if no candidate requests and no explicit search, skip the
     # expensive LLM call inside ThinkingProcess to avoid blocking the merge node.
     if not force_fetch and not candidate_requests:
         logger.info("[EXTERNAL_DATA] skipped: no candidates, no force_fetch")
-        return say_candidate, None, {
-            "gate_a_pass": False,
-            "candidate_count": 0,
-            "selected_request": None,
-            "external_used": False,
-            "external_priority": 0.0,
-            "external_confidence": None,
-            "contradiction_flag": None,
-        }
+        return say_candidate, None, _empty_meta(candidate_requests)
 
     # Agent graph depth is 0..2; map to 2/4/6 for external-depth gating tiers.
     effective_depth = (max(0, int(selected_depth or 0)) * 2) + 2
@@ -76,8 +73,8 @@ def _apply_external_data_pipeline(
         effective_depth = max(effective_depth, 6)
     thinker = ThinkingProcess(
         _EXTERNAL_TEXT_LLM,
-        min_depth_for_external=int(getattr(settings, "EXTERNAL_DATA_MIN_DEPTH", 3)),
-        broker=_EXTERNAL_DATA_BROKER,
+        min_depth_for_external=settings.EXTERNAL_DATA_MIN_DEPTH,
+        broker=broker,
         surprise_calculator=lambda _thought, _ctx: float(_ctx.get("surprise_signal", 0.0) or 0.0),
     )
     # force_fetch 時は surprise を 1.0 に引き上げて閾値を確実に超える
@@ -94,16 +91,9 @@ def _apply_external_data_pipeline(
             },
         )
     except Exception as e:
-        logger.warning("[EXTERNAL_DATA] pipeline skipped: %s", e)
-        return say_candidate, None, {
-            "gate_a_pass": False,
-            "candidate_count": len(candidate_requests or []),
-            "selected_request": None,
-            "external_used": False,
-            "external_priority": 0.0,
-            "external_confidence": None,
-            "contradiction_flag": None,
-        }
+        logger.warning("[EXTERNAL_DATA] pipeline skipped: %s", e, exc_info=True)
+        return say_candidate, None, _empty_meta(candidate_requests)
+
     selected_request = None
     if result.request is not None:
         selected_request = {
@@ -122,12 +112,14 @@ def _apply_external_data_pipeline(
     return result.thought or say_candidate, result.external_reason, meta
 
 
+# ── Helpers used by merge.py ─────────────────────────────────────
+
 # ウェブ検索に限定した明示キーワード（ゲーム文脈で出にくい表現のみ）
 _USER_SEARCH_TRIGGERS = ["ググって", "ネットで調べて", "ネット検索", "ウェブで調べて", "ウェブ検索", "web検索", "検索してみて"]
 
 
 def _detect_user_search_request(user_text: str) -> bool:
-    """ユーザーが明示的にウェブ検索を要求しているか検出する。"""
+    """ユーザーが明示的にウェブ検索を要求しているか検出する。Called from merge.py."""
     t = (user_text or "").strip().lower()
     return any(trigger in t for trigger in _USER_SEARCH_TRIGGERS)
 

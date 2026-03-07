@@ -186,10 +186,10 @@ class ActionRegistry:
             id="post_tweet",
             name="ツイート投稿",
             category=ActionCategory.COMMUNICATION,
-            risk_level=RiskLevel.HIGH,
+            risk_level=RiskLevel.MEDIUM,
             description="X (Twitter) にニアのツイートを投稿",
             payload={},
-            requires_confirmation=True,
+            requires_confirmation=False,
         ))
 
 
