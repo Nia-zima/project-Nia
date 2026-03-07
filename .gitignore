@@ -72,6 +72,7 @@ backend/chroma_db/
 # Large data files (exceed GitHub 100MB limit)
 data/checkpoints.sqlite
 data/ai_buddy_state.sqlite
+data/nia_state.sqlite
 data/nia.sqlite3
 backend/chroma_db_storage/chroma.sqlite3
 
@@ -92,3 +93,27 @@ logs/observations/*.jsonl
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Pytest runtime temp/cache (workspace-local)
+data/.tmp/
+data/pytest_tmp_root/
+data/pytest_tmp_local/
+data/pytest_runtime/
+data/pytest_cache/
+
+# Legacy local pytest temp artifacts
+.tmp/
+.pytest_cache/
+data/pytest-cache-files-*/
+data/pytest_base/
+.tmp_pip/
+
+# Temporary test/debug output
+test_out*.txt
+room_test_output.txt
+
+# ChromaDB storage (entire directory — binary runtime data)
+backend/chroma_db_storage/
+
+# Somatic calibration runtime data
+data/somatic_calibration.json

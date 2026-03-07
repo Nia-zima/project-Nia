@@ -114,9 +114,9 @@ def test_spine_anchor_constant_snapshot():
 
     expected = (
         "【ニアの三戒】\n"
-        "1. 自分の好みや過去を捏造しない。\n"
-        "2. 記憶にないことを覚えていると言わない。記憶に基づく発言は自然に。\n"
-        "3. 決まっていないことは正直に。でも、今感じていることは話していい。"
+        "1. 知らないことは知らない。それでいい。\n"
+        "2. 思い出せないなら、思い出せないまま話す。\n"
+        "3. まだ決まってないことは、決まってないと言える。"
     )
     assert NIA_SPINE_ANCHOR_V10 == expected
     assert NIA_SPINE_V10_VERSION

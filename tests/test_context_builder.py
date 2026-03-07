@@ -18,6 +18,7 @@ from backend.services.memory.context_builder import (
     _build_long_term,
 )
 from backend.services.memory.models import SemanticMemory, WorkingItem
+from conftest import make_semantic as _make_semantic, make_working as _make_working
 
 
 @pytest.fixture(autouse=True)
@@ -32,50 +33,6 @@ def _setup_db():
     finally:
         conn.close()
     yield
-
-
-def _make_semantic(
-    *,
-    id: str = None,
-    thread_id: str = "t1",
-    content: str = "test fact",
-    status: str = "confirmed",
-    confidence: float = 0.8,
-    state_tag: str | None = None,
-) -> SemanticMemory:
-    now = time.time()
-    return SemanticMemory(
-        id=id or str(uuid.uuid4()),
-        thread_id=thread_id,
-        content=content,
-        valid_from=now,
-        created_at=now,
-        updated_at=now,
-        status=status,
-        confidence=confidence,
-        state_tag=state_tag,
-    )
-
-
-def _make_working(
-    *,
-    id: str = None,
-    thread_id: str = "t1",
-    item_type: str = "question",
-    content: str = "pending question",
-    priority: int = 3,
-) -> WorkingItem:
-    now = time.time()
-    return WorkingItem(
-        id=id or str(uuid.uuid4()),
-        thread_id=thread_id,
-        item_type=item_type,
-        content=content,
-        priority=priority,
-        created_turn_id="turn0",
-        created_at=now,
-        updated_at=now,
-    )
 
 
 def _insert_semantic(mem: SemanticMemory):
@@ -331,3 +288,186 @@ class TestFormatMemorySections:
         assert "PATTERNS" not in result
         assert "=== WORKING ===" in result
         assert "Long Term:" in result
+
+
+# ── R.d: Pinned sort mode ────────────────────────────────────
+
+
+class TestPinnedSortMode:
+    """Tests for R.d: PINNED_SORT_MODE configuration."""
+
+    def test_confidence_mode_preserves_order(self):
+        """PINNED_SORT_MODE=confidence keeps confidence DESC order (default from DB)."""
+        from unittest.mock import patch
+
+        _insert_semantic(_make_semantic(content="low conf", confidence=0.75))
+        _insert_semantic(_make_semantic(content="high conf", confidence=0.95))
+
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "confidence"
+            mock_s.CONTEXT_MAX_PINNED = 5
+            result = _build_pinned(_search_active("t1"), user_query="test")
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        # confidence DESC order from search_active
+        assert "high conf" in lines[0]
+        assert "low conf" in lines[1]
+
+    def test_relevance_mode_reorders_by_similarity(self):
+        """PINNED_SORT_MODE=relevance reorders by query similarity."""
+        from unittest.mock import patch
+        import numpy as np
+
+        # Create memories with embeddings
+        cat_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        dog_vec = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+        mem_cat = _make_semantic(content="user likes cats", confidence=0.8)
+        mem_cat.embedding = cat_vec.tobytes()
+        mem_dog = _make_semantic(content="user has a dog", confidence=0.9)
+        mem_dog.embedding = dog_vec.tobytes()
+
+        _insert_semantic(mem_cat)
+        _insert_semantic(mem_dog)
+
+        active = _search_active("t1")
+
+        # Query embedding similar to cat
+        query_vec = np.array([[0.9, 0.1, 0.0]], dtype=np.float32)
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "relevance"
+            with patch("backend.core.embedding_model.encode", return_value=query_vec):
+                result = _build_pinned(active, user_query="cats are great")
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        # cat should be first (higher similarity)
+        assert "cats" in lines[0]
+
+    def test_random_mode_returns_all_items(self):
+        """PINNED_SORT_MODE=random returns all pinned items (order varies)."""
+        from unittest.mock import patch
+
+        for i in range(5):
+            _insert_semantic(_make_semantic(content=f"random fact {i}", confidence=0.9))
+
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "random"
+            result = _build_pinned(_search_active("t1"), limit=5)
+
+        assert result.count("- ") == 5
+
+    def test_fallback_on_embedding_failure(self):
+        """When embedding fails in relevance mode, falls back to default order."""
+        from unittest.mock import patch
+
+        _insert_semantic(_make_semantic(content="fact A", confidence=0.9))
+        _insert_semantic(_make_semantic(content="fact B", confidence=0.8))
+
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "relevance"
+            with patch("backend.core.embedding_model.encode", return_value=None):
+                result = _build_pinned(_search_active("t1"), user_query="test query")
+
+        assert "fact A" in result
+        assert "fact B" in result
+
+    def test_relevance_mode_topic_intent_boost(self):
+        """M.2: Topic keyword in query boosts matching pinned facts."""
+        from unittest.mock import patch
+        import numpy as np
+        from backend.services.memory.retrieval import QueryIntent
+
+        # Two memories with identical similarity but different content
+        vec = np.array([0.5, 0.5, 0.0], dtype=np.float32)
+        mem_game = _make_semantic(content="ゲームが好き", confidence=0.8)
+        mem_game.embedding = vec.tobytes()
+        mem_other = _make_semantic(content="コーヒーが好き", confidence=0.85)
+        mem_other.embedding = vec.tobytes()
+
+        _insert_semantic(mem_game)
+        _insert_semantic(mem_other)
+        active = _search_active("t1")
+
+        # Mock detect_intent to ensure "ゲーム" is extracted as keyword
+        # (janome may not be available in test environment)
+        mock_intent = QueryIntent(is_topic_specific=True, topic_keywords=["ゲーム"])
+
+        # Query about "ゲーム" — both have same cosine sim, but game gets intent bonus
+        query_vec = np.array([[0.5, 0.5, 0.0]], dtype=np.float32)
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "relevance"
+            with patch("backend.core.embedding_model.encode", return_value=query_vec), \
+                 patch("backend.services.memory.retrieval.detect_intent", return_value=mock_intent):
+                result = _build_pinned(active, user_query="ゲームについて教えて")
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        # Game fact should come first due to topic keyword bonus
+        assert "ゲーム" in lines[0]
+
+    def test_relevance_mode_temporal_intent_boost(self):
+        """M.2: Temporal query boosts recently updated facts."""
+        from unittest.mock import patch
+        import numpy as np
+
+        vec = np.array([0.5, 0.5, 0.0], dtype=np.float32)
+        now = time.time()
+
+        # Recent memory (1 hour ago)
+        mem_recent = _make_semantic(content="recent fact", confidence=0.8)
+        mem_recent.embedding = vec.tobytes()
+        mem_recent.updated_at = now - 3600  # 1h ago
+
+        # Old memory (10 days ago)
+        mem_old = _make_semantic(content="old fact", confidence=0.85)
+        mem_old.embedding = vec.tobytes()
+        mem_old.updated_at = now - 864000  # 10d ago
+
+        _insert_semantic(mem_recent)
+        _insert_semantic(mem_old)
+        active = _search_active("t1")
+
+        # Query with "昨日" — temporal bonus for recent facts
+        query_vec = np.array([[0.5, 0.5, 0.0]], dtype=np.float32)
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "relevance"
+            with patch("backend.core.embedding_model.encode", return_value=query_vec):
+                result = _build_pinned(active, user_query="昨日の話なんだけど")
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        # Recent fact should come first due to temporal bonus ("昨日" ≤ 48h)
+        assert "recent" in lines[0]
+
+    def test_relevance_mode_no_intent_pure_similarity(self):
+        """M.2: Without temporal/topic intent, uses pure similarity."""
+        from unittest.mock import patch
+        import numpy as np
+
+        # High similarity memory
+        hi_vec = np.array([0.9, 0.1, 0.0], dtype=np.float32)
+        # Low similarity memory
+        lo_vec = np.array([0.1, 0.9, 0.0], dtype=np.float32)
+
+        mem_hi = _make_semantic(content="similar to query", confidence=0.8)
+        mem_hi.embedding = hi_vec.tobytes()
+        mem_lo = _make_semantic(content="different topic", confidence=0.9)
+        mem_lo.embedding = lo_vec.tobytes()
+
+        _insert_semantic(mem_hi)
+        _insert_semantic(mem_lo)
+        active = _search_active("t1")
+
+        # Generic query (no temporal, no specific topic keywords)
+        query_vec = np.array([[0.9, 0.1, 0.0]], dtype=np.float32)
+        with patch("backend.services.memory.context_builder.settings") as mock_s:
+            mock_s.PINNED_SORT_MODE = "relevance"
+            with patch("backend.core.embedding_model.encode", return_value=query_vec):
+                result = _build_pinned(active, user_query="hi")
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 2
+        # Higher similarity should be first
+        assert "similar" in lines[0]

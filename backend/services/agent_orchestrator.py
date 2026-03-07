@@ -2,42 +2,26 @@ from __future__ import annotations
 
 import json
 import time
-import logging
 import asyncio
-from typing import Optional, Iterable, Any, Dict
+from typing import Optional, Iterable
 
 from backend.core.ports import MemoryGateway, ThoughtGateway, TelemetrySink, TTSGateway, VisionGateway, HistoryGateway, InnerMonologueLogger, ToolRegistry, CheckpointerGateway, MemoryCaptureGateway, VectorGateway, CaptureBuilderGateway
 from backend.core.logger import logger
-from backend.services.lint_output import (
-    lint_output,
-    semantic_lint_output,
-    rewrite_output_if_needed,
-    build_output_lint_log,
-)
-from backend.core.constants.nia_spine_v10 import NIA_SPINE_V10_VERSION
 from backend.core.config import settings
-from backend.services.speech_sanitizer import finalize_output
-import re as _re
+from backend.core.model_adapter import THINK_RE as _THINK_RE
+from backend.services.sse_pipeline import (
+    SSEContext,
+    _ms,
+    _ensure_str,
+    _sse_emit,
+    _should_emit_text_event,
+    _handle_sse_text,
+    _handle_sse_done,
+    _persist_stream_result,
+)
 
-SSE_DEBUG_EVERY = int(__import__("os").getenv("SSE_DEBUG_EVERY", "50"))
-_THINK_RE = _re.compile(r"<think>.*?</think>\s*", _re.DOTALL)
 
-def _ms() -> int:
-    return int(time.time() * 1000)
-
-def _ensure_str(chunk: Any) -> str:
-    if isinstance(chunk, (bytes, bytearray)):
-        return chunk.decode("utf-8", errors="ignore")
-    return str(chunk)
-
-def _sse_json(obj: Dict[str, Any]) -> str:
-    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
-
-def _should_emit_text_event(ev: Dict[str, Any]) -> bool:
-    # final=True means definitive text, final=False means suppress.
-    # Missing final is treated as normal streaming text.
-    return ev.get("final") is not False
-
+# ── Orchestrator class ───────────────────────────────────────
 
 class DefaultAgentOrchestrator:
     """
@@ -83,6 +67,23 @@ class DefaultAgentOrchestrator:
         except Exception:
             pass
 
+    def _build_ports(self) -> dict:
+        """Build ports dict for run_agent_stream / run_agent_non_stream."""
+        return {
+            "memory": self._memory,
+            "thought": self._thought,
+            "history": self._history,
+            "inner_monologue": self._inner_monologue,
+            "tools": self._tools,
+            "checkpointer": self._checkpointer,
+            "memory_capture": self._memory_capture,
+            "capture_builder": self._capture_builder,
+            "vector_store": self._vector_store,
+            "telemetry": self._telemetry,
+            "tts": self._tts,
+            "vision": self._vision,
+        }
+
     async def stream_chat(
         self,
         *,
@@ -94,44 +95,11 @@ class DefaultAgentOrchestrator:
         stream_id: Optional[str],
         message_id: Optional[str],
     ) -> Iterable[dict]:
-        """
-        Temporary pass-through to existing core stream.
-        Step 2 will migrate logic from controllers/agent.py here.
-        """
+        """Pass-through to core agent stream."""
         from backend.core.agent import run_agent_stream
 
         logger.debug("[Orchestrator] stream_chat passthrough thread=%s mode=%s", thread_id, mode)
-        if not stream_id:
-            async for ev in run_agent_stream(
-                input_text=input_text,
-                thread_id=thread_id,
-                voice_id=voice_id,
-                image_data=image_data,
-                mode=mode,
-                memory_refs={
-                    "conversation_id": thread_id,
-                    "message_id": message_id,
-                    "stream_id": stream_id,
-                },
-                ports={
-                    "memory": self._memory,
-                    "thought": self._thought,
-                    "history": self._history,
-                    "inner_monologue": self._inner_monologue,
-                    "tools": self._tools,
-                    "checkpointer": self._checkpointer,
-                    "memory_capture": self._memory_capture,
-                    "capture_builder": self._capture_builder,
-                    "vector_store": self._vector_store,
-                    "telemetry": self._telemetry,
-                    "tts": self._tts,
-                    "vision": self._vision,
-                },
-            ):
-                yield ev
-            return
-
-        llm_iter = run_agent_stream(
+        async for ev in run_agent_stream(
             input_text=input_text,
             thread_id=thread_id,
             voice_id=voice_id,
@@ -142,24 +110,9 @@ class DefaultAgentOrchestrator:
                 "message_id": message_id,
                 "stream_id": stream_id,
             },
-            ports={
-                "memory": self._memory,
-                "thought": self._thought,
-                "history": self._history,
-                "inner_monologue": self._inner_monologue,
-                "tools": self._tools,
-                "checkpointer": self._checkpointer,
-                "memory_capture": self._memory_capture,
-                "capture_builder": self._capture_builder,
-                "vector_store": self._vector_store,
-                "telemetry": self._telemetry,
-                "tts": self._tts,
-                "vision": self._vision,
-            },
-        )
-        async for ev in llm_iter:
+            ports=self._build_ports(),
+        ):
             yield ev
-        return
 
     async def stream_sse(
         self,
@@ -172,106 +125,20 @@ class DefaultAgentOrchestrator:
         stream_id: Optional[str],
         message_id: Optional[str],
     ) -> Iterable[str]:
-        """
-        SSE-safe stream generator (moved from controller).
-        """
-        done_sent = False
-        done_pending = False
-        current_turn_id = None
-        visible_ai_text = ""
-        final_text: str | None = None
-        stream_error: str | None = None
-        stream_buffer = ""
-        first_token_sent = False
-        last_event: dict | None = None
-        last_event_type: str | None = None
-        last_raw_content_type: str | None = None
-        last_state_tag: str | None = None
-        text_seq = 0
-        output_lint_logged = False
-        lint_message_id: str | None = None
-        last_text_emit_ms = 0
-        sse_min_interval_ms = int(getattr(settings, "SSE_MIN_INTERVAL_MS", 0) or 0)
-
-        async def _apply_output_lint(text: str) -> tuple[str, list, list, list, bool]:
-            # Evidence is optional; pass when available.
-            violations = lint_output(text, evidence=None)
-            rewritten = text
-            rewrite_applied = False
-            post_violations = []
-            if any(v.severity == "hard" for v in violations):
-                rewritten = await rewrite_output_if_needed(text, violations)
-                rewrite_applied = rewritten != text
-                if rewrite_applied:
-                    post_violations = lint_output(rewritten, evidence=None)
-            semantic_violations = await semantic_lint_output(rewritten)
-            return rewritten, violations, post_violations, semantic_violations, rewrite_applied
-
-        async def _emit_output_lint_log(
-            *,
-            violations: list,
-            post_violations: list,
-            semantic_violations: list,
-            rewrite_applied: bool,
-            text_len_before: int,
-            text_len_after: int,
-        ) -> None:
-            nonlocal output_lint_logged
-            if output_lint_logged:
-                return
-            payload = build_output_lint_log(
-                violations=violations,
-                post_violations=post_violations,
-                semantic_violations=semantic_violations,
-                rewrite_applied=rewrite_applied,
-                text_len_before=text_len_before,
-                text_len_after=text_len_after,
-                message_id=lint_message_id,
-                thread_id=thread_id,
-                turn_id=current_turn_id,
-            )
-            payload["spine_version"] = NIA_SPINE_V10_VERSION
-            payload["spine_anchor_used"] = {
-                "depth0": True,
-                "rewrite": rewrite_applied,
-                "gate": False,
-            }
-            d_lint = payload.get("dissonance_delta_lint") or 0.0
-            if isinstance(d_lint, (int, float)) and d_lint > 0:
-                await self._telemetry_event(
-                    thread_id,
-                    "telemetry_kv_add",
-                    {"key": f"dissonance_lint_total:{thread_id}", "delta": float(d_lint)},
-                )
-            await self._telemetry_event(thread_id, "commit_log", payload)
-            output_lint_logged = True
+        """SSE-safe stream generator (moved from controller)."""
+        sctx = SSEContext(
+            thread_id=thread_id,
+            stream_id=stream_id,
+            sse_min_interval_ms=int(getattr(settings, "SSE_MIN_INTERVAL_MS", 0) or 0),
+            t0=_ms(),
+        )
 
         def emit(event: dict) -> str:
-            if stream_id:
-                event = dict(event)
-                event["stream_id"] = stream_id
-            return _sse_json(event)
-
-        async def _emit_text_append(part: str) -> str:
-            nonlocal visible_ai_text, last_text_emit_ms
-            if not part:
-                return ""
-            safe_part = str(part)
-            visible_ai_text = str(visible_ai_text)
-            visible_ai_text += safe_part
-            if sse_min_interval_ms > 0:
-                now = _ms()
-                wait_ms = sse_min_interval_ms - (now - last_text_emit_ms)
-                if wait_ms > 0:
-                    await asyncio.sleep(wait_ms / 1000)
-                last_text_emit_ms = _ms()
-            return emit({"type": "text", "content": safe_part})
+            return _sse_emit(event, stream_id)
 
         try:
             from backend.services.chat_history_store import chat_history_store
-            from backend.services.speech_sanitizer import detect_internal_leak, is_critical_leak, TAG_LINE_RE, INTERNAL_PLAN_LINE_RE, _looks_like_plan_line
 
-            t0 = _ms()
             await self._telemetry_event(thread_id, "chat_received", {
                 "user_len": len(input_text or ""),
                 "has_image": bool(image_data),
@@ -287,7 +154,7 @@ class DefaultAgentOrchestrator:
                 else:
                     logger.info(f"[API] Image saved: {image_url}")
 
-            current_turn_id = await chat_history_store.get_next_turn_id(thread_id)
+            sctx.current_turn_id = await chat_history_store.get_next_turn_id(thread_id)
 
             # content を OpenAI 互換の multipart 形式で構築
             if image_url:
@@ -300,12 +167,12 @@ class DefaultAgentOrchestrator:
 
             user_message_id = await chat_history_store.append_message(
                 thread_id=thread_id,
-                turn_id=current_turn_id,
+                turn_id=sctx.current_turn_id,
                 role="user",
                 content=user_content,
                 attachments=[]
             )
-            lint_message_id = str(message_id or user_message_id)
+            sctx.lint_message_id = str(message_id or user_message_id)
 
             await self._telemetry_event(thread_id, "stream_started", {
                 "mode": "stream_chat",
@@ -327,6 +194,7 @@ class DefaultAgentOrchestrator:
             except Exception as e:
                 logger.warning(f"[API] Dream delivery failed: {e}")
 
+            # ── Main event loop (dispatch to handlers) ──
             async for ev in self.stream_chat(
                 input_text=input_text,
                 thread_id=thread_id,
@@ -336,14 +204,14 @@ class DefaultAgentOrchestrator:
                 stream_id=stream_id,
                 message_id=message_id or user_message_id,
             ):
-                last_event = ev if isinstance(ev, dict) else {"type": "non_dict", "value": str(ev)}
+                sctx.last_event = ev if isinstance(ev, dict) else {"type": "non_dict", "value": str(ev)}
                 if not isinstance(ev, dict):
                     logger.error(f"non-dict event received: {type(ev)} {ev}")
                     yield emit({"type": "error", "content": f"Internal Error: non-dict event {type(ev)}"})
                     continue
 
                 msg_type = ev.get("type")
-                last_event_type = str(msg_type)
+                sctx.last_event_type = str(msg_type)
 
                 if msg_type == "event" and ev.get("name") == "final_result":
                     payload = ev.get("payload") or {}
@@ -353,257 +221,65 @@ class DefaultAgentOrchestrator:
                             # Safety net: strip <think> blocks from final_text
                             ft = _THINK_RE.sub("", ft).strip()
                             payload["final_text"] = ft
-                            final_text = ft
+                            sctx.final_text = ft
                     yield emit(ev)
-                    continue
-
-                if msg_type == "text":
-                    if not _should_emit_text_event(ev):
-                        continue
-                    raw_content = ev.get("content", "")
-                    chunk_content = "" if raw_content is None else str(raw_content)
-                    # Safety net: strip residual <think>...</think> blocks
-                    if "<think>" in chunk_content:
-                        chunk_content = _THINK_RE.sub("", chunk_content).strip()
-                        if not chunk_content:
-                            continue
-                    last_raw_content_type = type(raw_content).__name__
-
-                    if chunk_content:
-                        text_seq += 1
-                        if logger.isEnabledFor(logging.DEBUG):
-                            if text_seq == 1 or (SSE_DEBUG_EVERY > 0 and text_seq % SSE_DEBUG_EVERY == 0):
-                                logger.debug(
-                                    "[DEBUG_SSE_TEXT] seq=%s stream_id=%s len=%s head=%s",
-                                    text_seq,
-                                    stream_id,
-                                    len(chunk_content),
-                                    chunk_content[:80],
-                                )
-
-                    if (not first_token_sent) and chunk_content:
-                        first_token_sent = True
-                        await self._telemetry_event(thread_id, "stream_first_token", {
-                            "ms_from_start": _ms() - t0
-                        })
-
-                    stream_buffer = str(stream_buffer) + chunk_content
-
-                    while "\n" in stream_buffer:
-                        line, stream_buffer = stream_buffer.split("\n", 1)
-                        stripped = line.strip()
-
-                        if stripped and TAG_LINE_RE.fullmatch(stripped):
-                            yield emit({"type": "internal", "content": stripped})
-                            continue
-                        if stripped and _looks_like_plan_line(stripped):
-                            # Drop leaked planner bullets from stream output
-                            continue
-
-                        if line:
-                            leak_reasons = detect_internal_leak(line)
-                            if is_critical_leak(leak_reasons):
-                                stream_error = "safety_block"
-                                await self._telemetry_event(thread_id, "safety_block", {
-                                    "scope": "stream_chat",
-                                    "reasons": leak_reasons,
-                                })
-                            else:
-                                res = await _emit_text_append(line + "\n")
-                                if res:
-                                    yield res
-                        else:
-                            res = await _emit_text_append("\n")
-                            if res:
-                                yield res
-
-                    if stream_buffer and not stream_buffer.lstrip().startswith("[["):
-                        # Drop leaked planner bullets even if no newline arrived.
-                        # If plan line is glued to response (no newline), strip prefix only.
-                        sb_stripped = stream_buffer.lstrip()
-                        if _looks_like_plan_line(sb_stripped):
-                            # Remove the leading plan line prefix; keep the rest
-                            # (handles cases like "- Briefly ...マインクラフト...")
-                            cleaned = INTERNAL_PLAN_LINE_RE.sub("", sb_stripped, count=1).lstrip()
-                            stream_buffer = cleaned
-                            if not stream_buffer:
-                                continue
-                        leak_reasons = detect_internal_leak(stream_buffer)
-                        if is_critical_leak(leak_reasons):
-                            stream_error = "safety_block"
-                            await self._telemetry_event(thread_id, "safety_block", {
-                                "scope": "stream_chat",
-                                "reasons": leak_reasons,
-                            })
-                        else:
-                            res = await _emit_text_append(stream_buffer)
-                            if res:
-                                yield res
-                        stream_buffer = ""
-
-                elif msg_type == "emotion":
+                elif msg_type == "text":
+                    for sse_str in await _handle_sse_text(sctx, ev, self):
+                        yield sse_str
+                elif msg_type in ("emotion", "gesture", "audio"):
                     yield emit(ev)
-
                 elif msg_type == "state":
                     tag = ev.get("tag") if isinstance(ev, dict) else None
-                    if tag != last_state_tag:
-                        last_state_tag = tag
+                    if tag != sctx.last_state_tag:
+                        sctx.last_state_tag = tag
                     yield emit(ev)
-
-                elif msg_type == "gesture":
-                    yield emit(ev)
-
-                elif msg_type == "audio":
-                    yield emit(ev)
-
                 elif msg_type == "error":
-                    stream_error = str(ev.get("content") or "stream_error")
+                    sctx.stream_error = str(ev.get("content") or "stream_error")
                     yield emit(ev)
-
                 elif msg_type == "done":
-                    done_pending = True
-                    # --- Emit remaining text immediately (no LLM lint) ---
-                    # Use fast regex-only lint; defer semantic LLM lint to background.
-                    _lint_target: str | None = None
-                    if final_text:
-                        _fast_violations = lint_output(final_text, evidence=None)
-                        _fast_linted = final_text
-                        if any(v.severity == "hard" for v in _fast_violations):
-                            _fast_linted = await rewrite_output_if_needed(final_text, _fast_violations)
-                        res = await _emit_text_append(_fast_linted)
-                        if res:
-                            yield res
-                        _lint_target = _fast_linted
-                    if stream_buffer:
-                        tail = stream_buffer
-                        stream_buffer = ""
-                        stripped = tail.strip()
-                        if stripped and TAG_LINE_RE.fullmatch(stripped):
-                            yield emit({"type": "internal", "content": stripped})
-                        elif stripped and _looks_like_plan_line(stripped):
-                            pass
-                        else:
-                            leak_reasons = detect_internal_leak(tail)
-                            if is_critical_leak(leak_reasons):
-                                stream_error = "safety_block"
-                                await self._telemetry_event(thread_id, "safety_block", {
-                                    "scope": "stream_chat",
-                                    "reasons": leak_reasons,
-                                })
-                            else:
-                                res = await _emit_text_append(tail)
-                                if res:
-                                    yield res
-                                if not _lint_target:
-                                    _lint_target = tail
-                    # Yield done immediately so frontend can clear loading state
-                    yield emit(ev)
-                    done_sent = True
-                    # Fire-and-forget: semantic lint in background (non-blocking)
-                    if _lint_target:
-                        async def _bg_lint(text: str) -> None:
-                            try:
-                                _linted, _v, _pv, _sv, _rw = await _apply_output_lint(text)
-                                await _emit_output_lint_log(
-                                    violations=_v,
-                                    post_violations=_pv,
-                                    semantic_violations=_sv,
-                                    rewrite_applied=_rw,
-                                    text_len_before=len(text),
-                                    text_len_after=len(_linted),
-                                )
-                            except Exception:
-                                logger.debug("[BG_LINT] failed", exc_info=True)
-                        asyncio.create_task(_bg_lint(_lint_target))
-                    continue
-
+                    for sse_str in await _handle_sse_done(sctx, ev, self):
+                        yield sse_str
                 else:
                     yield emit(ev)
 
         except Exception as e:
-            stream_error = str(e)
+            sctx.stream_error = str(e)
             logger.exception(
                 "safe_stream_generator failed: %s | types: visible_ai_text=%s stream_buffer=%s last_event_type=%s last_raw_content_type=%s last_event=%s",
                 e,
-                type(visible_ai_text).__name__,
-                type(stream_buffer).__name__,
-                last_event_type,
-                last_raw_content_type,
-                last_event,
+                type(sctx.visible_ai_text).__name__,
+                type(sctx.stream_buffer).__name__,
+                sctx.last_event_type,
+                sctx.last_raw_content_type,
+                sctx.last_event,
             )
             yield emit({"type": "error", "content": str(e)})
 
         finally:
-            try:
-                from backend.services.chat_history_store import chat_history_store
-                def _looks_like_broken_output(text: str) -> bool:
-                    t = (text or "").strip()
-                    if not t:
-                        return True
-                    if "LLMResult" in t or "generations" in t:
-                        return True
-                    if "内部でエラーが発生しました" in t:
-                        return True
-                    if t.startswith("- ") and "Acknowledge" in t:
-                        return True
-                    if "\n- " in t and "Acknowledge" in t:
-                        return True
-                    return False
-
-                _raw_save = (final_text or visible_ai_text or "").strip()
-                text_to_save = finalize_output(_raw_save) if _raw_save else ""
-                done_for_log = done_sent or done_pending
-                if current_turn_id is not None and text_to_save and not _looks_like_broken_output(text_to_save):
-                    await chat_history_store.append_message(
-                        thread_id=thread_id,
-                        turn_id=current_turn_id,
-                        role="assistant",
-                        content={
-                            "text": text_to_save,
-                            "meta": {
-                                "incomplete": not done_for_log,
-                                "error": bool(stream_error)
-                            }
-                        },
-                        attachments=[]
-                    )
-
-                    if done_for_log:
-                        await self._telemetry_event(thread_id, "chat_completed", {
-                            "len": len(text_to_save),
-                            "ms": _ms() - t0
-                        })
-                        # Phase R.1: Update last_message_at for idle detection
-                        try:
-                            from backend.core.db import get_conn as _get_conn
-                            _rconn = _get_conn()
-                            try:
-                                _rconn.execute(
-                                    "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES ('last_message_at', ?, ?)",
-                                    (str(time.time()), int(time.time())),
-                                )
-                            finally:
-                                _rconn.close()
-                        except Exception:
-                            pass
-            except Exception as log_err:
-                logger.warning(f"A-layer assistant log failed: {log_err}")
-
-            if not done_sent:
+            await _persist_stream_result(sctx, self)
+            if not sctx.done_sent:
                 yield emit({"type": "done"})
-                done_sent = True
+                sctx.done_sent = True
 
     async def collect_text_from_agent_stream(self, input_text: str, thread_id: str) -> str:
         """
-        run_agent_stream を内部で回し、type=text の content だけ結合して返す。
+        run_agent_stream を内部で回し、最終テキストを返す。
+
+        final_result イベントの final_text（merge 済み・タグ除去済み）を優先。
+        なければストリーミングチャンクの結合テキストにフォールバック。
         """
-        full_text = ""
+        streaming_text = ""
+        final_text = ""
         try:
             async for chunk in self.stream_chat(input_text=input_text, thread_id=thread_id, voice_id="14", image_data=None, mode="normal", stream_id=None, message_id=None):
                 if isinstance(chunk, dict):
                     if chunk.get("type") == "text":
                         content = chunk.get("content", "")
-                        full_text += "" if content is None else str(content)
+                        streaming_text += "" if content is None else str(content)
+                    elif chunk.get("type") == "event" and chunk.get("name") == "final_result":
+                        ft = (chunk.get("payload") or {}).get("final_text", "")
+                        if ft and ft != "WAIT":
+                            final_text = ft
                     elif chunk.get("type") == "done":
                         break
                     continue
@@ -624,14 +300,18 @@ class DefaultAgentOrchestrator:
                 if isinstance(data, dict):
                     if data.get("type") == "text":
                         content = data.get("content", "")
-                        full_text += "" if content is None else str(content)
+                        streaming_text += "" if content is None else str(content)
+                    elif data.get("type") == "event" and data.get("name") == "final_result":
+                        ft = (data.get("payload") or {}).get("final_text", "")
+                        if ft and ft != "WAIT":
+                            final_text = ft
                     elif data.get("type") == "done":
                         break
 
         except Exception as e:
             logger.error(f"collect_text_from_agent_stream failed: {e}")
 
-        return full_text
+        return final_text or streaming_text
 
     async def run_non_stream(
         self,
@@ -650,25 +330,14 @@ class DefaultAgentOrchestrator:
             voice_id=voice_id,
             image_data=image_data,
             mode=mode,
-            ports={
-                "memory": self._memory,
-                "thought": self._thought,
-                "history": self._history,
-                "inner_monologue": self._inner_monologue,
-                "tools": self._tools,
-                "checkpointer": self._checkpointer,
-                "memory_capture": self._memory_capture,
-                "vector_store": self._vector_store,
-                "telemetry": self._telemetry,
-                "tts": self._tts,
-                "vision": self._vision,
-            },
+            ports=self._build_ports(),
         )
 
 _default_orchestrator: DefaultAgentOrchestrator | None = None
 
 def build_default_orchestrator() -> DefaultAgentOrchestrator:
     from backend.services.memory_manager import memory_manager
+    from backend.services.checkpointer import checkpointer_service
     from backend.services.thought_engine import thought_engine
     from backend.services.telemetry_logger import telemetry
     from backend.services.voicevox_client import voicevox_client
@@ -706,18 +375,18 @@ def build_default_orchestrator() -> DefaultAgentOrchestrator:
             )
 
             t0 = time.perf_counter()
-            
+
             def _run() -> Optional[tuple[str, dict]]:
                 # Convert voice_id to VOICEVOX speaker ID
                 try:
                     speaker_id = int(voice_id)
                 except (ValueError, TypeError):
                     speaker_id = self._default_speaker_id
-                
+
                 url = voicevox_client.generate_audio_to_file(text, speaker_id, thread_id)
                 if not url:
                     return None
-                
+
                 gen_ms = int((time.perf_counter() - t0) * 1000)
                 meta = {
                     "url": url,
@@ -787,7 +456,7 @@ def build_default_orchestrator() -> DefaultAgentOrchestrator:
         history=_HistoryGateway(),
         inner_monologue=_InnerMonologueLogger(),
         tools=_ToolRegistry(),
-        checkpointer=memory_manager,
+        checkpointer=checkpointer_service,
         memory_capture=chat_history_store,
         capture_builder=_CaptureBuilder(),
         vector_store=_VectorGateway(),

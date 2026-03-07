@@ -103,7 +103,7 @@ User Input
 | **Depth2 (ValueAlign)** | `nodes/depth_nodes.py` | 結論層。Depth2ゲート通過時のみ実行 |
 | **Merge** | `nodes/merge.py` | Hold/WAIT 判定、最終テキスト統合 |
 | **ActionProcessing** | `nodes/actions.py` | アクション提案をリスク評価 |
-| **S5 Commit** | `nodes/actions.py` | Episodic 保存、Working 更新（Memory v2） |
+| **S5 Commit** | `nodes/actions.py` | Episodic 保存、Working 更新、メタ認知統計蓄積、Self-Narrative 生成（Memory v2） |
 
 ### Depth 優先チェーン
 
@@ -152,7 +152,7 @@ S5: Commit（episodic 保存 + working 更新）
 |-----------|------|---------|
 | **PINNED FACTS** | confirmed かつ高 confidence の semantic | confidence ≥ 0.7 |
 | **PATTERNS** | 日横断パターン（`state_tag='insight'`） | R.4 で生成された insight |
-| **WORKING** | 未解決の working items | open 状態の items |
+| **WORKING** | 未解決の working items + Self-Narrative | open 状態の items / N.5 出力あり時 |
 | **Short Term** | 直近のやり取り | 短期記憶あり時 |
 | **Long Term** | semantic memories（query-aware retrieval） | semantic あり時 |
 
@@ -203,6 +203,9 @@ hold_required = True → SSE: hold_request {preview, token}
 | **ReflectionEngine** | `services/reflection_engine.py` | Autonomous Reflection（R.2 + R.4） |
 | **IdleDetector** | `services/idle_detector.py` | アイドル検出（R.1） |
 | **ExternalData** | `services/external_data.py` | 外部 API データ取得 |
+| **Metacognition** | `services/memory/metacognition.py` | N.1 確信度調整 + N.0 Awareness + N.5 Self-Narrative |
+| **Contradiction** | `services/memory/contradiction.py` | N.2 矛盾検出（defeaters 付き） |
+| **SelfModel** | `services/memory/self_model.py` | N.3 自己モデル（知識境界・成長エッジ） |
 
 ### Voice Mode パイプライン
 
@@ -327,7 +330,7 @@ Context Builder の PATTERNS セクションに注入
 |-------|---------|------|
 | **R.1** | `services/idle_detector.py` | アイドル検出（3分閾値） |
 | **R.2** | `services/reflection_engine.py` | Daily Log 生成（LLM 振り返り） |
-| **R.3** | `scripts/sleep_cycle.py` | daily_reflections → memory_block 変換 |
+| **R.3** | `scripts/sleep_cycle/` | daily_reflections → memory_block 変換 |
 | **R.4** | `services/reflection_engine.py` | Cross-Day Distillation（日横断パターン抽出） |
 
 ### R.4 Cross-Day Distillation
@@ -340,9 +343,54 @@ Context Builder の PATTERNS セクションに注入
 
 ---
 
+## メタ認知パイプライン（N.0〜N.5）
+
+LLM 呼び出しなしのルールベース＋埋め込み類似度で、ニアの応答品質を内省的に評価。
+
+```
+DepthSelector (routing.py)
+    │ MetaCogResult + AwarenessSignal をコンテキストに注入
+    ▼
+Depth0/1/2 ノード（LLM 応答生成）
+    │
+    ▼
+S5 Commit (actions.py)
+    │ ① _update_metacog_stats → telemetry_kv に統計蓄積
+    │ ② generate_self_narrative → telemetry_kv に内心テキスト保存
+    ▼
+次ターンの DepthSelector
+    │ telemetry_kv["self_narrative"] を読み取り（one-shot 消費）
+    │ → build_memory_context(self_narrative=...) → WORKING に注入
+    ▼
+Depth0/1/2（内心が応答に反映）
+```
+
+### コンポーネント
+
+| Phase | ファイル | 役割 | レイテンシ |
+|-------|---------|------|-----------|
+| **N.1** | `services/memory/metacognition.py` | 確信度調整 + 三戒（捏造・偽記憶） | ~10-30ms |
+| **N.0** | `services/memory/metacognition.py` | R_nia = 関係的驚き × 成長 × 真正性 | <5ms |
+| **N.2** | `services/memory/contradiction.py` | セマンティック記憶間の矛盾検出 | ~10-50ms |
+| **N.3** | `services/memory/self_model.py` | 知識境界・成長エッジ・会話傾向 | ~5-20ms |
+| **N.4** | `services/idle_detector.py` | メタ認知統計→状態駆動リフレクショントリガー | <1ms |
+| **N.5** | `services/memory/metacognition.py` | テンプレート内心言語化（「内心: ...」） | <1ms |
+
+### N.4 State-Driven Trigger 条件
+
+| 条件 | 閾値 | 意味 |
+|------|------|------|
+| awareness_high | avg ≥ 0.25 | 対話の不一致が続いている |
+| confidence_variance_high | var ≥ 0.08 | 確信度のブレが大きい |
+| dissonance_streak | streak ≥ 3 | 違和感の連続検出 |
+| contradiction_detected | any | 記憶矛盾が発生 |
+| topic_shifts | count ≥ 3 | 話題の急変が多い |
+
+---
+
 ## Sleep Cycle（日次メンテナンス）
 
-`backend/scripts/sleep_cycle.py`
+`backend/scripts/sleep_cycle/`（パッケージ: orchestrator.py, layers.py, extraction.py, compression.py, helpers.py）
 
 1. **Memory Block 構築**: `daily_reflections` を優先、フォールバックで `memory_events`（R.3）
 2. **Layer A**: memory_block の振り返り・印象記録
@@ -424,4 +472,4 @@ mss キャプチャ → JPEG → Gemini Flash API → テキスト分析
 1. **ストリーミングファースト**: 全応答は SSE、リアルタイムサニタイゼーション
 2. **三権分立**: AI は考える / 人間は決める / システムは従う
 3. **メモリの哲学**: 保存時は生データ、取り出し時にコンテキスト依存で意味付け
-4. **非交渉原則**: [NIA_NON_NEGOTIABLE.md](NIA_NON_NEGOTIABLE.md) 参照
+4. **非交渉原則**: `CLAUDE.md` の不可侵ルール + `body_constitution.md` 参照

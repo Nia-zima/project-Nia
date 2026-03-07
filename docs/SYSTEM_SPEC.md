@@ -37,7 +37,7 @@ Depth ごとに注入するコンテキストを制御:
 - **Safety Node**: LangGraph パイプラインの先頭で有害入力をブロック
 - **Review Window**: Merge が敏感な出力を検出 → Hold → 人間が Approve/Reject
 - **SpeechSanitizer**: 内部タグ除去、システムプロンプト漏洩防止、リアルタイム検出
-- **Non-Negotiable 原則**: 5 つの不可侵ルール（`NIA_NON_NEGOTIABLE.md` 参照）
+- **Non-Negotiable 原則**: 不可侵ルール（`CLAUDE.md` + `body_constitution.md` 参照）
 - **Guardrail v2**: `memory/guardrail.py` でメモリ書き込みの安全性チェック
 
 ## 3. 人格進化 (The Soul)

@@ -1,16 +1,16 @@
 # ディレクトリマップ
 
-AI_Buddy (Nia) プロジェクトのディレクトリ構造。
+project-nia プロジェクトのディレクトリ構造。
 
 ---
 
 ## プロジェクトルート
 
 ```
-AI_Buddy/
+project-nia/
 ├── backend/              # バックエンド (Python/FastAPI)
 ├── frontend/             # フロントエンド (Next.js 16)
-├── tests/                # テスト (80+ ファイル)
+├── tests/                # テスト (1590+ テスト)
 ├── docs/                 # ドキュメント
 ├── data/                 # データベース（Git 管理外）
 ├── logs/                 # ログファイル
@@ -58,7 +58,6 @@ backend/
 │       ├── nia_spine_v10.py      # 背骨（全 Depth 共通基本指示）
 │       ├── depth0_prompt_v11.py  # Depth0 プロンプト（使用中）
 │       ├── depth1_prompt_v11.py  # Depth1 プロンプト（使用中）
-│       ├── game_prompt_fragment.py    # ゲームモード補助
 │       └── minecraft_brain_prompt.py  # Minecraft 用プロンプト
 │
 ├── controllers/                  # API ルーター
@@ -88,7 +87,7 @@ backend/
 │   └── pending_memory_router.py  # 保留メモリ
 │
 ├── services/                     # ビジネスロジック
-│   ├── memory/                   # Memory v2 サブパッケージ
+│   ├── memory/                   # Memory v2 サブパッケージ + メタ認知
 │   │   ├── memory_service.py     # 統一インターフェース
 │   │   ├── context_builder.py    # Depth 別コンテキスト生成（PINNED/PATTERNS/WORKING/MEMORY）
 │   │   ├── commit_executor.py    # S5 Commit 実行
@@ -96,6 +95,10 @@ backend/
 │   │   ├── working_store.py      # Working Items CRUD
 │   │   ├── retrieval.py          # Query-Aware Retrieval (M.1)
 │   │   ├── guardrail.py          # メモリ書き込み安全性
+│   │   ├── metacognition.py      # N.1 確信度調整 + N.0 Awareness + N.5 Self-Narrative
+│   │   ├── contradiction.py      # N.2 矛盾検出（defeaters 付き）
+│   │   ├── self_model.py         # N.3 自己モデル（知識境界・成長エッジ）
+│   │   ├── storage_driver.py     # SQLite ストレージ操作
 │   │   ├── models.py             # Pydantic モデル
 │   │   └── vector_sync.py        # ベクトル同期
 │   │
@@ -130,7 +133,6 @@ backend/
 │   ├── memory_manager.py         # メモリ管理（レガシー互換）
 │   ├── memory_judge.py           # 重要度判定
 │   ├── memory_gate.py            # メモリゲート
-│   ├── memory_store.py           # メモリストア
 │   ├── chat_history_store.py     # チャット履歴
 │   ├── llm_client.py             # LLM API クライアント
 │   ├── action_manager.py         # アクション管理
@@ -150,14 +152,17 @@ backend/
 │   └── (その他ユーティリティ)
 │
 ├── scripts/                      # メンテナンススクリプト
-│   ├── sleep_cycle.py            # Sleep Cycle（日次メンテ）
+│   ├── sleep_cycle/              # Sleep Cycle パッケージ（日次メンテ）
+│   │   ├── __init__.py           # エントリポイント
+│   │   ├── orchestrator.py       # 全体オーケストレーション
+│   │   ├── layers.py             # Layer A/B 処理
+│   │   ├── extraction.py         # Semantic 抽出
+│   │   ├── compression.py        # Episodic 圧縮
+│   │   └── helpers.py            # 共通ヘルパー
 │   ├── observation_report.py     # 観察レポート生成
-│   ├── backfill_semantic.py      # Semantic バックフィル
+│   ├── backfill_semantics.py     # Semantic バックフィル
 │   ├── cleanup_checkpoints.py    # チェックポイント GC
 │   └── (その他マイグレーション・デバッグ)
-│
-├── api/                          # API 追加層
-│   └── memory_router.py          # メモリ CRUD API
 │
 └── tools/                        # ツール
     └── judge_inspector.py        # Judge 監査
@@ -240,13 +245,15 @@ docs/
 ├── ARCHITECTURE.md               # システムアーキテクチャ
 ├── SYSTEM_SPEC.md                # システム仕様書
 ├── DIRECTORY_MAP.md              # このファイル
-├── NIA_NON_NEGOTIABLE.md         # 上位原則
 ├── body_constitution.md          # Body Constitution
 ├── constitution_mapping.md       # Constitution マッピング
 ├── memory_redesign_v2.md         # Memory v2 設計仕様
 ├── contracts.md                  # 10 状態遷移契約
 ├── OPERATION_MANUAL.md           # 運用マニュアル
 ├── SETUP.md                      # セットアップガイド
+├── nia_metacognition_design.md   # メタ認知パイプライン設計 (N.0〜N.5)
+├── memory_retrieval_design.md   # Memory Retrieval 設計 (M.1)
+├── memory_system_overview.md    # Memory System 概要
 ├── improvement_plan.md           # 改善計画表
 ├── livestream_design.md          # 配信機能設計
 ├── pre_streaming_checklist.md    # 配信準備チェックリスト
@@ -284,7 +291,8 @@ docs/
 | `backend/core/constants/nia_spine_v10.py` | 背骨プロンプト | ★★★ |
 | `backend/services/speech_sanitizer.py` | 出力サニタイザー | ★★★ |
 | `backend/server.py` | FastAPI エントリポイント | ★★★ |
-| `backend/scripts/sleep_cycle.py` | Sleep Cycle | ★★☆ |
+| `backend/scripts/sleep_cycle/` | Sleep Cycle パッケージ | ★★☆ |
+| `backend/services/memory/metacognition.py` | メタ認知パイプライン (N.0/N.1/N.5) | ★★☆ |
 | `frontend/components/ChatInterface.tsx` | メインチャット UI | ★★☆ |
 | `frontend/lib/apiClient.ts` | 統一 API クライアント | ★★☆ |
 | `.env` | 環境変数 | ★★☆ |

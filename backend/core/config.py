@@ -89,15 +89,7 @@ class Settings:
     RETENTION_FULL_SWEEPER_SINCE_H: int
 
     # Thresholds (env override allowed)
-    RETENTION_TH_PROMOTE: float
-    RETENTION_TH_BACKGROUND: float
     RETENTION_GRACE_DAYS: float
-
-    # Half-life days (profile-based defaults, env override allowed)
-    RETENTION_HL_CONSENT_DAYS: float
-    RETENTION_HL_PONDERING_DAYS: float
-    RETENTION_HL_DISSONANCE_DAYS: float
-    RETENTION_HL_DEFAULT_DAYS: float
 
     def __init__(self) -> None:
         # プロファイルのデフォルト（env上書きの“土台”）
@@ -111,7 +103,7 @@ class Settings:
             base = dict(consent=0.25, pondering=0.10, dissonance=0.05, default=0.08)
         else:
             # prod 本値
-            base = dict(consent=30.0, pondering=7.0, dissonance=3.0, default=5.0)
+            base = dict(consent=30.0, pondering=7.0, dissonance=3.0, default=7.0)
 
         # env があればそっちを優先
         self.RETENTION_HALF_LIFE_CONSENT = _env_float_first(
@@ -151,13 +143,7 @@ class Settings:
         self.RETENTION_LIGHT_LIMIT = _env_int("RETENTION_LIGHT_LIMIT", 25)
         self.RETENTION_LIGHT_EVERY_N = _env_int("RETENTION_LIGHT_EVERY_N", 1)
 
-        # Compatibility aliases
-        self.RETENTION_TH_PROMOTE = self.RETENTION_PROMOTE_TH
-        self.RETENTION_TH_BACKGROUND = self.RETENTION_BACKGROUND_TH
-        self.RETENTION_HL_CONSENT_DAYS = self.RETENTION_HALF_LIFE_CONSENT
-        self.RETENTION_HL_PONDERING_DAYS = self.RETENTION_HALF_LIFE_PONDERING
-        self.RETENTION_HL_DISSONANCE_DAYS = self.RETENTION_HALF_LIFE_DISSONANCE
-        self.RETENTION_HL_DEFAULT_DAYS = self.RETENTION_HALF_LIFE_DEFAULT
+        # Compatibility aliases (used by config_patch.py)
         self.RETENTION_HL_CONSENT = self.RETENTION_HALF_LIFE_CONSENT
         self.RETENTION_HL_PONDERING = self.RETENTION_HALF_LIFE_PONDERING
         self.RETENTION_HL_DISSONANCE = self.RETENTION_HALF_LIFE_DISSONANCE
@@ -170,6 +156,7 @@ class Settings:
 
         # OpenAI / LLM settings
         self.OPENAI_MODEL = _env_str("OPENAI_MODEL", "gpt-4o-mini")
+        self.MODEL_FAMILY = _env_str("MODEL_FAMILY", "")  # 空=自動検出, qwen/gpt-oss/openai/generic
         self.OPENAI_API_KEY = _env_str("OPENAI_API_KEY", "")
         self.OPENAI_BASE_URL = _env_str("OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.TEMPERATURE = _env_float("TEMPERATURE", 0.7)
@@ -191,7 +178,7 @@ class Settings:
         self.SSE_MIN_INTERVAL_MS = max(0, _env_int("SSE_MIN_INTERVAL_MS", 120))
         # Inner monologue logging (chars)
         self.INNER_MONOLOGUE_MAX_CHARS = max(0, _env_int("INNER_MONOLOGUE_MAX_CHARS", 240))
-        self.INNER_MONOLOGUE_FULL = _env_bool("INNER_MONOLOGUE_FULL", False)
+
 
         # Voice settings
         self.DEFAULT_VOICE_ID = _env_str("DEFAULT_VOICE_ID", "14")
@@ -214,6 +201,13 @@ class Settings:
 
         # Identity Manager secret key
         self.IDENTITY_SECRET_KEY = _env_str("IDENTITY_SECRET_KEY", "INTERNAL_SLEEP_PROCESS_ONLY")
+        if self.IDENTITY_SECRET_KEY == "INTERNAL_SLEEP_PROCESS_ONLY":
+            import warnings
+            warnings.warn(
+                "IDENTITY_SECRET_KEY is using the default value. "
+                "Set a unique value in .env for production.",
+                stacklevel=1,
+            )
 
         # Post-Phase5: DSPy mode (disabled — 固定化・収束を引き起こすため)
         self.DSPY_MODE = _env_str("DSPY_MODE", "disabled")        # "disabled" | "enabled" | "hybrid"
@@ -264,6 +258,71 @@ class Settings:
         self.RETRIEVAL_W_CONF = _env_float("RETRIEVAL_W_CONF", 0.25)
         self.RETRIEVAL_W_REC = _env_float("RETRIEVAL_W_REC", 0.15)
         self.RETRIEVAL_W_INTENT = _env_float("RETRIEVAL_W_INTENT", 0.15)
+        self.RETRIEVAL_LOG_ENABLED = _env_bool("RETRIEVAL_LOG_ENABLED", True)
+        self.JANOME_ENABLED = _env_bool("JANOME_ENABLED", True)
+        self.PINNED_SORT_MODE = _env_str("PINNED_SORT_MODE", "relevance")
+        self.EMBEDDING_AT_SAVE = _env_bool("EMBEDDING_AT_SAVE", True)
+        self.RETRIEVAL_QUALITY_EVAL = _env_bool("RETRIEVAL_QUALITY_EVAL", True)
+
+        # N.0: Awareness Core
+        self.AWARENESS_CORE_ENABLED = _env_bool("AWARENESS_CORE_ENABLED", True)
+        self.AWARENESS_SIGNAL_THRESHOLD = _env_float("AWARENESS_SIGNAL_THRESHOLD", 0.3)
+        self.AWARENESS_KEYWORD_OVERLAP_MIN = _env_float("AWARENESS_KEYWORD_OVERLAP_MIN", 0.1)
+        self.GROWTH_SIGNAL_CAP = _env_float("GROWTH_SIGNAL_CAP", 0.6)
+        self.GROWTH_SIGNAL_BOOST = _env_float("GROWTH_SIGNAL_BOOST", 0.1)
+        self.AUTHENTICITY_BASE = _env_float("AUTHENTICITY_BASE", 1.0)
+        self.AUTHENTICITY_PENALTY = _env_float("AUTHENTICITY_PENALTY", 0.4)
+
+        # N.1: Metacognitive check
+        self.METACOG_ENABLED = _env_bool("METACOG_ENABLED", True)
+        self.METACOG_GROUNDING_THRESHOLD = _env_float("METACOG_GROUNDING_THRESHOLD", 0.4)
+        self.SANKAI_CHECK_ENABLED = _env_bool("SANKAI_CHECK_ENABLED", True)
+
+        # N.2: Contradiction Detection
+        self.CONTRADICTION_SCAN_ENABLED = _env_bool("CONTRADICTION_SCAN_ENABLED", True)
+        self.CONTRADICTION_MAX_PAIRS = _env_int("CONTRADICTION_MAX_PAIRS", 10)
+
+        # N.3: Self-Model Generation
+        self.SELF_MODEL_ENABLED = _env_bool("SELF_MODEL_ENABLED", True)
+        self.SELF_MODEL_ARCHIVE_DIR = _env_str("SELF_MODEL_ARCHIVE_DIR", "sleep_outputs")
+        self.SELF_MODEL_IDENTITY_PATH = _env_str("SELF_MODEL_IDENTITY_PATH", "identity.md")
+        self.SELF_MODEL_PROMPT_TIMEOUT = _env_int("SELF_MODEL_PROMPT_TIMEOUT", 30)
+        self.SELF_MODEL_INSIGHTS_LIMIT = _env_int("SELF_MODEL_INSIGHTS_LIMIT", 10)
+        self.SELF_MODEL_UPDATE_ON_CHANGE_ONLY = _env_bool("SELF_MODEL_UPDATE_ON_CHANGE_ONLY", True)
+        self.SELF_MODEL_MAX_STALE_DAYS = _env_int("SELF_MODEL_MAX_STALE_DAYS", 3)
+        self.CONTRADICTION_HOLD_TTL_DAYS = _env_int("CONTRADICTION_HOLD_TTL_DAYS", 3)
+        self.CONTRADICTION_SIMILARITY_THRESHOLD = _env_float("CONTRADICTION_SIMILARITY_THRESHOLD", 0.7)
+
+        # N.4: State-Driven Reflection Triggers
+        self.STATE_TRIGGER_ENABLED = _env_bool("STATE_TRIGGER_ENABLED", True)
+        self.STATE_TRIGGER_COOLDOWN_MINUTES = _env_int("STATE_TRIGGER_COOLDOWN_MINUTES", 60)
+        self.STATE_TRIGGER_MIN_IDLE_MINUTES = _env_int("STATE_TRIGGER_MIN_IDLE_MINUTES", 5)
+
+        # N.5: Self-Narrative
+        self.SELF_NARRATIVE_ENABLED = _env_bool("SELF_NARRATIVE_ENABLED", True)
+
+        # S.1: Somatic Self-Awareness
+        self.SOMATIC_ENABLED = _env_bool("SOMATIC_ENABLED", True)
+        self.SOMATIC_FEEDBACK_ENABLED = _env_bool("SOMATIC_FEEDBACK_ENABLED", True)
+        self.SOMATIC_ADAPTIVE_ENABLED = _env_bool("SOMATIC_ADAPTIVE_ENABLED", False)
+
+        # P.1: Pip (Mechanical Dog Pet)
+        self.PIP_ENABLED = _env_bool("PIP_ENABLED", False)
+
+        # P.2: Room (Nia's Room)
+        self.ROOM_UPDATE_ENABLED = _env_bool("ROOM_UPDATE_ENABLED", False)
+
+        # NiaCore: Experience Replay Buffer recording
+        self.NIACORE_EXPERIENCE_ENABLED = _env_bool("NIACORE_EXPERIENCE_ENABLED", False)
+        # NiaCore: Shadow inference (CfC runs alongside rule-based, log only)
+        self.NIACORE_SHADOW_ENABLED = _env_bool("NIACORE_SHADOW_ENABLED", False)
+        # NiaCore: Batch training during Sleep Cycle
+        self.NIACORE_TRAINING_ENABLED = _env_bool("NIACORE_TRAINING_ENABLED", False)
+
+        # SkeletonCore: 会話骨格の記録（DB保存のみ、LLM注入なし）
+        self.SKELETON_RECORD_ENABLED = _env_bool("SKELETON_RECORD_ENABLED", False)
+        # SkeletonCore: 体感テキストの LLM コンテキスト注入
+        self.SKELETON_SOMATIC_ENABLED = _env_bool("SKELETON_SOMATIC_ENABLED", False)
 
         # Phase R: Autonomous Reflection
         self.IDLE_DETECTION_ENABLED = _env_bool("IDLE_DETECTION_ENABLED", True)
@@ -275,6 +334,15 @@ class Settings:
         # Phase R.4: Cross-day Distillation
         self.REFLECTION_LOOKBACK_DAYS = _env_int("REFLECTION_LOOKBACK_DAYS", 7)
         self.REFLECTION_CROSS_MIN_DAYS = _env_int("REFLECTION_CROSS_MIN_DAYS", 3)
+        if self.REFLECTION_CROSS_MIN_DAYS > self.REFLECTION_LOOKBACK_DAYS:
+            import warnings
+            warnings.warn(
+                f"REFLECTION_CROSS_MIN_DAYS ({self.REFLECTION_CROSS_MIN_DAYS}) > "
+                f"REFLECTION_LOOKBACK_DAYS ({self.REFLECTION_LOOKBACK_DAYS}): "
+                f"cross-day distillation will never trigger. "
+                f"Setting CROSS_MIN_DAYS = LOOKBACK_DAYS."
+            )
+            self.REFLECTION_CROSS_MIN_DAYS = self.REFLECTION_LOOKBACK_DAYS
 
         # Phase E: Guardrail v2 settings
         # HOLD_POLICY: "pii_only" = PII + G1 + G6 のみ, "strict" = 全トリガー
@@ -299,12 +367,25 @@ class Settings:
         self.SAFETY_BLOCK_PII = _env_bool("SAFETY_BLOCK_PII", True)
         self.SAFETY_LOG_INJECTION = _env_bool("SAFETY_LOG_INJECTION", True)
 
+        # API documentation exposure (disable for production)
+        self.API_DOCS_ENABLED = _env_bool("API_DOCS_ENABLED", True)
+
         # CORS allowed origins (comma-separated, or "*" for all)
         self.CORS_ALLOWED_ORIGINS = _env_str(
             "CORS_ALLOWED_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,"
             "http://localhost:3001,http://127.0.0.1:3001",
         )
+
+        # WebSocket security
+        self.WS_RECEIVE_TIMEOUT_SEC = _env_float("WS_RECEIVE_TIMEOUT_SEC", 300.0)
+        self.WS_MAX_MESSAGE_BYTES = _env_int("WS_MAX_MESSAGE_BYTES", 512 * 1024)
+
+        # Rate Limiting
+        self.RATE_LIMIT_ENABLED = _env_bool("RATE_LIMIT_ENABLED", True)
+        self.RATE_LIMIT_CHAT = _env_str("RATE_LIMIT_CHAT", "30/minute")
+        self.RATE_LIMIT_LIVESTREAM = _env_str("RATE_LIMIT_LIVESTREAM", "60/minute")
+        self.RATE_LIMIT_VOICE = _env_str("RATE_LIMIT_VOICE", "10/minute")
 
         # Minecraft Bot Integration
         self.MINECRAFT_ENABLED = _env_bool("MINECRAFT_ENABLED", False)
@@ -331,18 +412,36 @@ class Settings:
         self.VIDEO_VISION_CONCURRENCY = _env_int("VIDEO_VISION_CONCURRENCY", 4)
 
         # Twitter (X) Integration
-        self.TWITTER_ENABLED = _env_bool("TWITTER_ENABLED", False)
+        self.TWITTER_ENABLED = _env_bool("TWITTER_ENABLED", True)
         self.TWITTER_API_KEY = _env_str("TWITTER_API_KEY", "")
         self.TWITTER_API_SECRET = _env_str("TWITTER_API_SECRET", "")
         self.TWITTER_ACCESS_TOKEN = _env_str("TWITTER_ACCESS_TOKEN", "")
         self.TWITTER_ACCESS_TOKEN_SECRET = _env_str("TWITTER_ACCESS_TOKEN_SECRET", "")
         self.TWITTER_MAX_CHARS = _env_int("TWITTER_MAX_CHARS", 280)
-        self.TWITTER_AUTO_PROPOSE = _env_bool("TWITTER_AUTO_PROPOSE", False)
+        self.TWITTER_AUTO_PROPOSE = _env_bool("TWITTER_AUTO_PROPOSE", True)
+        self.TWITTER_DAILY_MAX = _env_int("TWITTER_DAILY_MAX", 3)
+
+        # Nero webhook (fire-and-forget notification on sleep cycle completion)
+        self.NERO_WEBHOOK_URL = _env_str("NERO_WEBHOOK_URL", "")  # e.g. "http://127.0.0.1:8001"
+        self.NERO_MEETING_REQUEST_ENABLED = _env_bool("NERO_MEETING_REQUEST_ENABLED", False)
+
+        # Diary (Sleep Cycle)
+        self.DIARY_ENABLED = _env_bool("DIARY_ENABLED", True)
+
+        # Chat Bridge (YouTube / Twitch)
+        self.CHAT_BRIDGE_ENABLED = _env_bool("CHAT_BRIDGE_ENABLED", False)
+        self.YOUTUBE_LIVE_ENABLED = _env_bool("YOUTUBE_LIVE_ENABLED", False)
+        self.YOUTUBE_VIDEO_ID = _env_str("YOUTUBE_VIDEO_ID", "")
+        self.YOUTUBE_POLL_INTERVAL_SEC = _env_int("YOUTUBE_POLL_INTERVAL_SEC", 0)  # 0=API推奨値
+        self.TWITCH_LIVE_ENABLED = _env_bool("TWITCH_LIVE_ENABLED", False)
+        self.TWITCH_CHANNEL = _env_str("TWITCH_CHANNEL", "")
+        self.TWITCH_NICK = _env_str("TWITCH_NICK", "justinfan12345")
+        self.TWITCH_OAUTH_TOKEN = _env_str("TWITCH_OAUTH_TOKEN", "")
 
         # Screen-based Game Integration
         self.SCREEN_GAME_ENABLED = _env_bool("SCREEN_GAME_ENABLED", False)
         self.GAME_VISION_PROVIDER = _env_str("GAME_VISION_PROVIDER", "gemini")
-        self.GEMINI_MODEL = _env_str("GEMINI_MODEL", "gemini-2.0-flash-lite")
+        self.GEMINI_MODEL = _env_str("GEMINI_MODEL", "gemini-3.0-flash")
         self.SCREEN_CAPTURE_REGION = _env_str("SCREEN_CAPTURE_REGION", "")  # "x,y,w,h" or ""=fullscreen
         self.SCREEN_GAME_LOOP_INTERVAL_SEC = _env_int("SCREEN_GAME_LOOP_INTERVAL_SEC", 3)
         self.SCREEN_GAME_FRAME_BUFFER_SIZE = _env_int("SCREEN_GAME_FRAME_BUFFER_SIZE", 3)

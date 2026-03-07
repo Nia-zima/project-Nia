@@ -9,19 +9,19 @@ from unittest.mock import AsyncMock, patch, MagicMock
 class TestCleanTweet:
     def test_basic_text(self):
         from backend.services.twitter_client import _clean_tweet
-        assert _clean_tweet("テスト投稿です。", 280) == "テスト投稿です。"
+        assert _clean_tweet("今日はいい天気だったので散歩してきました。", 280) == "今日はいい天気だったので散歩してきました。"
 
     def test_strips_japanese_quotes(self):
         from backend.services.twitter_client import _clean_tweet
-        assert _clean_tweet("「テスト投稿です。」", 280) == "テスト投稿です。"
+        assert _clean_tweet("「今日はいい天気だったので散歩してきました。」", 280) == "今日はいい天気だったので散歩してきました。"
 
     def test_strips_tweet_prefix(self):
         from backend.services.twitter_client import _clean_tweet
-        assert _clean_tweet("ツイート: テスト", 280) == "テスト"
+        assert _clean_tweet("ツイート: 今日はいい天気だったので散歩した。", 280) == "今日はいい天気だったので散歩した。"
 
     def test_strips_tweet_prefix_fullwidth(self):
         from backend.services.twitter_client import _clean_tweet
-        assert _clean_tweet("ツイート：テスト", 280) == "テスト"
+        assert _clean_tweet("ツイート：今日はいい天気だったので散歩した。", 280) == "今日はいい天気だったので散歩した。"
 
     def test_truncates_long_text(self):
         from backend.services.twitter_client import _clean_tweet
@@ -40,7 +40,7 @@ class TestCleanTweet:
 
     def test_strips_urls(self):
         from backend.services.twitter_client import _clean_tweet
-        result = _clean_tweet("見て https://example.com いいでしょ", 280)
+        result = _clean_tweet("今日は面白い記事を見つけたよ https://example.com 読んでみてね", 280)
         assert result is not None
         assert "http" not in result
 
@@ -51,6 +51,23 @@ class TestCleanTweet:
     def test_returns_none_for_whitespace(self):
         from backend.services.twitter_client import _clean_tweet
         assert _clean_tweet("   ", 280) is None
+
+    def test_rejects_garbage_output(self):
+        """LLM garbage output (non-Japanese, too short) is rejected."""
+        from backend.services.twitter_client import _clean_tweet
+        for garbage in ["руб", "_nullable", "麽", "tou", "голос", "giản"]:
+            assert _clean_tweet(garbage, 280) is None, f"Should reject: {garbage}"
+
+    def test_rejects_meta_commentary(self):
+        """LLM instruction echoing is rejected."""
+        from backend.services.twitter_client import _clean_tweet
+        assert _clean_tweet("字数制限厳守のため、作成いたします。", 280) is None
+
+    def test_strips_mumble_prefix(self):
+        """LLM meta-prefixes like 呟き: are stripped."""
+        from backend.services.twitter_client import _clean_tweet
+        result = _clean_tweet("呟き: 今日はなんだかぼんやりした一日だった。", 280)
+        assert result == "今日はなんだかぼんやりした一日だった。"
 
 
 # ── generate_tweet tests ─────────────────────────────────────────
@@ -185,14 +202,14 @@ class TestActionRegistration:
         action = action_registry.get("post_tweet")
         assert action is not None
         assert action.name == "ツイート投稿"
-        assert action.requires_confirmation is True
+        assert action.requires_confirmation is False
 
-    def test_post_tweet_is_high_risk(self):
+    def test_post_tweet_is_medium_risk(self):
         from backend.core.actions import action_registry
         from backend.core.actions.types import RiskLevel
         action = action_registry.get("post_tweet")
         assert action is not None
-        assert action.risk_level == RiskLevel.HIGH
+        assert action.risk_level == RiskLevel.MEDIUM
 
     def test_post_tweet_is_communication(self):
         from backend.core.actions import action_registry
