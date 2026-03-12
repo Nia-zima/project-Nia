@@ -58,11 +58,8 @@ class APIClient {
 
     constructor(baseUrl: string = API_URL) {
         this.baseUrl = baseUrl;
-        // Auto-load system token from env if available
-        if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SYSTEM_TOKEN) {
-            this.systemToken = process.env.NEXT_PUBLIC_SYSTEM_TOKEN;
-        }
-        // Browser override (persisted from UI settings)
+        // Load system token from localStorage only (never from NEXT_PUBLIC_ env vars,
+        // as those are bundled into the client build and visible to anyone).
         if (typeof window !== "undefined") {
             const stored = window.localStorage.getItem(SYSTEM_TOKEN_STORAGE_KEY);
             if (stored && stored.trim()) {
@@ -199,7 +196,7 @@ class APIClient {
     }
 
     async postAction(actionId: string, action: "approve" | "reject" | "hold", reason: string = ""): Promise<void> {
-        await this.request(`/actions/${actionId}/${action}`, {
+        await this.request(`/actions/pending/${actionId}/${action}`, {
             method: "POST",
             body: JSON.stringify({ reason }),
         });
@@ -345,7 +342,7 @@ class APIClient {
     }
 
     async archiveAction(actionId: string): Promise<void> {
-        await this.request(`/actions/${encodeURIComponent(actionId)}/archive`, {
+        await this.request(`/actions/pending/${encodeURIComponent(actionId)}/archive`, {
             method: "POST",
             body: JSON.stringify({}),
         });
@@ -381,12 +378,33 @@ class APIClient {
 
     // ── Stats ──
 
-    async fetchStatsSummary(): Promise<Record<string, unknown>> {
-        return this.request("/stats/summary");
+    async fetchStatsSummary(threadId?: string): Promise<Record<string, unknown>> {
+        const params = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+        return this.request(`/stats/summary${params}`);
     }
 
-    async fetchInternalState(): Promise<Record<string, unknown>> {
-        return this.request("/stats/internal_state");
+    async fetchDatasetExport(params?: {
+        threadId?: string;
+        limit?: number;
+        includeExcluded?: boolean;
+        highConfidenceOnly?: boolean;
+    }): Promise<Record<string, unknown>> {
+        const search = new URLSearchParams();
+        if (params?.threadId) search.set("thread_id", params.threadId);
+        if (params?.limit != null) search.set("limit", String(params.limit));
+        if (params?.includeExcluded != null) search.set("include_excluded", String(params.includeExcluded));
+        if (params?.highConfidenceOnly != null) search.set("high_confidence_only", String(params.highConfidenceOnly));
+        const suffix = search.toString() ? `?${search.toString()}` : "";
+        return this.request(`/stats/dataset_export${suffix}`);
+    }
+
+    async fetchDatasetAudit(threadId?: string): Promise<Record<string, unknown>> {
+        const params = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+        return this.request(`/stats/dataset_audit${params}`);
+    }
+
+    async fetchInternalState(threadId: string = "default_thread"): Promise<Record<string, unknown>> {
+        return this.request(`/stats/internal_state?thread_id=${encodeURIComponent(threadId)}`);
     }
 
     async fetchCheckpointerStats(): Promise<{
@@ -556,29 +574,33 @@ class APIClient {
 
     // ── Twitter (X) ──
 
-    async fetchPendingTweet(): Promise<{ proposal: { tweet_text: string; proposed_at: number; id: string; thread_id: string } | null }> {
-        return this.request("/actions/tweet/pending");
+    async fetchPendingTweet(threadId?: string): Promise<{ items: Array<{ proposal_id: string; tweet_text: string; created_at: number; id: string; thread_id: string; source: string; status: string }>; proposal: { proposal_id: string; tweet_text: string; created_at: number; id: string; thread_id: string; source: string; status: string } | null }> {
+        const suffix = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+        return this.request(`/actions/tweet/pending${suffix}`);
     }
 
-    async approveTweet(tweetText: string, threadId: string = "default_thread"): Promise<{ ok: boolean; tweet_id?: string }> {
+    async approveTweet(proposalId: string): Promise<{ ok: boolean; tweet_id?: string }> {
         return this.request("/actions/tweet/approve", {
             method: "POST",
-            body: JSON.stringify({ tweet_text: tweetText, thread_id: threadId }),
+            body: JSON.stringify({ proposal_id: proposalId }),
         });
     }
 
-    async rejectTweet(): Promise<{ ok: boolean }> {
-        return this.request("/actions/tweet/reject", { method: "POST" });
+    async rejectTweet(proposalId: string): Promise<{ ok: boolean }> {
+        return this.request("/actions/tweet/reject", {
+            method: "POST",
+            body: JSON.stringify({ proposal_id: proposalId }),
+        });
     }
 
-    async generateTweet(style: string = "casual", context: string = ""): Promise<{ tweet_text: string; char_count: number }> {
+    async generateTweet(style: string = "casual", context: string = ""): Promise<{ proposal: { proposal_id: string; tweet_text: string; created_at: number; id: string; thread_id: string; source: string; status: string }; tweet_text: string; char_count: number }> {
         return this.request("/actions/tweet/generate", {
             method: "POST",
             body: JSON.stringify({ style, context }),
         });
     }
 
-    async fetchTweetHistory(limit: number = 20): Promise<{ items: Array<{ tweet_text: string; tweet_id: string; char_count: number; created_at: number }> }> {
+    async fetchTweetHistory(limit: number = 20): Promise<{ items: Array<{ proposal_id?: string | null; tweet_text: string; tweet_id: string; status: string; source: string; created_at: number; posted_at: number }> }> {
         return this.request(`/actions/tweet/history?limit=${limit}`);
     }
 }

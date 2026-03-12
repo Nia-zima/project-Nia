@@ -1,0 +1,59 @@
+# tests/scenarios/confidence_variance_n4.yaml
+# confidence が大きく振れる → variance 上昇 → N.4 トリガー条件の蓄積
+
+name: "confidence 揺れ → variance 蓄積"
+description: >
+  confidence が 0.9 → 0.2 → 0.8 → 0.3 と大きく振れると、
+  confidence_variance が閾値を超えて N.4 の振り返りトリガー条件を満たす。
+thread_id: "playbook_test"
+
+setup:
+  telemetry:
+    dissonance_streak: "0"
+    confidence_history: "[]"
+    confidence_variance: "0.0"
+
+turns:
+  # Turn 1: 高い confidence
+  - user: "今日はいい天気だね"
+    mock_nia_response: "うん、晴れてるね"
+    mock_confidence: 0.9
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        dissonance_streak: "0"
+
+  # Turn 2: 急に低い confidence
+  - user: "量子力学について教えて"
+    mock_nia_response: "うーん、よく分からないけど..."
+    mock_confidence: 0.2
+    mock_somatic_senses: []
+
+  # Turn 3: また高い
+  - user: "好きな食べ物は？"
+    mock_nia_response: "チョコレートかな"
+    mock_confidence: 0.85
+    mock_somatic_senses: []
+
+  # Turn 4: また低い → variance が蓄積
+  - user: "宇宙の果てには何がある？"
+    mock_nia_response: "分からない..."
+    mock_confidence: 0.25
+    mock_somatic_senses: []
+
+  # Turn 5: 中間 → variance 確定
+  - user: "そっか"
+    mock_nia_response: "うん"
+    mock_confidence: 0.5
+    mock_somatic_senses: []
+    assert_after:
+      telemetry_range:
+        confidence_variance:
+          min: 0.05
+          max: 1.0
+
+final_assert:
+  telemetry_range:
+    confidence_variance:
+      min: 0.05
+      max: 1.0

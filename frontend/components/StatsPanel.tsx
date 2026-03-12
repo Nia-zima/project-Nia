@@ -85,6 +85,113 @@ function StatCard({
     );
 }
 
+function ReasonListCard({
+    title,
+    items,
+    emptyLabel,
+}: {
+    title: string;
+    items: ReasonCount[];
+    emptyLabel: string;
+}) {
+    return (
+        <div className="rounded-2xl border border-white/10 bg-[rgba(15,18,24,0.92)] p-4">
+            <div className="text-xs uppercase tracking-[0.3em] text-slate-400">{title}</div>
+            <div className="mt-4 flex flex-wrap gap-2">
+                {items.length > 0 ? items.map((item) => (
+                    <span
+                        key={`${title}-${item.code}`}
+                        className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-100"
+                    >
+                        {item.code} x{item.count}
+                    </span>
+                )) : (
+                    <span className="text-sm text-slate-500">{emptyLabel}</span>
+                )}
+            </div>
+        </div>
+    );
+}
+
+interface ReasonCount {
+    code: string;
+    count: number;
+}
+
+interface ScopeMeta {
+    thread_id: string | null;
+    scope_label: string;
+}
+
+interface DecisionAnomalies {
+    review_token_mismatch: number;
+    hold_cancelled: number;
+    legacy_schema: number;
+    missing_actor: number;
+    missing_message_id: number;
+    missing_stream_id: number;
+}
+
+interface DecisionDataQuality {
+    schema_current: string;
+    decision_events_total: number;
+    v2_events: number;
+    legacy_events: number;
+    recommended_baseline_ts: string | null;
+    recommended_baseline_reason: string;
+}
+
+interface DecisionAnalytics {
+    review_window: {
+        hold: number;
+        approve: number;
+        reject: number;
+        cancel: number;
+        open_estimate?: number;
+    };
+    phase5: {
+        propose: number;
+        hold: number;
+        approve: number;
+        reject: number;
+        pending_estimate?: number;
+    };
+    top_reason_codes: ReasonCount[];
+    top_hold_reasons: ReasonCount[];
+    top_reject_reasons: ReasonCount[];
+    actor_breakdown: Record<string, number>;
+    anomalies: DecisionAnomalies;
+    data_quality: DecisionDataQuality;
+    scope: ScopeMeta;
+}
+
+interface DatasetJoinCompleteness {
+    eligible_join_samples: number;
+    turn_id_present: number;
+    message_id_present: number;
+    stream_id_present: number;
+    full_triplet_present: number;
+}
+
+interface DatasetAnalytics {
+    total_samples: number;
+    eligible_samples: number;
+    high_confidence_samples: number;
+    low_confidence_samples: number;
+    excluded_samples: number;
+    high_confidence_baseline_ts: number | null;
+    baseline_reason: string;
+    sample_kind_breakdown: Record<string, number>;
+    source_breakdown: Record<string, number>;
+    label_breakdown: Record<string, number>;
+    exclude_reasons: ReasonCount[];
+    confidence_issues: ReasonCount[];
+    join_completeness: DatasetJoinCompleteness;
+    x_post_status_breakdown: Record<string, number>;
+    x_post_source_breakdown: Record<string, number>;
+    scope: ScopeMeta;
+}
+
 interface Stats {
     total_events: number;
     today_chats: number;
@@ -95,12 +202,29 @@ interface Stats {
     memory_rejected: number;
     memory_written: number;
     last_chat_time: string | null;
+    scope?: ScopeMeta;
+    decision_analytics?: DecisionAnalytics;
+    dataset_analytics?: DatasetAnalytics;
+}
+
+interface ReviewState {
+    thread_id: string;
+    hold_required: boolean;
+    review_token_active: boolean;
+    review_pending_count: number;
+    phase5_pending_count: number;
+    suppressed_actions_count: number;
+    review_rejected_count: number;
+    phase5_rejected_count: number;
+    active_reason_codes: string[];
+    latest_suppressed_reason_codes: string[];
 }
 
 interface InternalState {
     vector_docs: number;
     last_sleep: string | null;
     mood: string;
+    review_state?: ReviewState;
 }
 
 interface CheckpointerStats {
@@ -110,7 +234,7 @@ interface CheckpointerStats {
     retention_days: number;
 }
 
-export default function StatsPanel() {
+export default function StatsPanel({ threadId = 'default_thread' }: { threadId?: string }) {
     const [stats, setStats] = useState<Stats | null>(null);
     const [internalState, setInternalState] = useState<InternalState | null>(null);
     const [cpStats, setCpStats] = useState<CheckpointerStats | null>(null);
@@ -121,8 +245,8 @@ export default function StatsPanel() {
         const fetchData = async () => {
             try {
                 const [statsData, stateData, cpData] = await Promise.all([
-                    apiClient.fetchStatsSummary().catch(() => null),
-                    apiClient.fetchInternalState().catch(() => null),
+                    apiClient.fetchStatsSummary(threadId).catch(() => null),
+                    apiClient.fetchInternalState(threadId).catch(() => null),
                     apiClient.fetchCheckpointerStats().catch(() => null),
                 ]);
 
@@ -138,7 +262,16 @@ export default function StatsPanel() {
         fetchData();
         const interval = setInterval(fetchData, 30000);
         return () => clearInterval(interval);
-    }, []);
+    }, [threadId]);
+
+    const baselineTs = stats?.decision_analytics?.data_quality?.recommended_baseline_ts ?? null;
+    const datasetBaselineTs = stats?.dataset_analytics?.high_confidence_baseline_ts ?? null;
+    const actorBreakdownItems = Object.entries(stats?.decision_analytics?.actor_breakdown ?? {}).map(
+        ([code, count]) => ({ code, count }),
+    );
+    const datasetXStatusItems = Object.entries(stats?.dataset_analytics?.x_post_status_breakdown ?? {}).map(
+        ([code, count]) => ({ code, count }),
+    );
 
     return (
         <div className="relative h-full flex flex-col overflow-hidden">
@@ -211,6 +344,9 @@ export default function StatsPanel() {
                                 <p className="mt-2 text-sm text-slate-300/80">
                                     会話・記憶・内部状態の変化をリアルタイムに追跡します。
                                 </p>
+                                <p className="mt-3 text-xs text-slate-400">
+                                    scope: {stats?.scope?.scope_label ?? threadId}
+                                </p>
                             </div>
 
                             {/* 会話統計 */}
@@ -233,6 +369,223 @@ export default function StatsPanel() {
                                     <StatCard icon={CheckCircle} label="承認済" value={stats?.memory_approved ?? 0} tone="green" delay={80} />
                                     <StatCard icon={XCircle} label="却下" value={stats?.memory_rejected ?? 0} tone="red" delay={120} />
                                     <StatCard icon={Database} label="記録済" value={stats?.memory_written ?? 0} tone="blue" delay={160} />
+                                </div>
+                            </div>
+
+                            {/* レビュー分析 */}
+                            <div className="mb-8">
+                                <h3 className="text-lg font-semibold text-slate-200 mb-4">🪟 レビュー分析</h3>
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                                    <StatCard
+                                        icon={Clock}
+                                        label="現在 suppressed"
+                                        value={internalState?.review_state?.suppressed_actions_count ?? 0}
+                                        tone="orange"
+                                        delay={0}
+                                        subtext={`thread: ${internalState?.review_state?.thread_id ?? threadId}`}
+                                    />
+                                    <StatCard
+                                        icon={MessageSquare}
+                                        label="現在 review hold"
+                                        value={internalState?.review_state?.review_pending_count ?? 0}
+                                        tone="yellow"
+                                        delay={40}
+                                        subtext={internalState?.review_state?.hold_required ? 'hold active' : 'hold inactive'}
+                                    />
+                                    <StatCard
+                                        icon={BarChart3}
+                                        label="現在 phase5 pending"
+                                        value={internalState?.review_state?.phase5_pending_count ?? 0}
+                                        tone="indigo"
+                                        delay={80}
+                                        subtext={internalState?.review_state?.review_token_active ? 'review token active' : 'review token idle'}
+                                    />
+                                    <StatCard
+                                        icon={Clock}
+                                        label="履歴 review hold"
+                                        value={stats?.decision_analytics?.review_window?.hold ?? 0}
+                                        tone="cyan"
+                                        delay={120}
+                                        subtext={`open est. ${stats?.decision_analytics?.review_window?.open_estimate ?? 0}`}
+                                    />
+                                    <StatCard
+                                        icon={XCircle}
+                                        label="履歴 review reject"
+                                        value={stats?.decision_analytics?.review_window?.reject ?? 0}
+                                        tone="red"
+                                        delay={160}
+                                        subtext={`cancel ${stats?.decision_analytics?.review_window?.cancel ?? 0}`}
+                                    />
+                                    <StatCard
+                                        icon={BarChart3}
+                                        label="履歴 phase5 hold"
+                                        value={stats?.decision_analytics?.phase5?.hold ?? 0}
+                                        tone="blue"
+                                        delay={200}
+                                        subtext={`reject ${stats?.decision_analytics?.phase5?.reject ?? 0} | pending est. ${stats?.decision_analytics?.phase5?.pending_estimate ?? 0}`}
+                                    />
+                                </div>
+
+                                <div className="mt-4 grid gap-4 md:grid-cols-3">
+                                    <ReasonListCard
+                                        title="Active Reasons"
+                                        items={(
+                                            (internalState?.review_state?.active_reason_codes?.length
+                                                ? internalState.review_state.active_reason_codes
+                                                : internalState?.review_state?.latest_suppressed_reason_codes) ?? []
+                                        ).map((code) => ({ code, count: 1 }))}
+                                        emptyLabel="active reasonなし"
+                                    />
+                                    <ReasonListCard
+                                        title="Top Hold Reasons"
+                                        items={stats?.decision_analytics?.top_hold_reasons ?? []}
+                                        emptyLabel="hold reasonなし"
+                                    />
+                                    <ReasonListCard
+                                        title="Top Reject Reasons"
+                                        items={stats?.decision_analytics?.top_reject_reasons ?? []}
+                                        emptyLabel="reject reasonなし"
+                                    />
+                                </div>
+
+                                <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4">
+                                    <StatCard
+                                        icon={XCircle}
+                                        label="Token Mismatch"
+                                        value={stats?.decision_analytics?.anomalies?.review_token_mismatch ?? 0}
+                                        tone="red"
+                                        delay={0}
+                                    />
+                                    <StatCard
+                                        icon={Clock}
+                                        label="Hold Cancel"
+                                        value={stats?.decision_analytics?.anomalies?.hold_cancelled ?? 0}
+                                        tone="orange"
+                                        delay={40}
+                                    />
+                                    <StatCard
+                                        icon={Database}
+                                        label="Legacy Events"
+                                        value={stats?.decision_analytics?.data_quality?.legacy_events ?? 0}
+                                        tone="gray"
+                                        delay={80}
+                                        subtext={stats?.decision_analytics?.data_quality?.schema_current ?? 'decision_event'}
+                                    />
+                                    <StatCard
+                                        icon={BarChart3}
+                                        label="Actor Missing"
+                                        value={stats?.decision_analytics?.anomalies?.missing_actor ?? 0}
+                                        tone="yellow"
+                                        delay={120}
+                                        subtext={`gate msg miss ${stats?.decision_analytics?.anomalies?.missing_message_id ?? 0}`}
+                                    />
+                                </div>
+
+                                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                                    <ReasonListCard
+                                        title="Actors"
+                                        items={actorBreakdownItems}
+                                        emptyLabel="actor dataなし"
+                                    />
+                                    <div className="rounded-2xl border border-white/10 bg-[rgba(15,18,24,0.92)] p-4">
+                                        <div className="text-xs uppercase tracking-[0.3em] text-slate-400">Data Quality</div>
+                                        <div className="mt-4 space-y-2 text-sm text-slate-300">
+                                            <div>decision events: {stats?.decision_analytics?.data_quality?.decision_events_total ?? 0}</div>
+                                            <div>v2 events: {stats?.decision_analytics?.data_quality?.v2_events ?? 0}</div>
+                                            <div>
+                                                baseline: {baselineTs
+                                                    ? new Date(baselineTs).toLocaleString('ja-JP')
+                                                    : '--'}
+                                            </div>
+                                            <div className="text-xs text-slate-500">
+                                                {stats?.decision_analytics?.data_quality?.recommended_baseline_reason ?? 'legacy policy not set'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="mb-8">
+                                <h3 className="text-lg font-semibold text-slate-200 mb-4">📚 学習データ</h3>
+                                <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+                                    <StatCard
+                                        icon={Database}
+                                        label="canonical"
+                                        value={stats?.dataset_analytics?.total_samples ?? 0}
+                                        tone="blue"
+                                        delay={0}
+                                    />
+                                    <StatCard
+                                        icon={CheckCircle}
+                                        label="high confidence"
+                                        value={stats?.dataset_analytics?.high_confidence_samples ?? 0}
+                                        tone="green"
+                                        delay={40}
+                                        subtext={`eligible ${stats?.dataset_analytics?.eligible_samples ?? 0}`}
+                                    />
+                                    <StatCard
+                                        icon={Clock}
+                                        label="low confidence"
+                                        value={stats?.dataset_analytics?.low_confidence_samples ?? 0}
+                                        tone="yellow"
+                                        delay={80}
+                                        subtext={`excluded ${stats?.dataset_analytics?.excluded_samples ?? 0}`}
+                                    />
+                                    <StatCard
+                                        icon={Network}
+                                        label="join complete"
+                                        value={stats?.dataset_analytics?.join_completeness?.full_triplet_present ?? 0}
+                                        tone="cyan"
+                                        delay={120}
+                                        subtext={`eligible join ${stats?.dataset_analytics?.join_completeness?.eligible_join_samples ?? 0}`}
+                                    />
+                                    <StatCard
+                                        icon={BarChart3}
+                                        label="X posted"
+                                        value={stats?.dataset_analytics?.x_post_status_breakdown?.posted ?? 0}
+                                        tone="pink"
+                                        delay={160}
+                                        subtext={`rejected ${stats?.dataset_analytics?.x_post_status_breakdown?.rejected ?? 0}`}
+                                    />
+                                </div>
+
+                                <div className="mt-4 grid gap-4 md:grid-cols-3">
+                                    <ReasonListCard
+                                        title="Exclude Reasons"
+                                        items={stats?.dataset_analytics?.exclude_reasons ?? []}
+                                        emptyLabel="excludeなし"
+                                    />
+                                    <ReasonListCard
+                                        title="Confidence Issues"
+                                        items={stats?.dataset_analytics?.confidence_issues ?? []}
+                                        emptyLabel="issueなし"
+                                    />
+                                    <ReasonListCard
+                                        title="X Status"
+                                        items={datasetXStatusItems}
+                                        emptyLabel="x proposalなし"
+                                    />
+                                </div>
+
+                                <div className="mt-4 rounded-2xl border border-white/10 bg-[rgba(15,18,24,0.92)] p-4">
+                                    <div className="text-xs uppercase tracking-[0.3em] text-slate-400">High-Confidence Baseline</div>
+                                    <div className="mt-4 space-y-2 text-sm text-slate-300">
+                                        <div>
+                                            baseline: {datasetBaselineTs
+                                                ? new Date(datasetBaselineTs).toLocaleString('ja-JP')
+                                                : '--'}
+                                        </div>
+                                        <div>
+                                            turn/message/stream: {stats?.dataset_analytics?.join_completeness?.turn_id_present ?? 0}
+                                            {' / '}
+                                            {stats?.dataset_analytics?.join_completeness?.message_id_present ?? 0}
+                                            {' / '}
+                                            {stats?.dataset_analytics?.join_completeness?.stream_id_present ?? 0}
+                                        </div>
+                                        <div className="text-xs text-slate-500">
+                                            {stats?.dataset_analytics?.baseline_reason ?? 'baseline policy not set'}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
 

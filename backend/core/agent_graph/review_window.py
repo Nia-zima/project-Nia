@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from typing import Iterable, Optional
 
+from backend.core.agent_graph.state_normalizer import normalize_checkpoint_state
+from backend.core.decision_events import build_decision_event_payload
 from backend.core.agent_graph.state import AgentState
 from backend.core.logger import logger
 
@@ -75,9 +77,13 @@ def _cap_items(items: Optional[list], limit: int) -> list:
 
 
 def get_review_pending_actions(state: AgentState | dict) -> list:
-    if "review_pending_actions" in state:
-        return _cap_items(state.get("review_pending_actions") or [], MAX_PENDING)
-    return _cap_items(state.get("pending_actions") or [], MAX_PENDING)
+    normalized = normalize_checkpoint_state(state)
+    return _cap_items(normalized.get("review_pending_actions") or [], MAX_PENDING)
+
+
+def get_review_rejected_actions(state: AgentState | dict) -> list:
+    normalized = normalize_checkpoint_state(state)
+    return _cap_items(normalized.get("review_rejected_actions") or [], MAX_REJECTED)
 
 
 def get_review_token(state: AgentState) -> Optional[str]:
@@ -151,6 +157,7 @@ def apply_review_decision(
     token: str,
     decision: str,
 ) -> dict:
+    state = normalize_checkpoint_state(state)
     expected = get_review_token(state)
     if not expected or expected != token:
         return {}
@@ -175,8 +182,8 @@ def apply_review_decision(
         before = state.get("dissonance")
         base = float(before or 0.0)
         after = min(base + K_REJECT, D_MAX)
-        rejected_actions = _cap_items(
-            list(state.get("rejected_actions") or [])
+        review_rejected_actions = _cap_items(
+            get_review_rejected_actions(state)
             + [
                 {
                     "kind": "say",
@@ -193,7 +200,7 @@ def apply_review_decision(
             **clear_review_token(next_merge_mode="wait"),
             "reason_codes": merged_reasons,
             "dissonance": after,
-            "rejected_actions": rejected_actions,
+            "review_rejected_actions": review_rejected_actions,
         }
     return {}
 
@@ -203,6 +210,7 @@ def cancel_review_on_new_input(
     *,
     user_text: Optional[str],
 ) -> dict:
+    state = normalize_checkpoint_state(state)
     token = get_review_token(state)
     if not token:
         return {}
@@ -222,7 +230,7 @@ def cancel_review_on_new_input(
         for item in pending_actions
         if isinstance(item, dict)
     ]
-    rejected_actions = _cap_items(list(state.get("rejected_actions") or []) + shadowed, MAX_REJECTED)
+    review_rejected_actions = _cap_items(get_review_rejected_actions(state) + shadowed, MAX_REJECTED)
     merged_reasons = _merge_reason_codes(
         state.get("reason_codes"),
         ["system_hold_cancelled", "system_hold_cancelled_new_input"],
@@ -231,11 +239,23 @@ def cancel_review_on_new_input(
         "final_text": "WAIT",
         **clear_review_token(next_merge_mode="wait"),
         "reason_codes": merged_reasons,
-        "rejected_actions": rejected_actions,
+        "review_rejected_actions": review_rejected_actions,
     }
 
 
-def build_hold_request_event(update: dict) -> Optional[dict]:
+def build_hold_request_event(
+    update: dict,
+    *,
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+) -> Optional[dict]:
+    """Build a decision_event for a hold request.
+
+    decision_event.v2 では ``text`` を正とする。
+    ``preview_text`` は hold SSE 互換のためだけに残す（approve/reject には含めない）。
+    """
     token = update.get("review_token")
     if not token:
         token = get_review_token({"merge_mode": update.get("merge_mode")})
@@ -249,18 +269,115 @@ def build_hold_request_event(update: dict) -> Optional[dict]:
             break
     if not preview_text:
         preview_text = str(update.get("draft") or "").strip()
-    payload = {
-        "review_token": token,
-        "hold_kind": update.get("hold_kind") or "speech_preview",
-        "preview_text": preview_text,
-        "reason_codes": _merge_reason_codes([], update.get("reason_codes") or []),
-        "pending_actions": pending_actions,
-    }
+    payload = build_decision_event_payload(
+        source="review_window",
+        entity_kind="say",
+        decision="hold",
+        status="pending_review",
+        thread_id=thread_id,
+        actor="gate",
+        turn_id=turn_id,
+        message_id=message_id,
+        stream_id=stream_id,
+        review_token=token,
+        item_kind="say",
+        reason_codes=_merge_reason_codes([], update.get("reason_codes") or []),
+        extras={
+            "hold_kind": update.get("hold_kind") or "speech_preview",
+            "text": preview_text,
+            "preview_text": preview_text,  # SSE 互換
+            "pending_actions": pending_actions,
+        },
+    )
     return {"type": "event", "name": "hold_request", "payload": payload}
 
 
-def build_hold_cancelled_event(review_token: Optional[str]) -> Optional[dict]:
+def build_hold_cancelled_event(
+    review_token: Optional[str],
+    *,
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+) -> Optional[dict]:
     if not review_token:
         return None
-    payload = {"review_token": review_token, "reason": "new_user_input"}
+    payload = build_decision_event_payload(
+        source="review_window",
+        entity_kind="say",
+        decision="cancel",
+        status="cancelled",
+        thread_id=thread_id,
+        actor="system",
+        turn_id=turn_id,
+        message_id=message_id,
+        stream_id=stream_id,
+        review_token=review_token,
+        item_kind="say",
+        reason="new_user_input",
+    )
     return {"type": "event", "name": "hold_cancelled", "payload": payload}
+
+
+def build_hold_approved_event(
+    review_token: Optional[str],
+    *,
+    text: str | None = None,
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+    reason_codes: Optional[list] = None,
+) -> Optional[dict]:
+    """Build a decision_event for an approved hold."""
+    if not review_token:
+        return None
+    payload = build_decision_event_payload(
+        source="review_window",
+        entity_kind="say",
+        decision="approve",
+        status="applied",
+        thread_id=thread_id,
+        actor="user",
+        turn_id=turn_id,
+        message_id=message_id,
+        stream_id=stream_id,
+        review_token=review_token,
+        item_kind="say",
+        reason="user_approved",
+        reason_codes=reason_codes,
+        extras={"text": text} if text else None,
+    )
+    return {"type": "event", "name": "hold_approved", "payload": payload}
+
+
+def build_hold_rejected_event(
+    review_token: Optional[str],
+    *,
+    text: str | None = None,
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+    reason_codes: Optional[list] = None,
+) -> Optional[dict]:
+    """Build a decision_event for a rejected hold."""
+    if not review_token:
+        return None
+    payload = build_decision_event_payload(
+        source="review_window",
+        entity_kind="say",
+        decision="reject",
+        status="applied",
+        thread_id=thread_id,
+        actor="user",
+        turn_id=turn_id,
+        message_id=message_id,
+        stream_id=stream_id,
+        review_token=review_token,
+        item_kind="say",
+        reason="user_rejected",
+        reason_codes=reason_codes,
+        extras={"text": text} if text else None,
+    )
+    return {"type": "event", "name": "hold_rejected", "payload": payload}

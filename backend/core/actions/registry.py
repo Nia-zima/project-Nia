@@ -189,7 +189,7 @@ class ActionRegistry:
             risk_level=RiskLevel.MEDIUM,
             description="X (Twitter) にニアのツイートを投稿",
             payload={},
-            requires_confirmation=False,
+            requires_confirmation=True,
         ))
 
 

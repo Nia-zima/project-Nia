@@ -159,10 +159,15 @@ def _resolve_depth_decision(
 
 def _collect_somatic_senses(
     *, thread_id: str, user_query: str,
-) -> list[dict] | None:
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+    trace_id: str | None = None,
+) -> tuple[list[dict] | None, float]:
     """Collect InternalMetrics from retrieval + DB and translate to senses.
 
-    Returns list of {"text": str, "intensity": float} sorted by intensity desc,
+    Returns (senses, top_similarity) where senses is
+    list of {"text": str, "intensity": float} sorted by intensity desc,
     or None if nothing fires.
     """
     import time as _time
@@ -173,6 +178,8 @@ def _collect_somatic_senses(
     # 1. Retrieve with scores to get similarity/confidence data
     memories, scored, intent = retrieve_with_scores(
         user_query, thread_id, limit=8,
+        turn_id=turn_id, message_id=message_id, stream_id=stream_id,
+        trace_id=trace_id,
     )
 
     # 2. Build InternalMetrics from scored results
@@ -255,7 +262,7 @@ def _collect_somatic_senses(
     cal = load_calibration()
     senses = translate(metrics, cal)
     if not senses:
-        return None
+        return None, top_sim
 
     # Sort by intensity desc
     senses.sort(key=lambda s: s.intensity, reverse=True)
@@ -271,7 +278,7 @@ def _collect_somatic_senses(
         last_sleep_hours,
     )
 
-    return result
+    return result, top_sim
 
 
 def _intent_to_str(intent) -> str:
@@ -285,6 +292,184 @@ def _intent_to_str(intent) -> str:
     return "default"
 
 
+# ── Subsystem Helpers (extracted from depth_selector) ────────
+
+
+def _run_metacognition(
+    *, confidence: float, user_text: str, thread_id: str, reason_codes: list[str],
+) -> tuple[float, object | None]:
+    """N.1: Metacognitive check — adjust confidence using memory grounding + 三戒.
+
+    Returns (adjusted_confidence, metacog_result_or_None).
+    """
+    if not settings.METACOG_ENABLED:
+        return confidence, None
+    try:
+        from backend.services.memory.metacognition import metacognitive_check
+        result = metacognitive_check(
+            raw_confidence=confidence,
+            user_query=user_text,
+            thread_id=thread_id,
+        )
+        confidence = result.adjusted_confidence
+        if result.sankai_flags.fabrication_risk:
+            reason_codes.append("sankai_fabrication_risk")
+        if result.sankai_flags.false_memory_risk:
+            reason_codes.append("sankai_false_memory_risk")
+        if result.contradiction_detected:
+            reason_codes.append("metacog_contradiction")
+        return confidence, result
+    except Exception:
+        logger.warning("[DEPTH_SELECTOR] metacognitive check failed", exc_info=True)
+        return confidence, None
+
+
+def _metacog_to_dict(metacog_result: object | None) -> dict | None:
+    """Serialize metacog result for telemetry."""
+    if metacog_result is None:
+        return None
+    return {
+        "raw_confidence": metacog_result.raw_confidence,
+        "adjusted_confidence": metacog_result.adjusted_confidence,
+        "grounding_score": metacog_result.grounding_score,
+        "grounding_hits": metacog_result.grounding_hits,
+        "contradiction_detected": metacog_result.contradiction_detected,
+        "fabrication_risk": metacog_result.sankai_flags.fabrication_risk,
+        "false_memory_risk": metacog_result.sankai_flags.false_memory_risk,
+    }
+
+
+def _read_self_narrative() -> str:
+    """N.5: Read and consume previous turn's self-narrative from telemetry_kv."""
+    try:
+        from backend.core.db import managed_conn as _mc
+        with _mc() as conn:
+            row = conn.execute(
+                "SELECT v FROM telemetry_kv WHERE k='self_narrative'"
+            ).fetchone()
+            if row:
+                narrative = row["v"]
+                conn.execute("DELETE FROM telemetry_kv WHERE k='self_narrative'")
+                return narrative
+    except Exception:
+        logger.debug("[DEPTH_SELECTOR] self_narrative read failed", exc_info=True)
+    return ""
+
+
+def _collect_somatic(
+    thread_id: str, user_text: str,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+    trace_id: str | None = None,
+) -> tuple[list[dict] | None, float]:
+    """S.1a: Somatic Self-Awareness — collect and translate felt-sense.
+
+    Returns (senses, retrieval_top_similarity).
+    """
+    if not settings.SOMATIC_ENABLED:
+        return None, 0.0
+    try:
+        return _collect_somatic_senses(
+            thread_id=thread_id, user_query=user_text,
+            turn_id=turn_id, message_id=message_id, stream_id=stream_id,
+            trace_id=trace_id,
+        )
+    except Exception:
+        logger.debug("[DEPTH_SELECTOR] somatic collection failed", exc_info=True)
+        return None, 0.0
+
+
+async def _collect_game_context(selected_depth: int) -> tuple[str, bool]:
+    """Build game context from active GameProfile."""
+    try:
+        from backend.services.game_profiles.registry import game_profile_registry
+        active_profile = game_profile_registry.get_active()
+        if active_profile and await active_profile.is_connected():
+            game_state = await active_profile.get_state()
+            ctx = active_profile.format_state_for_llm(game_state, depth=selected_depth)
+            return ctx, bool(ctx)
+    except Exception:
+        logger.warning("[DEPTH_SELECTOR] game context retrieval failed", exc_info=True)
+    return "", False
+
+
+def _run_niacore_shadow(
+    *,
+    user_text: str,
+    state: AgentState,
+    confidence_metrics: dict,
+    somatic_senses: list[dict] | None,
+    thread_id: str,
+    selected_depth: int,
+) -> dict | None:
+    """NiaCore Shadow: CfC inference (observation only, does not affect decisions)."""
+    if not getattr(settings, "NIACORE_SHADOW_ENABLED", False):
+        return None
+    try:
+        import base64
+        from backend.core.niacore.shadow import shadow_infer
+        shadow_result = shadow_infer(
+            user_text=user_text,
+            messages=list(state.get("messages") or []),
+            confidence_metrics=confidence_metrics,
+            surprise_score=state.get("surprise_score") or 0.0,
+            somatic_senses=somatic_senses,
+            thread_id=thread_id,
+            rule_based_depth=str(selected_depth),
+        )
+        if shadow_result is not None:
+            d = shadow_result.to_dict()
+            d["_state_vector_blob"] = base64.b64encode(
+                shadow_result.state_vector_blob
+            ).decode("ascii")
+            return d
+    except Exception:
+        logger.debug("[NiaCore] shadow inference failed", exc_info=True)
+    return None
+
+
+def _run_skeleton_build(
+    *,
+    state: AgentState,
+    confidence_metrics: dict,
+    action_value: str,
+    reason_codes: list[str],
+    somatic_senses: list[dict] | None,
+    selected_depth: int,
+    thread_id: str,
+    user_text: str,
+) -> dict | None:
+    """SkeletonCore: build conversation skeleton labels."""
+    if not getattr(settings, "SKELETON_RECORD_ENABLED", False):
+        return None
+    try:
+        from backend.core.conversation_skeleton.builder import build_conversation_skeleton
+        skel_state = dict(state)
+        skel_state["confidence_metrics"] = confidence_metrics
+        skel_state["surprise_score"] = state.get("surprise_score") or 0.0
+        skel_state["selected_depth"] = selected_depth
+        skel_state["depth_action"] = action_value
+        skel_state["reason_codes"] = reason_codes
+        skel_state["somatic_senses"] = somatic_senses
+
+        skeleton = build_conversation_skeleton(
+            state=skel_state, thread_id=thread_id, user_text=user_text,
+        )
+        if skeleton:
+            return {
+                "focus": skeleton.focus.value,
+                "response_intent": skeleton.response_intent.value,
+                "question_intent": skeleton.question_intent.value if skeleton.question_intent else None,
+                "source": skeleton.source,
+                "confidence": skeleton.confidence,
+                "rule_trace": skeleton.rule_trace,
+            }
+    except Exception:
+        logger.debug("[SKELETON] build failed in depth_selector", exc_info=True)
+    return None
+
+
 # ── Graph Nodes ───────────────────────────────────────────────
 
 async def depth_selector(state: AgentState) -> dict:
@@ -293,6 +478,7 @@ async def depth_selector(state: AgentState) -> dict:
     reason_codes = list(state.get("reason_codes") or [])
     dissonance = state.get("dissonance") or 0.0
     prev_depth2_text = str(state.get("depth2_text") or "").strip()
+    thread_id = str(state.get("thread_id", "unknown"))
 
     # Collect conversation context
     context: list[str] = []
@@ -307,26 +493,11 @@ async def depth_selector(state: AgentState) -> dict:
     metrics = recommendation.metrics
     confidence = recommendation.confidence
 
-    # N.1: Metacognitive check — adjust confidence using memory grounding + 三戒
-    metacog_result = None
-    if settings.METACOG_ENABLED:
-        try:
-            from backend.services.memory.metacognition import metacognitive_check
-            thread_id = state.get("thread_id", "unknown")
-            metacog_result = metacognitive_check(
-                raw_confidence=confidence,
-                user_query=user_text,
-                thread_id=str(thread_id),
-            )
-            confidence = metacog_result.adjusted_confidence
-            if metacog_result.sankai_flags.fabrication_risk:
-                reason_codes.append("sankai_fabrication_risk")
-            if metacog_result.sankai_flags.false_memory_risk:
-                reason_codes.append("sankai_false_memory_risk")
-            if metacog_result.contradiction_detected:
-                reason_codes.append("metacog_contradiction")
-        except Exception:
-            logger.warning("[DEPTH_SELECTOR] metacognitive check failed", exc_info=True)
+    # N.1: Metacognitive check
+    confidence, metacog_result = _run_metacognition(
+        confidence=confidence, user_text=user_text,
+        thread_id=thread_id, reason_codes=reason_codes,
+    )
 
     # Depth2 candidacy + gate
     need_depth2 = _should_use_depth2(
@@ -335,8 +506,7 @@ async def depth_selector(state: AgentState) -> dict:
     depth2_gate_met = False
     cumulative_turn_count = 0
     if need_depth2:
-        thread_id = state.get("thread_id", "unknown")
-        cumulative_turn_count = _get_cumulative_turn_count(str(thread_id))
+        cumulative_turn_count = _get_cumulative_turn_count(thread_id)
         depth2_min = getattr(settings, "DEPTH2_MIN_TURNS", 100)
         depth2_gate_met = (
             cumulative_turn_count >= depth2_min
@@ -371,8 +541,9 @@ async def depth_selector(state: AgentState) -> dict:
         need_depth2=need_depth2,
     )
 
+    selected_depth = 2 if need_depth2 else (1 if need_depth1 else 0)
+
     # Collect experience for offline RL
-    thread_id = state.get("thread_id", "unknown")
     action_int = {"depth0": 0, "depth1": 1, "ask": 2, "wait": 3}.get(action.value, 0)
     turn_count = len([m for m in (state.get("messages") or []) if hasattr(m, "content")])
 
@@ -399,131 +570,52 @@ async def depth_selector(state: AgentState) -> dict:
         "action_source": action_source,
     })
 
-    # Phase G: Build memory context for depth nodes
-    # N.5: Read previous turn's self-narrative from telemetry_kv
-    _self_narrative = ""
-    try:
-        from backend.core.db import managed_conn as _managed_conn_n5
-        with _managed_conn_n5() as _conn_n5:
-            _row = _conn_n5.execute(
-                "SELECT v FROM telemetry_kv WHERE k='self_narrative'"
-            ).fetchone()
-            if _row:
-                _self_narrative = _row["v"]
-                # Clear after read (one-shot: narrative applies to next turn only)
-                _conn_n5.execute("DELETE FROM telemetry_kv WHERE k='self_narrative'")
-    except Exception:
-        logger.debug("[DEPTH_SELECTOR] self_narrative read failed", exc_info=True)
-
-    # S.1a: Somatic Self-Awareness — collect metrics and generate felt-sense text
-    somatic_senses_dicts: list[dict] | None = None
-    if settings.SOMATIC_ENABLED:
-        try:
-            somatic_senses_dicts = _collect_somatic_senses(
-                thread_id=str(thread_id), user_query=user_text,
-            )
-        except Exception:
-            logger.debug("[DEPTH_SELECTOR] somatic collection failed", exc_info=True)
+    # Context collection (memory, somatic, game)
+    self_narrative = _read_self_narrative()
+    turn_id = str(state.get("turn_id") or "")
+    message_id = str(state.get("message_id") or "")
+    stream_id = str(state.get("stream_id") or "")
+    trace_id = str(state.get("trace_id") or "")
+    somatic_senses_dicts, retrieval_top_sim = _collect_somatic(
+        thread_id, user_text,
+        turn_id=turn_id or None, message_id=message_id or None,
+        stream_id=stream_id or None, trace_id=trace_id or None,
+    )
 
     memory_context = ""
     sections: dict[str, str] = {}
     try:
         sections = build_memory_context(
-            thread_id=str(thread_id), user_query=user_text,
-            self_narrative=_self_narrative,
+            thread_id=thread_id, user_query=user_text,
+            self_narrative=self_narrative,
             somatic_senses=somatic_senses_dicts,
+            turn_id=turn_id or None, message_id=message_id or None,
+            stream_id=stream_id or None, trace_id=trace_id or None,
         )
         memory_context = format_memory_sections(sections)
     except Exception:
         logger.warning("[DEPTH_SELECTOR] memory context retrieval failed", exc_info=True)
 
-    # Game context: Build from active GameProfile (Minecraft, Screen, etc.)
-    game_context = ""
-    game_active = False
-    try:
-        from backend.services.game_profiles.registry import game_profile_registry
-        active_profile = game_profile_registry.get_active()
-        if active_profile and await active_profile.is_connected():
-            selected = 2 if need_depth2 else (1 if need_depth1 else 0)
-            game_state = await active_profile.get_state()
-            game_context = active_profile.format_state_for_llm(game_state, depth=selected)
-            game_active = bool(game_context)
-    except Exception:
-        logger.warning("[DEPTH_SELECTOR] game context retrieval failed", exc_info=True)
+    game_context, game_active = await _collect_game_context(selected_depth)
 
     logger.info(
         "[DEPTH_SELECTOR] thread=%s confidence=%.3f action=%s source=%s need_depth1=%s mem_ctx=%d game=%s",
         thread_id, confidence, action.value, action_source, need_depth1, len(memory_context), game_active,
     )
 
-    # Telemetry: log metacog result
-    metacog_dict = None
-    if metacog_result is not None:
-        metacog_dict = {
-            "raw_confidence": metacog_result.raw_confidence,
-            "adjusted_confidence": metacog_result.adjusted_confidence,
-            "grounding_score": metacog_result.grounding_score,
-            "grounding_hits": metacog_result.grounding_hits,
-            "contradiction_detected": metacog_result.contradiction_detected,
-            "fabrication_risk": metacog_result.sankai_flags.fabrication_risk,
-            "false_memory_risk": metacog_result.sankai_flags.false_memory_risk,
-        }
-
-    # NiaCore Shadow: CfC 推論（実行に影響しない）
-    niacore_shadow_dict = None
-    if getattr(settings, "NIACORE_SHADOW_ENABLED", False):
-        try:
-            from backend.core.niacore.shadow import shadow_infer
-            shadow_result = shadow_infer(
-                user_text=user_text,
-                messages=list(state.get("messages") or []),
-                confidence_metrics=confidence_metrics,
-                surprise_score=state.get("surprise_score") or 0.0,
-                somatic_senses=somatic_senses_dicts,
-                thread_id=str(thread_id),
-                rule_based_depth=str(2 if need_depth2 else (1 if need_depth1 else 0)),
-            )
-            if shadow_result is not None:
-                niacore_shadow_dict = shadow_result.to_dict()
-                # state_vector_blob は base64 で JSON-safe に格納
-                import base64
-                niacore_shadow_dict["_state_vector_blob"] = base64.b64encode(
-                    shadow_result.state_vector_blob
-                ).decode("ascii")
-        except Exception:
-            logger.debug("[NiaCore] shadow inference failed", exc_info=True)
-
-    # SkeletonCore: 会話骨格の構築（record/shadow）
-    skeleton_dict = None
-    if getattr(settings, "SKELETON_RECORD_ENABLED", False):
-        try:
-            from backend.core.conversation_skeleton.builder import build_conversation_skeleton
-
-            # depth_selector の結果を含む暫定 state を構築
-            _skel_state = dict(state)
-            _skel_state["confidence_metrics"] = confidence_metrics
-            _skel_state["surprise_score"] = state.get("surprise_score") or 0.0
-            _skel_state["selected_depth"] = 2 if need_depth2 else (1 if need_depth1 else 0)
-            _skel_state["depth_action"] = action.value
-            _skel_state["reason_codes"] = reason_codes
-            _skel_state["somatic_senses"] = somatic_senses_dicts
-
-            skeleton = build_conversation_skeleton(
-                state=_skel_state,
-                thread_id=str(thread_id),
-                user_text=user_text,
-            )
-            if skeleton:
-                skeleton_dict = {
-                    "focus": skeleton.focus.value,
-                    "response_intent": skeleton.response_intent.value,
-                    "question_intent": skeleton.question_intent.value if skeleton.question_intent else None,
-                    "source": skeleton.source,
-                    "confidence": skeleton.confidence,
-                    "rule_trace": skeleton.rule_trace,
-                }
-        except Exception:
-            logger.debug("[SKELETON] build failed in depth_selector", exc_info=True)
+    # Subsystem shadow/record passes
+    niacore_shadow_dict = _run_niacore_shadow(
+        user_text=user_text, state=state,
+        confidence_metrics=confidence_metrics,
+        somatic_senses=somatic_senses_dicts,
+        thread_id=thread_id, selected_depth=selected_depth,
+    )
+    skeleton_dict = _run_skeleton_build(
+        state=state, confidence_metrics=confidence_metrics,
+        action_value=action.value, reason_codes=reason_codes,
+        somatic_senses=somatic_senses_dicts,
+        selected_depth=selected_depth, thread_id=thread_id, user_text=user_text,
+    )
 
     return {
         "confidence": confidence,
@@ -537,15 +629,16 @@ async def depth_selector(state: AgentState) -> dict:
         "need_depth1": need_depth1,
         "dissonance_on": dissonance_on,
         "reason_codes": reason_codes,
-        "selected_depth": 2 if need_depth2 else (1 if need_depth1 else 0),
+        "selected_depth": selected_depth,
         "depth2_gate_met": depth2_gate_met,
         "cumulative_turn_count": cumulative_turn_count,
         "memory_context": memory_context,
         "memory_sections": sections,
         "game_context": game_context,
         "game_active": game_active,
-        "metacog_result": metacog_dict,
+        "metacog_result": _metacog_to_dict(metacog_result),
         "somatic_senses": somatic_senses_dicts,
+        "retrieval_top_similarity": retrieval_top_sim,
         "niacore_shadow": niacore_shadow_dict,
         "conversation_skeleton": skeleton_dict,
     }

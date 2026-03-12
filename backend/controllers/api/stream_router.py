@@ -3,9 +3,9 @@ import uuid
 import re
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.core.logger import logger
 from backend.core.config import settings
@@ -17,26 +17,26 @@ router = APIRouter()
 # ---------- Request Models ----------
 
 class StreamChatRequest(BaseModel):
-    text: str
-    thread_id: str = "default_thread"
-    voice_id: Optional[str] = "14"
+    text: str = Field(..., min_length=1, max_length=10000)
+    thread_id: str = Field("default_thread", min_length=1, max_length=256)
+    voice_id: Optional[str] = Field("14", max_length=50)
     image_data: Optional[str] = None
-    mode: Optional[str] = "normal"
-    stream_id: Optional[str] = None
-    message_id: Optional[str] = None
+    mode: Optional[str] = Field("normal", max_length=50)
+    stream_id: Optional[str] = Field(None, max_length=128)
+    message_id: Optional[str] = Field(None, max_length=128)
 
 
 class LivestreamChatRequest(BaseModel):
-    text: str
-    thread_id: str = "live_stream"
+    text: str = Field(..., min_length=1, max_length=5000)
+    thread_id: str = Field("live_stream", min_length=1, max_length=256)
     audience_meta: Optional[Dict[str, Any]] = None
 
 
 class StreamTimeoutRequest(BaseModel):
-    thread_id: str = "default_thread"
-    stream_id: Optional[str] = None
-    turn_id: Optional[str] = None
-    reason: Optional[str] = None
+    thread_id: str = Field("default_thread", min_length=1, max_length=256)
+    stream_id: Optional[str] = Field(None, max_length=128)
+    turn_id: Optional[str] = Field(None, max_length=128)
+    reason: Optional[str] = Field(None, max_length=500)
 
 
 # ---------- Helpers ----------
@@ -125,6 +125,10 @@ async def stream_chat(req: StreamChatRequest, request: Request):
     logger.info(f"[CHAT_START] rid={rid} from={client_host} mode={req.mode}")
     logger.info(f"📨 Chat Request (SSE): {req.text[:20]}... (Thread: {req.thread_id}) Mode: {req.mode}")
 
+    # Auto-generate provenance IDs when client doesn't supply them
+    stream_id = req.stream_id or uuid.uuid4().hex
+    message_id = req.message_id or uuid.uuid4().hex
+
     return StreamingResponse(
         _safe_stream_generator(
             input_text=req.text,
@@ -132,8 +136,8 @@ async def stream_chat(req: StreamChatRequest, request: Request):
             voice_id=req.voice_id,
             image_data=req.image_data,
             mode=req.mode,
-            stream_id=req.stream_id,
-            message_id=req.message_id,
+            stream_id=stream_id,
+            message_id=message_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -192,7 +196,7 @@ async def stream_timeout(req: StreamTimeoutRequest) -> Dict[str, Any]:
         return {"ok": True}
     except Exception as e:
         logger.error(f"[TIMEOUT] Failed to record timeout: {e}")
-        return {"ok": False}
+        raise HTTPException(status_code=500, detail="timeout_record_failed")
 
 
 @router.get("/history/{thread_id}")
@@ -238,7 +242,7 @@ async def delete_history(thread_id: str):
         return {"ok": True, "thread_id": thread_id}
     except Exception as e:
         logger.warning(f"History delete failed: {e}")
-        return {"ok": False, "thread_id": thread_id}
+        raise HTTPException(status_code=500, detail="history_delete_failed")
 
 
 @router.get("/memories")

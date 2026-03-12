@@ -23,6 +23,7 @@ ensure_dirs()
 _retention_task: asyncio.Task | None = None
 _idle_task: asyncio.Task | None = None
 _room_update_task: asyncio.Task | None = None
+_training_dataset_task: asyncio.Task | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -102,9 +103,27 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("[ROOM] failed to start update loop")
 
+    # 10. Training Dataset Snapshot Loop
+    global _training_dataset_task
+    try:
+        if getattr(settings, "TRAINING_DATASET_SNAPSHOT_ENABLED", True):
+            from backend.services.training_dataset_snapshot import training_dataset_snapshot_loop
+            _training_dataset_task = asyncio.create_task(
+                training_dataset_snapshot_loop(),
+                name="training_dataset_snapshot",
+            )
+    except Exception:
+        logger.exception("[TRAINING_DATASET] failed to start snapshot loop")
+
     try:
         yield
     finally:
+        if _training_dataset_task:
+            _training_dataset_task.cancel()
+            try:
+                await _training_dataset_task
+            except asyncio.CancelledError:
+                pass
         if _room_update_task:
             _room_update_task.cancel()
             try:

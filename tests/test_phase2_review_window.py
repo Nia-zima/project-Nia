@@ -55,7 +55,7 @@ def test_reject_increases_dissonance_and_stores_rejected():
         "review_token": "tok",
         "merge_mode": "review:tok",
         "review_pending_actions": [{"kind": "say", "text": "却下される発話", "risk": "med"}],
-        "rejected_actions": [],
+        "review_rejected_actions": [],
         "reason_codes": ["risk_long_text"],
         "dissonance": 0.10,
     }
@@ -63,7 +63,7 @@ def test_reject_increases_dissonance_and_stores_rejected():
     assert out.get("final_text") == "WAIT"
     assert out.get("dissonance", 0) > 0.10
     assert "action_rejected" in (out.get("reason_codes") or [])
-    rejected = out.get("rejected_actions") or []
+    rejected = out.get("review_rejected_actions") or []
     assert rejected and rejected[0].get("text") == "却下される発話"
 
 
@@ -72,7 +72,7 @@ def test_cancel_on_new_input_moves_pending_to_rejected():
         "review_token": "tok",
         "merge_mode": "review:tok",
         "review_pending_actions": [{"kind": "say", "text": "旧プレビュー", "risk": "med"}],
-        "rejected_actions": [],
+        "review_rejected_actions": [],
         "reason_codes": ["keyword_memory"],
     }
     out = cancel_review_on_new_input(state, user_text="新しい入力")
@@ -81,7 +81,7 @@ def test_cancel_on_new_input_moves_pending_to_rejected():
     assert out.get("final_text") == "WAIT"
     assert "system_hold_cancelled_new_input" in (out.get("reason_codes") or [])
     assert get_review_token(merged) is None
-    rejected = out.get("rejected_actions") or []
+    rejected = out.get("review_rejected_actions") or []
     assert rejected and rejected[0].get("text") == "旧プレビュー"
 
 
@@ -99,6 +99,8 @@ def test_hold_request_event_payload_shape():
     assert payload.get("hold_kind") == "speech_preview"
     assert payload.get("preview_text") == "preview"
     assert payload.get("pending_actions")[0].get("kind") == "say"
+    assert payload.get("source") == "review_window"
+    assert payload.get("decision") == "hold"
 
 
 def test_merge_hold_preserves_phase5_pending_actions():
@@ -194,6 +196,79 @@ def test_long_reply_triggers_hold_strict(monkeypatch):
     assert out.get("hold_required") is True
     assert out.get("final_text") == "WAIT"
     assert "risk_long_reply" in (out.get("reason_codes") or [])
+
+
+def test_hold_request_event_includes_text_field():
+    """hold_request event has unified 'text' field alongside SSE-compat 'preview_text'."""
+    update = {
+        "review_token": "abc123",
+        "hold_kind": "speech_preview",
+        "review_pending_actions": [{"kind": "say", "text": "preview", "risk": "med"}],
+        "reason_codes": ["risk_long_text"],
+    }
+    ev = build_hold_request_event(update)
+    payload = ev["payload"]
+    assert payload.get("text") == "preview"
+    assert payload.get("preview_text") == "preview"
+
+
+def test_hold_approved_event_payload_shape():
+    from backend.core.agent_graph.review_window import build_hold_approved_event
+    ev = build_hold_approved_event(
+        "tok123",
+        text="承認された発話",
+        thread_id="t1",
+        turn_id="turn-1",
+        message_id="msg-1",
+        stream_id="stream-1",
+        reason_codes=["keyword_memory"],
+    )
+    assert ev and ev["name"] == "hold_approved"
+    payload = ev["payload"]
+    assert payload["schema_version"] == "decision_event.v2"
+    assert payload["source"] == "review_window"
+    assert payload["decision"] == "approve"
+    assert payload["status"] == "applied"
+    assert payload["actor"] == "user"
+    assert payload["review_token"] == "tok123"
+    assert payload["text"] == "承認された発話"
+    assert payload["turn_id"] == "turn-1"
+    assert payload["message_id"] == "msg-1"
+    assert payload["stream_id"] == "stream-1"
+    assert payload["reason"] == "user_approved"
+
+
+def test_hold_rejected_event_payload_shape():
+    from backend.core.agent_graph.review_window import build_hold_rejected_event
+    ev = build_hold_rejected_event(
+        "tok456",
+        text="却下された発話",
+        thread_id="t1",
+        turn_id="turn-2",
+        reason_codes=["risk_dissonance_on"],
+    )
+    assert ev and ev["name"] == "hold_rejected"
+    payload = ev["payload"]
+    assert payload["schema_version"] == "decision_event.v2"
+    assert payload["source"] == "review_window"
+    assert payload["decision"] == "reject"
+    assert payload["status"] == "applied"
+    assert payload["actor"] == "user"
+    assert payload["review_token"] == "tok456"
+    assert payload["text"] == "却下された発話"
+    assert payload["reason"] == "user_rejected"
+
+
+def test_hold_approved_event_returns_none_without_token():
+    from backend.core.agent_graph.review_window import build_hold_approved_event
+    assert build_hold_approved_event(None) is None
+    assert build_hold_approved_event("") is None
+
+
+def test_hold_rejected_event_returns_none_without_token():
+    from backend.core.agent_graph.review_window import build_hold_rejected_event
+    assert build_hold_rejected_event(None) is None
+    assert build_hold_rejected_event("") is None
 
 
 def test_pii_in_output_triggers_hold():

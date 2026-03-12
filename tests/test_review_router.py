@@ -55,9 +55,13 @@ def test_apply_review_approve_runs_s5_commit(monkeypatch):
         "dissonance": 0.10,
         "user_text": "Originはコーヒーが好き",
         "hold_required": True,
+        "turn_id": "turn-1",
+        "message_id": "msg-1",
+        "stream_id": "stream-1",
     }
     dummy_app = _DummyApp(values)
     captured = {}
+    telemetry_calls = []
 
     async def _noop_emit_commit_log(thread_id: str, line: str, **kwargs):
         return None
@@ -66,10 +70,14 @@ def test_apply_review_approve_runs_s5_commit(monkeypatch):
         captured["state"] = state
         return {"orchestrator_stage": "S5", "commit_result": {"success": True}}
 
+    async def _fake_telemetry_event(thread_id: str, event_type: str, payload: dict):
+        telemetry_calls.append((thread_id, event_type, payload))
+
     monkeypatch.setattr(review_router.workflow, "compile", lambda checkpointer: dummy_app)
     monkeypatch.setattr(review_router.checkpointer_service, "get_async_checkpointer_conn", lambda: _DummyCtx())
     monkeypatch.setattr(review_router, "emit_commit_log", _noop_emit_commit_log)
     monkeypatch.setattr(review_router, "s5_commit", _fake_s5_commit)
+    monkeypatch.setattr(review_router.telemetry, "event", _fake_telemetry_event)
 
     res = asyncio.run(review_router._apply_review("t1", "tok", "approve"))
     assert res.get("ok") is True
@@ -80,6 +88,13 @@ def test_apply_review_approve_runs_s5_commit(monkeypatch):
     assert captured["state"]["thread_id"] == "t1"
 
     assert [node for _, node in dummy_app.updates] == ["merge", "s5_commit"]
+    decision_events = [payload for _, event_type, payload in telemetry_calls if event_type == "decision_event"]
+    assert decision_events and decision_events[-1]["decision"] == "approve"
+    assert decision_events[-1]["source"] == "review_window"
+    assert decision_events[-1]["actor"] == "user"
+    assert decision_events[-1]["turn_id"] == "turn-1"
+    assert decision_events[-1]["message_id"] == "msg-1"
+    assert decision_events[-1]["stream_id"] == "stream-1"
 
 
 def test_apply_review_approve_persists_memory_events(monkeypatch):
@@ -120,3 +135,33 @@ def test_apply_review_approve_persists_memory_events(monkeypatch):
         assert any(row["event_type"] == "conversation_turn" for row in events)
     finally:
         conn.close()
+
+
+def test_build_commit_log_payload_is_structured():
+    payload = review_router.build_commit_log_payload(
+        say_applied=1,
+        rejected=0,
+        before_d=0.1,
+        after_d=0.1,
+        hold="ask",
+        reasons=["keyword_memory"],
+        decision="approve",
+        actor="user",
+        review_token="tok",
+        thread_id="t1",
+        turn_id="turn-1",
+        message_id="msg-1",
+        stream_id="stream-1",
+        ts=123.0,
+    )
+
+    assert payload["schema_version"] == "commit_log.v2"
+    assert payload["line"].startswith("[COMMIT]")
+    assert payload["decision"] == "approve"
+    assert payload["actor"] == "user"
+    assert payload["review_token"] == "tok"
+    assert payload["thread_id"] == "t1"
+    assert payload["turn_id"] == "turn-1"
+    assert payload["message_id"] == "msg-1"
+    assert payload["stream_id"] == "stream-1"
+    assert payload["reason_codes"] == ["keyword_memory"]

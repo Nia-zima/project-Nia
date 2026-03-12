@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+from backend.core.config import settings
 from backend.core.db import managed_conn
 from backend.core.logger import logger
 from backend.services.memory import semantic_store
@@ -145,6 +146,31 @@ def execute(
             # 8. Stagnation counter increment (Phase E)
             if thread_id:
                 working_store.increment_stale_counts(conn, thread_id)
+
+            # 9. Governance: semantic_promoted を同一 transaction で記録
+            # semantic upsert と原子的に整合させるため、COMMIT 前に書く
+            if getattr(settings, "GOVERNANCE_OBSERVE_ENABLED", False) and plan.semantic_upsert:
+                from backend.services.memory.governance_event_writer import (
+                    record_event_batch_with_conn,
+                )
+                record_event_batch_with_conn(
+                    conn,
+                    [
+                        {
+                            "event_name": "semantic_promoted",
+                            "thread_id": thread_id or m.thread_id,
+                            "turn_id": turn_id,
+                            "semantic_id": m.id,
+                            "payload": {
+                                "status": m.status,
+                                "confidence": m.confidence,
+                                "state_tag": m.state_tag,
+                                "content_head": m.content[:80] if m.content else "",
+                            },
+                        }
+                        for m in plan.semantic_upsert
+                    ],
+                )
 
             conn.execute("COMMIT")
             result.success = True

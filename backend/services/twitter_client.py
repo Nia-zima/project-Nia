@@ -1,8 +1,7 @@
 """
-Twitter (X) Client — Posts tweets on behalf of Nia.
+Twitter (X) Client — low-level generation and transport for Nia.
 
-Uses X API v2 (Free tier: 1,500 tweets/month).
-All posts must be pre-approved via Phase 5 Action system.
+All posting policy and approval logic must live above this module.
 """
 from __future__ import annotations
 
@@ -10,7 +9,6 @@ import json
 import logging
 import re
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -33,10 +31,32 @@ class TweetResult:
 
 
 class TwitterClient:
-    """Handles tweet generation (via LLM) and posting (via X API v2)."""
+    """Handles tweet generation (via LLM) and raw posting transport."""
 
     def __init__(self):
-        self.enabled = getattr(settings, "TWITTER_ENABLED", False)
+        self._enabled_override: Optional[bool] = None
+
+    @property
+    def enabled(self) -> bool:
+        if self._enabled_override is not None:
+            return bool(self._enabled_override)
+        return bool(getattr(settings, "TWITTER_ENABLED", False))
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self._enabled_override = bool(value)
+
+    @property
+    def max_chars(self) -> int:
+        return int(getattr(settings, "TWITTER_MAX_CHARS", 280))
+
+    @property
+    def cooldown_minutes(self) -> int:
+        return int(getattr(settings, "TWITTER_COOLDOWN_MINUTES", 60))
+
+    @property
+    def daily_max(self) -> int:
+        return int(getattr(settings, "TWITTER_DAILY_MAX", 3))
 
     async def generate_tweet(
         self,
@@ -59,7 +79,7 @@ class TwitterClient:
             Tweet text (<=280 chars) or None on failure.
         """
         identity_context = _load_identity_snippet()
-        max_chars = getattr(settings, "TWITTER_MAX_CHARS", 280)
+        max_chars = self.max_chars
 
         if task and task in _TASK_PROMPTS:
             prompt = _TASK_PROMPTS[task].format(
@@ -83,18 +103,11 @@ class TwitterClient:
         return tweet if tweet else None
 
     async def post_tweet(self, text: str, *, thread_id: str = "default_thread") -> TweetResult:
-        """Post to X via API v2. Called ONLY after user approval."""
+        """Post to X via API v2 after higher-level approval/policy checks."""
         if not self.enabled:
             return TweetResult(success=False, error="Twitter integration disabled")
 
-        # Daily rate limit
-        daily_max = getattr(settings, "TWITTER_DAILY_MAX", 3)
-        today_count = _count_tweets_today()
-        if today_count >= daily_max:
-            logger.warning("[Twitter] Daily limit reached (%d/%d)", today_count, daily_max)
-            return TweetResult(success=False, error=f"Daily limit reached ({today_count}/{daily_max})")
-
-        max_chars = getattr(settings, "TWITTER_MAX_CHARS", 280)
+        max_chars = self.max_chars
         if len(text) > max_chars:
             return TweetResult(success=False, error=f"Tweet exceeds {max_chars} chars")
 
@@ -119,8 +132,6 @@ class TwitterClient:
             )
             tweet_id = (response.data or {}).get("id", "unknown")
             now = time.time()
-
-            _record_tweet_event(text, tweet_id, now, thread_id=thread_id)
 
             return TweetResult(
                 success=True,
@@ -306,45 +317,6 @@ def _clean_tweet(raw: str, max_chars: int) -> Optional[str]:
         logger.debug("[Twitter] Rejected non-Japanese tweet: %r", text)
         return None
     return text
-
-
-def _count_tweets_today() -> int:
-    """Count tweets posted today (via memory_events)."""
-    from datetime import datetime
-    today_start = datetime.now().replace(hour=0, minute=0, second=0).timestamp()
-    try:
-        with managed_conn() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM memory_events WHERE event_type = 'tweet_posted' AND created_at >= ?",
-                (today_start,),
-            ).fetchone()
-            return row[0] if row else 0
-    except Exception:
-        return 0
-
-
-def _record_tweet_event(text: str, tweet_id: str, now: float, *, thread_id: str = "default_thread") -> None:
-    """Store posted tweet as memory_event for future reference."""
-    with managed_conn() as conn:
-        conn.execute(
-            """INSERT INTO memory_events
-               (event_id, thread_id, event_type, payload_json, created_at)
-               VALUES (?, ?, 'tweet_posted', ?, ?)""",
-            (
-                uuid.uuid4().hex,
-                thread_id,
-                json.dumps(
-                    {
-                        "tweet_id": str(tweet_id),
-                        "tweet_text": text,
-                        "char_count": len(text),
-                    },
-                    ensure_ascii=False,
-                ),
-                now,
-            ),
-        )
-
 
 # Global singleton
 twitter_client = TwitterClient()

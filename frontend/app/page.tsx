@@ -234,7 +234,7 @@ export default function Home() {
           {/* Stats Tab */}
           {activeTab === 'stats' && (
             <div className="flex-1 glass rounded-3xl overflow-hidden">
-              <StatsPanel />
+              <StatsPanel threadId="default_thread" />
             </div>
           )}
 

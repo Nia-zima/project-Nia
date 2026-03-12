@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -88,6 +89,32 @@ def attach_debug_suppress_filter(target: logging.Filterer) -> None:
     setattr(target, "_nia_rate_limit", True)
 
 
+class JsonFormatter(logging.Formatter):
+    """JSON structured log formatter for machine-parseable output."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "request_id": getattr(record, "request_id", "-"),
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
+
+def _make_formatter() -> logging.Formatter:
+    """Return JSON or text formatter based on LOG_FORMAT env var."""
+    fmt = os.getenv("LOG_FORMAT", "text").lower()
+    if fmt == "json":
+        return JsonFormatter()
+    return logging.Formatter(
+        "%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s"
+    )
+
+
 def setup_logging(
     *,
     level: str = "INFO",
@@ -136,9 +163,7 @@ def setup_logging(
         setattr(file_handler, _HANDLER_MARKER, True)
         handlers.append(file_handler)
 
-    formatter = logging.Formatter(
-        "%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s"
-    )
+    formatter = _make_formatter()
     rid_filter = RequestIDFilter()
     for h in handlers:
         h.setFormatter(formatter)
@@ -179,9 +204,7 @@ class CustomLogger:
         self.logger.propagate = False # Prevent double logging (root logger + custom handler)
         
         # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s [%(request_id)s] %(name)s %(levelname)s %(message)s'
-        )
+        formatter = _make_formatter()
         rid_filter = RequestIDFilter()
 
         # Clear existing handlers to prevent duplicates

@@ -17,7 +17,11 @@ class TestFocusEnum:
         assert Focus.EMOTIONAL_STATE == "emotional_state"
 
     def test_member_count(self):
-        assert len(Focus) == 5
+        assert len(Focus) == 7  # 5 MVP + 2 meeting extension
+
+    def test_meeting_extension_values(self):
+        assert Focus.RETURNING_THEME == "returning_theme"
+        assert Focus.LINGERING_STATE == "lingering_state"
 
     def test_string_conversion(self):
         assert str(Focus.USER_GOAL) == "Focus.USER_GOAL"
@@ -32,7 +36,10 @@ class TestResponseIntentEnum:
         assert ResponseIntent.HOLD == "hold"
 
     def test_member_count(self):
-        assert len(ResponseIntent) == 4
+        assert len(ResponseIntent) == 5  # 4 MVP + 1 meeting extension
+
+    def test_meeting_extension_values(self):
+        assert ResponseIntent.OFFER_FRAGILE_SELF_OBSERVATION == "offer_fragile_self_observation"
 
 
 class TestQuestionIntentEnum:
@@ -44,7 +51,10 @@ class TestQuestionIntentEnum:
         assert QuestionIntent.RESOLVE_CONTRADICTION == "resolve_contradiction"
 
     def test_member_count(self):
-        assert len(QuestionIntent) == 5
+        assert len(QuestionIntent) == 6  # 5 MVP + 1 meeting extension
+
+    def test_meeting_extension_values(self):
+        assert QuestionIntent.HOLD_OPEN_SPACE == "hold_open_space"
 
 
 class TestConversationSkeleton:

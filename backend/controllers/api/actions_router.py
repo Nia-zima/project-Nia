@@ -16,38 +16,41 @@ from backend.services.pending_actions_service import (
     approve_pending_action,
     archive_pending_action,
 )
-from backend.core.agent_graph.review_window import get_review_pending_actions, get_review_token
+from backend.core.agent_graph.state_normalizer import normalize_checkpoint_state
+from backend.core.agent_graph.review_window import get_review_token
+from backend.core.decision_events import build_decision_event_payload
 from backend.core.db import managed_conn
 from backend.core.agent_graph.graph import workflow
 from backend.services.checkpointer import checkpointer_service
 from backend.core.actions import action_registry, action_executor
 from dataclasses import replace as dataclass_replace
 from backend.services.telemetry_logger import telemetry
+from backend.services.x_post_service import XPostError, x_post_service
 
 router = APIRouter()
 
 
 class MemoryAddEnqueueRequest(BaseModel):
-    thread_id: str
-    message_id: str
+    thread_id: str = Field(..., min_length=1, max_length=256)
+    message_id: str = Field(..., min_length=1, max_length=256)
     payload: Dict[str, Any]
-    review_window_id: Optional[str] = None
+    review_window_id: Optional[str] = Field(None, max_length=128)
 
 
 class ActionReasonRequest(BaseModel):
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(None, max_length=1000)
 
 class Phase5ActionDecisionRequest(BaseModel):
-    thread_id: str
-    pending_id: Optional[str] = None
-    reason: Optional[str] = None
+    thread_id: str = Field(..., min_length=1, max_length=256)
+    pending_id: Optional[str] = Field(None, max_length=128)
+    reason: Optional[str] = Field(None, max_length=1000)
 
 async def _load_state(thread_id: str):
     async with checkpointer_service.get_async_checkpointer_conn() as checkpointer:
         app_instance = workflow.compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
         state = await app_instance.aget_state(config)
-        values = getattr(state, "values", {}) or {}
+        values = normalize_checkpoint_state(getattr(state, "values", {}) or {})
         return app_instance, config, values
 
 def _find_pending(
@@ -144,7 +147,7 @@ async def get_latest_commit_log(thread_id: str = Query(...)) -> Dict[str, Any]:
         return {"item": payload}
 
 
-@router.post("/actions/{id}/hold")
+@router.post("/actions/pending/{id}/hold")
 async def hold_action(id: str, req: ActionReasonRequest) -> Dict[str, Any]:
     ok = await hold_pending_action(id, req.reason)
     if not ok:
@@ -152,7 +155,7 @@ async def hold_action(id: str, req: ActionReasonRequest) -> Dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/actions/{id}/reject")
+@router.post("/actions/pending/{id}/reject")
 async def reject_action(id: str, req: ActionReasonRequest) -> Dict[str, Any]:
     ok = await reject_pending_action(id, req.reason)
     if not ok:
@@ -160,14 +163,14 @@ async def reject_action(id: str, req: ActionReasonRequest) -> Dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/actions/{id}/approve")
+@router.post("/actions/pending/{id}/approve")
 async def approve_action(id: str, req: ActionReasonRequest) -> Dict[str, Any]:
     result = await approve_pending_action(id, req.reason)
     if result == "CONFLICT":
         raise HTTPException(status_code=409, detail="state_conflict")
     return {"ok": True, "result": result}
 
-@router.post("/actions/{id}/archive")
+@router.post("/actions/pending/{id}/archive")
 async def archive_action(id: str, req: ActionReasonRequest) -> Dict[str, Any]:
     ok = await archive_pending_action(id, req.reason)
     if not ok:
@@ -185,11 +188,7 @@ async def list_phase5_pending_actions(thread_id: str = Query(...)) -> Dict[str, 
     review_token = get_review_token(values)
     review_actions: List[Dict[str, Any]] = []
     if review_token:
-        if "review_pending_actions" in values:
-            review_actions = list(values.get("review_pending_actions") or [])
-        else:
-            # Legacy checkpoints stored review previews in pending_actions.
-            review_actions = get_review_pending_actions(values)
+        review_actions = list(values.get("review_pending_actions") or [])
     pending = list(values.get("pending_actions") or [])
     if review_token:
         review_actions = [
@@ -200,8 +199,6 @@ async def list_phase5_pending_actions(thread_id: str = Query(...)) -> Dict[str, 
             for item in review_actions
             if isinstance(item, dict)
         ]
-        if "review_pending_actions" not in values:
-            pending = []
     return {
         "items": review_actions + pending,
         "review_token": review_token,
@@ -252,7 +249,13 @@ async def approve_phase5_action(action_id: str, req: Phase5ActionDecisionRequest
     if not target:
         raise HTTPException(status_code=404, detail="pending_action_not_found")
 
-    payload = target.get("payload") or {}
+    payload = dict(target.get("payload") or {})
+    payload.setdefault("thread_id", req.thread_id)
+    payload.setdefault("turn_id", target.get("turn_id"))
+    payload.setdefault("message_id", target.get("message_id"))
+    payload.setdefault("stream_id", target.get("stream_id"))
+    if req.pending_id:
+        payload.setdefault("_pending_id", req.pending_id)
     action_obj = action_registry.get(action_id)
     if action_obj is None:
         raise HTTPException(status_code=404, detail="action_not_registered")
@@ -279,6 +282,33 @@ async def approve_phase5_action(action_id: str, req: Phase5ActionDecisionRequest
         req.thread_id,
         "phase5_action_result",
         {**action_result, "source": "review"},
+    )
+    await telemetry.event(
+        req.thread_id,
+        "decision_event",
+        build_decision_event_payload(
+            source="phase5",
+            entity_kind="action",
+            decision="approve",
+            status=action_result["status"],
+            thread_id=req.thread_id,
+            actor="user",
+            turn_id=target.get("turn_id"),
+            message_id=target.get("message_id"),
+            stream_id=target.get("stream_id"),
+            pending_id=target.get("pending_id"),
+            action_id=action_id,
+            item_kind=str(target.get("kind") or "action"),
+            reason=req.reason,
+            approved_by="user",
+            result=action_result.get("result"),
+            ts=action_result["ts"],
+            extras={
+                "name": target.get("name"),
+                "risk_level": target.get("risk_level"),
+                "category": target.get("category"),
+            },
+        ),
     )
 
     target_id = target.get("pending_id")
@@ -325,6 +355,30 @@ async def reject_phase5_action(action_id: str, req: Phase5ActionDecisionRequest)
     }
     # phase5_review node is not part of the graph; persist via an existing node.
     await app_instance.aupdate_state(config, update, as_node="action_processing")
+    await telemetry.event(
+        req.thread_id,
+        "decision_event",
+        build_decision_event_payload(
+            source="phase5",
+            entity_kind="action",
+            decision="reject",
+            status="rejected_by_user",
+            thread_id=req.thread_id,
+            actor="user",
+            turn_id=target.get("turn_id"),
+            message_id=target.get("message_id"),
+            stream_id=target.get("stream_id"),
+            pending_id=target.get("pending_id"),
+            action_id=action_id,
+            item_kind=str(target.get("kind") or "action"),
+            reason=req.reason or "user_rejected",
+            extras={
+                "name": target.get("name"),
+                "risk_level": target.get("risk_level"),
+                "category": target.get("category"),
+            },
+        ),
+    )
     return {"ok": True}
 
 
@@ -332,80 +386,126 @@ async def reject_phase5_action(action_id: str, req: Phase5ActionDecisionRequest)
 # Twitter (X) Tweet Proposals (from Reflection Engine)
 # =============================================================================
 
-class TweetApproveRequest(BaseModel):
-    tweet_text: str = Field(..., min_length=1, max_length=280)
-    thread_id: str = "default_thread"
+class TweetProposalDecisionRequest(BaseModel):
+    proposal_id: str = Field(..., min_length=1, max_length=128)
+    reason: Optional[str] = Field(None, max_length=1000)
 
 
 class ManualTweetRequest(BaseModel):
     style: str = Field("casual", pattern=r"^(casual|diary)$")
     task: str = Field("", pattern=r"^(self_introduction|reaction|announcement|)$")
     context: str = Field("", max_length=1000)
-    thread_id: str = "default_thread"
+    thread_id: str = Field("default_thread", min_length=1, max_length=256)
 
 
 @router.get("/actions/tweet/pending")
-async def get_pending_tweet() -> Dict[str, Any]:
-    """Get pending tweet proposal (from autonomous reflection)."""
-    with managed_conn() as conn:
-        row = conn.execute(
-            "SELECT v FROM telemetry_kv WHERE k = 'pending_tweet_proposal'"
-        ).fetchone()
-        if not row or not row[0]:
-            return {"proposal": None}
-        try:
-            proposal = json.loads(row[0])
-        except (json.JSONDecodeError, TypeError):
-            return {"proposal": None}
-        return {"proposal": proposal}
+async def get_pending_tweet(
+    thread_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+) -> Dict[str, Any]:
+    """Get pending X post proposals."""
+    items = x_post_service.list_pending_proposals(limit=limit, thread_id=thread_id)
+    return {"items": items, "proposal": items[0] if items else None}
 
 
 @router.post("/actions/tweet/approve")
-async def approve_tweet(req: TweetApproveRequest) -> Dict[str, Any]:
-    """Approve and post a tweet proposal."""
-    from backend.services.twitter_client import twitter_client
-    result = await twitter_client.post_tweet(req.tweet_text, thread_id=req.thread_id)
-    if not result.success:
-        raise HTTPException(status_code=500, detail=result.error or "Tweet failed")
-    # Clear proposal only on success
-    with managed_conn() as conn:
-        conn.execute("DELETE FROM telemetry_kv WHERE k = 'pending_tweet_proposal'")
-    await telemetry.event(req.thread_id, "tweet_posted", {
-        "tweet_id": result.tweet_id,
-        "tweet_text": result.tweet_text,
-        "source": "autonomous_reflection",
-    })
-    return {"ok": True, "tweet_id": result.tweet_id}
+async def approve_tweet(req: TweetProposalDecisionRequest) -> Dict[str, Any]:
+    """Approve and publish a stored X post proposal."""
+    try:
+        result = await x_post_service.approve_proposal(proposal_id=req.proposal_id, actor="user")
+    except XPostError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+
+    proposal = result.get("proposal") or {}
+    await telemetry.event(
+        proposal.get("thread_id"),
+        "decision_event",
+        build_decision_event_payload(
+            source="x_post",
+            entity_kind="tweet_proposal",
+            decision="approve",
+            status="posted" if result.get("success") else "failed",
+            thread_id=proposal.get("thread_id"),
+            actor="user",
+            turn_id=proposal.get("turn_id"),
+            message_id=proposal.get("message_id"),
+            stream_id=proposal.get("stream_id"),
+            pending_id=req.proposal_id,
+            item_kind="tweet_proposal",
+            reason=req.reason,
+            result={
+                "success": bool(result.get("success")),
+                "tweet_id": result.get("tweet_id"),
+                "error": result.get("error"),
+            },
+            extras={
+                "proposal_id": req.proposal_id,
+                "tweet_source": proposal.get("source"),
+            },
+        ),
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "tweet_publish_failed")
+    return {"ok": True, "tweet_id": result.get("tweet_id"), "proposal": proposal}
 
 
 @router.post("/actions/tweet/reject")
-async def reject_tweet(thread_id: str = Query("default_thread")) -> Dict[str, Any]:
-    """Reject a tweet proposal."""
-    with managed_conn() as conn:
-        conn.execute("DELETE FROM telemetry_kv WHERE k = 'pending_tweet_proposal'")
-    logger.info("[TWEET] proposal rejected thread_id=%s", thread_id)
-    return {"ok": True}
+async def reject_tweet(req: TweetProposalDecisionRequest) -> Dict[str, Any]:
+    """Reject a stored X post proposal."""
+    try:
+        proposal = await x_post_service.reject_proposal(
+            proposal_id=req.proposal_id,
+            actor="user",
+            reason=req.reason,
+        )
+    except XPostError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+
+    await telemetry.event(
+        proposal.get("thread_id"),
+        "decision_event",
+        build_decision_event_payload(
+            source="x_post",
+            entity_kind="tweet_proposal",
+            decision="reject",
+            status="rejected",
+            thread_id=proposal.get("thread_id"),
+            actor="user",
+            turn_id=proposal.get("turn_id"),
+            message_id=proposal.get("message_id"),
+            stream_id=proposal.get("stream_id"),
+            pending_id=req.proposal_id,
+            item_kind="tweet_proposal",
+            reason=req.reason,
+            extras={
+                "proposal_id": req.proposal_id,
+                "tweet_source": proposal.get("source"),
+            },
+        ),
+    )
+    return {"ok": True, "proposal": proposal}
 
 
 @router.post("/actions/tweet/generate")
 async def generate_tweet_manual(req: ManualTweetRequest) -> Dict[str, Any]:
-    """Manually trigger tweet generation (returns proposal, does NOT post)."""
-    from backend.services.twitter_client import twitter_client
-    if not twitter_client.enabled:
-        raise HTTPException(status_code=503, detail="Twitter integration disabled")
-    tweet = await twitter_client.generate_tweet(
-        style=req.style, task=req.task, context=req.context, thread_id=req.thread_id,
-    )
-    if not tweet:
-        raise HTTPException(status_code=500, detail="Tweet generation failed")
-    return {"tweet_text": tweet, "char_count": len(tweet)}
+    """Manually generate a tweet and store it as an approval proposal."""
+    try:
+        proposal = await x_post_service.generate_manual_proposal(
+            thread_id=req.thread_id,
+            style=req.style,
+            task=req.task,
+            context=req.context,
+        )
+    except XPostError as exc:
+        status_code = 503 if exc.code == "twitter_disabled" else 400
+        raise HTTPException(status_code=status_code, detail=exc.code) from exc
+    return {"proposal": proposal, "tweet_text": proposal.get("tweet_text"), "char_count": len(proposal.get("tweet_text") or "")}
 
 
 @router.get("/actions/tweet/history")
 async def get_tweet_history(limit: int = Query(20, ge=1, le=100)) -> Dict[str, Any]:
     """Get recently posted tweets."""
-    from backend.services.twitter_client import twitter_client
-    return {"items": twitter_client.get_recent_tweets(limit)}
+    return {"items": x_post_service.get_recent_posts(limit=limit)}
 
 
 # ── Diary ────────────────────────────────────────────────────

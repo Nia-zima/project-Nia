@@ -23,6 +23,19 @@ from backend.services.room.room_action import (
     execute_room_action,
 )
 
+
+def _strip_bond(state_dict: dict) -> dict:
+    """Remove bond value from pip_state before sending to clients.
+
+    CLAUDE.md rule: 「Pipの Bond値を露出しない」
+    Bond must never be visible to Nia or viewers.
+    """
+    pip = state_dict.get("pip_state")
+    if isinstance(pip, dict):
+        pip.pop("bond", None)
+        pip.pop("last_interaction", None)
+    return state_dict
+
 router = APIRouter(prefix="/api/room", tags=["room"])
 
 
@@ -46,7 +59,7 @@ class RoomActionRequest(BaseModel):
 async def get_room_state():
     """Return the current room state."""
     room = load_room_state()
-    return asdict(room)
+    return _strip_bond(asdict(room))
 
 
 @router.post("/action")

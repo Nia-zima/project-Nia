@@ -55,6 +55,16 @@ class SkeletonInput:
     has_emotion_words: bool = False
     has_info_insufficiency: bool = False
 
+    # Meeting extension (ME.1)
+    is_meeting: bool = False
+    retrieval_top_similarity: float = 0.0
+    turn_index: int = 0
+    has_return_markers: bool = False
+    has_linger_markers: bool = False
+    has_hedge_markers: bool = False
+    has_self_ref: bool = False
+    has_open_hold_markers: bool = False
+
 
 # ---------------------------------------------------------------------------
 # 日本語構文特徴抽出
@@ -72,6 +82,12 @@ _EMOTION_RE = re.compile(
 _INFO_INSUF_RE = re.compile(
     r"(わからない|知りたい|教えて|何が|どう|どういう|不明|未知|よくわからない)"
 )
+# Meeting extension (ME.1): 出現様式マーカー
+_RETURN_RE = re.compile(r"(また|戻[るっ]|前にも|何度も|繰り返し|さっきも)")
+_LINGER_RE = re.compile(r"(まだ|残[るっ]|消えない|ぼんやり|引っかか|ずっと)")
+_HEDGE_RE = re.compile(r"(気がする|うまく言えない|まだ分からない|なんとなく|かもしれない|ような)")
+_SELF_REF_RE = re.compile(r"(自分|なんか|私|僕|わたし|ぼく|おれ)")
+_OPEN_HOLD_RE = re.compile(r"(決めなくていい|置いておけ|ほどかなくていい|急がなくていい|そのまま)")
 
 
 def extract_syntax_features(text: str) -> dict[str, int | bool]:
@@ -83,6 +99,12 @@ def extract_syntax_features(text: str) -> dict[str, int | bool]:
         "has_negation": bool(_NEGATION_RE.search(t)),
         "has_emotion_words": bool(_EMOTION_RE.search(t)),
         "has_info_insufficiency": bool(_INFO_INSUF_RE.search(t)),
+        # Meeting extension (ME.1)
+        "has_return_markers": bool(_RETURN_RE.search(t)),
+        "has_linger_markers": bool(_LINGER_RE.search(t)),
+        "has_hedge_markers": bool(_HEDGE_RE.search(t)),
+        "has_self_ref": bool(_SELF_REF_RE.search(t)),
+        "has_open_hold_markers": bool(_OPEN_HOLD_RE.search(t)),
     }
 
 
@@ -99,6 +121,19 @@ def determine_focus(inp: SkeletonInput) -> tuple[Focus, list[str]]:
     if inp.correction_strong or inp.review_rejected:
         trace.append("R1_contradiction_correction")
         return Focus.CONTRADICTION, trace
+
+    # RM1: 再訪テーマ（meeting + 再訪マーカー + retrieval 類似度 + 初ターンでない）
+    if (inp.is_meeting and inp.has_return_markers
+            and inp.retrieval_top_similarity >= 0.45
+            and inp.turn_index > 1):
+        trace.append("RM1_returning_theme")
+        return Focus.RETURNING_THEME, trace
+
+    # RM2: 残留する感覚（meeting + 残留マーカー + 情報不足ではない）
+    if (inp.is_meeting and inp.has_linger_markers
+            and not inp.has_info_insufficiency):
+        trace.append("RM2_lingering_state")
+        return Focus.LINGERING_STATE, trace
 
     # R2: 感情 + サプライズ（揺れが大きい）
     if inp.has_emotion_words and inp.surprise_score >= 0.3:
@@ -159,6 +194,23 @@ def determine_response_intent(
             return ResponseIntent.ASK, trace
         trace.append("I2_organize_contradiction")
         return ResponseIntent.ORGANIZE, trace
+
+    # IM2: meeting で開いた問いを持つ経路（QM1 への ASK パス）
+    # IM1 より先に評価: open_hold_markers は specific な ASK 経路なので優先
+    if (inp.is_meeting and inp.has_open_hold_markers
+            and focus in (Focus.RETURNING_THEME, Focus.LINGERING_STATE)):
+        trace.append("IM2_meeting_ask")
+        return ResponseIntent.ASK, trace
+
+    # IM1: 壊れやすい自己観察の提示
+    # guard: meeting + 情報不足でない + 矛盾/不足 focus でない
+    # score: has_hedge_markers / has_self_ref のいずれか（1-of-2）
+    if (inp.is_meeting
+            and not inp.has_info_insufficiency
+            and focus not in (Focus.CONTRADICTION, Focus.MISSING_CONTEXT)
+            and (inp.has_hedge_markers or inp.has_self_ref)):
+        trace.append("IM1_offer_fragile_self_observation")
+        return ResponseIntent.OFFER_FRAGILE_SELF_OBSERVATION, trace
 
     # I3: 感情 → まず受け取る
     if focus == Focus.EMOTIONAL_STATE:
@@ -235,6 +287,12 @@ def determine_question_intent(
     if focus == Focus.PRIORITY_DECISION:
         trace.append("Q4_clarify_priority")
         return QuestionIntent.CLARIFY_PRIORITY, trace
+
+    # QM1: 開いたまま持つ問い（meeting + open_hold + 情報不足でない）
+    if (inp.is_meeting and inp.has_open_hold_markers
+            and not inp.has_info_insufficiency):
+        trace.append("QM1_hold_open_space")
+        return QuestionIntent.HOLD_OPEN_SPACE, trace
 
     # Q5: デフォルト → 目的確認
     trace.append("Q5_clarify_goal")

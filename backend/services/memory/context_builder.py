@@ -28,6 +28,10 @@ def build_memory_context(
     include_minecraft: bool = False,
     self_narrative: str = "",
     somatic_senses: list[dict] | None = None,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+    trace_id: str | None = None,
 ) -> dict[str, str]:
     """
     Build all memory context sections as formatted strings.
@@ -62,7 +66,7 @@ def build_memory_context(
     if include_minecraft:
         mc_str = _build_minecraft_context(user_query=user_query)
 
-    return {
+    result = {
         "pinned": pinned_str,
         "patterns": patterns_str,
         "somatic": somatic_str,
@@ -71,6 +75,32 @@ def build_memory_context(
         "long_term": long_str,
         "minecraft": mc_str,
     }
+
+    # Phase M0: governance observability — record what went into context (空振りも記録)
+    if getattr(settings, "GOVERNANCE_OBSERVE_ENABLED", False):
+        try:
+            from backend.services.memory.governance_event_writer import record_event
+            record_event(
+                event_name="context_build_completed",
+                thread_id=thread_id,
+                turn_id=turn_id,
+                message_id=message_id,
+                stream_id=stream_id,
+                trace_id=trace_id,
+                payload={
+                    "active_count": len(active_memories),
+                    "active_ids": [m.id for m in active_memories[:20]],
+                    "has_pinned": bool(pinned_str),
+                    "has_patterns": bool(patterns_str),
+                    "has_long_term": bool(long_str),
+                    "has_working": bool(working_str),
+                    "has_somatic": bool(somatic_str),
+                },
+            )
+        except Exception:
+            logger.debug("[ContextBuilder] governance event failed", exc_info=True)
+
+    return result
 
 
 def format_memory_sections(sections: dict[str, str]) -> str:

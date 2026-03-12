@@ -19,6 +19,9 @@ class Focus(str, Enum):
     CONTRADICTION = "contradiction"
     PRIORITY_DECISION = "priority_decision"
     EMOTIONAL_STATE = "emotional_state"
+    # Meeting extension (ME.1): 出現様式
+    RETURNING_THEME = "returning_theme"
+    LINGERING_STATE = "lingering_state"
 
 
 class ResponseIntent(str, Enum):
@@ -28,6 +31,8 @@ class ResponseIntent(str, Enum):
     ORGANIZE = "organize"
     ASK = "ask"
     HOLD = "hold"
+    # Meeting extension (ME.1)
+    OFFER_FRAGILE_SELF_OBSERVATION = "offer_fragile_self_observation"
 
 
 class QuestionIntent(str, Enum):
@@ -38,6 +43,8 @@ class QuestionIntent(str, Enum):
     CLARIFY_EMOTION = "clarify_emotion"
     FILL_MISSING_FACT = "fill_missing_fact"
     RESOLVE_CONTRADICTION = "resolve_contradiction"
+    # Meeting extension (ME.1)
+    HOLD_OPEN_SPACE = "hold_open_space"
 
 
 @dataclass

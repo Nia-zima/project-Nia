@@ -516,6 +516,10 @@ def retrieve_with_scores(
     *,
     limit: int = 8,
     prefetched_candidates: list[SemanticMemory] | None = None,
+    turn_id: str | None = None,
+    message_id: str | None = None,
+    stream_id: str | None = None,
+    trace_id: str | None = None,
 ) -> tuple[list[SemanticMemory], list[ScoredMemory], QueryIntent]:
     """Same as retrieve() but also returns scored candidates and intent.
 
@@ -575,6 +579,34 @@ def retrieve_with_scores(
                 top_k=top_k,
                 elapsed_ms=elapsed_ms,
             )
+
+        # Phase M0: governance observability (空振りも記録)
+        if getattr(settings, "GOVERNANCE_OBSERVE_ENABLED", False):
+            try:
+                from backend.services.memory.governance_event_writer import record_event
+                record_event(
+                    event_name="retrieval_completed",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    message_id=message_id,
+                    stream_id=stream_id,
+                    trace_id=trace_id,
+                    payload={
+                        "query_head": user_query[:60],
+                        "intent_flags": (
+                            ("T" if intent.is_temporal else "-")
+                            + ("R" if intent.is_recall else "-")
+                            + ("K" if intent.is_topic_specific else "-")
+                        ),
+                        "candidates_count": len(candidates),
+                        "adopted_count": len(top_k),
+                        "adopted_ids": [sm.memory.id for sm in top_k],
+                        "top_scores": [round(sm.score, 4) for sm in top_k[:5]],
+                        "elapsed_ms": round(elapsed_ms, 1),
+                    },
+                )
+            except Exception:
+                logger.debug("[Retrieval] governance event failed", exc_info=True)
 
         return [sm.memory for sm in top_k], top_k, intent
 

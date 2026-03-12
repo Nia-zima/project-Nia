@@ -319,6 +319,16 @@ class Settings:
         # NiaCore: Batch training during Sleep Cycle
         self.NIACORE_TRAINING_ENABLED = _env_bool("NIACORE_TRAINING_ENABLED", False)
 
+        # Memory Governance: Phase 0 observability (governance_events recording)
+        self.GOVERNANCE_OBSERVE_ENABLED = _env_bool("GOVERNANCE_OBSERVE_ENABLED", False)
+        # Memory Governance: Phase A candidate harvesting (raw_promotion_candidates recording)
+        self.GOVERNANCE_CANDIDATE_ENABLED = _env_bool("GOVERNANCE_CANDIDATE_ENABLED", False)
+        # Memory Governance: Phase A evidence aggregation (memory_evidence recording)
+        self.GOVERNANCE_EVIDENCE_ENABLED = _env_bool("GOVERNANCE_EVIDENCE_ENABLED", False)
+
+        # Temporal Somatic Contrast: fingerprint recording (observation only)
+        self.FINGERPRINT_RECORD_ENABLED = _env_bool("FINGERPRINT_RECORD_ENABLED", False)
+
         # SkeletonCore: 会話骨格の記録（DB保存のみ、LLM注入なし）
         self.SKELETON_RECORD_ENABLED = _env_bool("SKELETON_RECORD_ENABLED", False)
         # SkeletonCore: 体感テキストの LLM コンテキスト注入
@@ -368,7 +378,7 @@ class Settings:
         self.SAFETY_LOG_INJECTION = _env_bool("SAFETY_LOG_INJECTION", True)
 
         # API documentation exposure (disable for production)
-        self.API_DOCS_ENABLED = _env_bool("API_DOCS_ENABLED", True)
+        self.API_DOCS_ENABLED = _env_bool("API_DOCS_ENABLED", False)
 
         # CORS allowed origins (comma-separated, or "*" for all)
         self.CORS_ALLOWED_ORIGINS = _env_str(
@@ -428,6 +438,17 @@ class Settings:
         # Diary (Sleep Cycle)
         self.DIARY_ENABLED = _env_bool("DIARY_ENABLED", True)
 
+        # Canonical training dataset snapshots
+        self.TRAINING_DATASET_SNAPSHOT_ENABLED = _env_bool("TRAINING_DATASET_SNAPSHOT_ENABLED", True)
+        self.TRAINING_DATASET_SNAPSHOT_BOOT = _env_bool("TRAINING_DATASET_SNAPSHOT_BOOT", True)
+        self.TRAINING_DATASET_SNAPSHOT_INTERVAL_SEC = max(300, _env_int("TRAINING_DATASET_SNAPSHOT_INTERVAL_SEC", 3600))
+        self.TRAINING_DATASET_SNAPSHOT_HOUR_LOCAL = max(0, min(23, _env_int("TRAINING_DATASET_SNAPSHOT_HOUR_LOCAL", 4)))
+        self.TRAINING_DATASET_SNAPSHOT_FORMAT = _env_str("TRAINING_DATASET_SNAPSHOT_FORMAT", "jsonl").strip().lower()
+        if self.TRAINING_DATASET_SNAPSHOT_FORMAT not in {"jsonl", "csv"}:
+            self.TRAINING_DATASET_SNAPSHOT_FORMAT = "jsonl"
+        self.TRAINING_DATASET_SNAPSHOT_THREAD_ID = _env_str("TRAINING_DATASET_SNAPSHOT_THREAD_ID", "").strip() or None
+        self.TRAINING_DATASET_SNAPSHOT_DIR = _env_str("TRAINING_DATASET_SNAPSHOT_DIR", "data/training_exports")
+
         # Chat Bridge (YouTube / Twitch)
         self.CHAT_BRIDGE_ENABLED = _env_bool("CHAT_BRIDGE_ENABLED", False)
         self.YOUTUBE_LIVE_ENABLED = _env_bool("YOUTUBE_LIVE_ENABLED", False)
@@ -448,6 +469,58 @@ class Settings:
 
 from backend.core.config_patch import _apply_retention_profile
 
+
+def _validate_feature_flags(s: Settings) -> None:
+    """Detect contradictory feature flag combinations and auto-correct."""
+    import warnings
+
+    # SKELETON_SOMATIC requires SKELETON_RECORD
+    if s.SKELETON_SOMATIC_ENABLED and not s.SKELETON_RECORD_ENABLED:
+        warnings.warn(
+            "SKELETON_SOMATIC_ENABLED=true requires SKELETON_RECORD_ENABLED=true. "
+            "Forcing SKELETON_RECORD_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.SKELETON_RECORD_ENABLED = True
+
+    # NIACORE_TRAINING requires NIACORE_EXPERIENCE
+    if s.NIACORE_TRAINING_ENABLED and not s.NIACORE_EXPERIENCE_ENABLED:
+        warnings.warn(
+            "NIACORE_TRAINING_ENABLED=true requires NIACORE_EXPERIENCE_ENABLED=true. "
+            "Forcing NIACORE_EXPERIENCE_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.NIACORE_EXPERIENCE_ENABLED = True
+
+    # NIACORE_SHADOW requires NIACORE_EXPERIENCE
+    if s.NIACORE_SHADOW_ENABLED and not s.NIACORE_EXPERIENCE_ENABLED:
+        warnings.warn(
+            "NIACORE_SHADOW_ENABLED=true requires NIACORE_EXPERIENCE_ENABLED=true. "
+            "Forcing NIACORE_EXPERIENCE_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.NIACORE_EXPERIENCE_ENABLED = True
+
+    # SOMATIC_ADAPTIVE requires SOMATIC
+    if s.SOMATIC_ADAPTIVE_ENABLED and not s.SOMATIC_ENABLED:
+        warnings.warn(
+            "SOMATIC_ADAPTIVE_ENABLED=true requires SOMATIC_ENABLED=true. "
+            "Forcing SOMATIC_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.SOMATIC_ENABLED = True
+
+    # SOMATIC_FEEDBACK requires SOMATIC
+    if s.SOMATIC_FEEDBACK_ENABLED and not s.SOMATIC_ENABLED:
+        warnings.warn(
+            "SOMATIC_FEEDBACK_ENABLED=true requires SOMATIC_ENABLED=true. "
+            "Forcing SOMATIC_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.SOMATIC_ENABLED = True
+
+
 settings = Settings()
 _apply_retention_profile(settings)
+_validate_feature_flags(settings)
 

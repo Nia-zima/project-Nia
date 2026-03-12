@@ -367,3 +367,165 @@ def _record_skeleton(
         session_id=thread_id,
         skeleton=skeleton,
     )
+
+
+def _harvest_governance_candidates(
+    state: dict,
+    thread_id: str,
+    turn_id: str,
+) -> None:
+    """Governance Phase A: ターンデータから昇格候補を抽出して保存。
+
+    同期実行。例外は呼び出し元で握りつぶされる。
+    """
+    from backend.services.memory.candidate_harvester import (
+        HarvestSignals,
+        harvest_candidates,
+    )
+
+    user_text = str(state.get("user_text") or "")
+
+    # H1 用: correction_level は state に入らないのでその場で検出
+    correction_level = "none"
+    try:
+        from backend.services.memory.somatic_feedback import detect_correction_level
+        correction_level = detect_correction_level(user_text)
+    except Exception:
+        logger.debug("[CANDIDATE_HARVESTER] detect_correction_level failed", exc_info=True)
+
+    skeleton = state.get("conversation_skeleton") or {}
+
+    signals = HarvestSignals(
+        user_text=user_text,
+        ai_response=str(state.get("final_text") or ""),
+        selected_depth=int(state.get("selected_depth") or 0),
+        surprise_score=float(state.get("surprise_score") or 0.0),
+        dissonance_on=bool(state.get("dissonance_on")),
+        correction_level=correction_level,
+        merge_mode=str(state.get("merge_mode") or ""),
+        skeleton_focus=skeleton.get("focus"),
+        skeleton_response_intent=skeleton.get("response_intent"),
+        skeleton_question_intent=skeleton.get("question_intent"),
+        thread_id=thread_id,
+        turn_id=turn_id,
+        message_id=str(state.get("message_id") or "") or None,
+        stream_id=str(state.get("stream_id") or "") or None,
+    )
+
+    _count, triggered_kinds = harvest_candidates(signals)
+    return triggered_kinds
+
+
+def _record_fingerprint(
+    state: dict,
+    thread_id: str,
+    turn_id: str,
+) -> None:
+    """TS.0: ターンの内部状態 fingerprint を記録する。
+
+    同期実行。例外は呼び出し元で握りつぶされる。
+    """
+    from backend.core.temporal.fingerprint import build_fingerprint, save_fingerprint
+
+    confidence_metrics = state.get("confidence_metrics") or {}
+    skeleton = state.get("conversation_skeleton") or {}
+    somatic_senses = state.get("somatic_senses") or []
+
+    # gap_seconds: 前回ターンからの経過。state に直接ないので telemetry_kv から取る
+    gap_seconds = 0.0
+    try:
+        from backend.core.db import managed_conn
+        with managed_conn() as conn:
+            row = conn.execute(
+                "SELECT v FROM telemetry_kv WHERE k = 'last_turn_timestamp'"
+            ).fetchone()
+            if row:
+                import time
+                gap_seconds = max(0.0, time.time() - float(row[0]))
+    except Exception:
+        pass
+
+    # turn_index: セッション内の位置
+    messages = state.get("messages") or []
+    turn_index = len([m for m in messages if hasattr(m, "content")]) // 2
+
+    fp = build_fingerprint(
+        confidence_metrics=confidence_metrics,
+        selected_depth=int(state.get("selected_depth") or 0),
+        surprise_score=float(state.get("surprise_score") or 0.0),
+        somatic_senses=somatic_senses,
+        retrieval_top_similarity=float(state.get("retrieval_top_similarity") or 0.0),
+        dissonance_on=bool(state.get("dissonance_on")),
+        turn_index=turn_index,
+        gap_seconds=gap_seconds,
+        skeleton_focus=skeleton.get("focus"),
+        skeleton_response_intent=skeleton.get("response_intent"),
+        skeleton_question_intent=skeleton.get("question_intent"),
+    )
+
+    save_fingerprint(
+        turn_id=turn_id,
+        thread_id=thread_id,
+        fingerprint=fp,
+        message_id=str(state.get("message_id") or "") or None,
+        stream_id=str(state.get("stream_id") or "") or None,
+    )
+
+    # Update last_turn_timestamp for next gap calculation
+    try:
+        import time
+        from backend.core.db import managed_conn
+        now = time.time()
+        with managed_conn() as conn:
+            conn.execute(
+                "INSERT INTO telemetry_kv (k, v, updated_at) VALUES ('last_turn_timestamp', ?, ?)"
+                " ON CONFLICT(k) DO UPDATE SET v = ?, updated_at = ?",
+                (str(now), int(now), str(now), int(now)),
+            )
+    except Exception:
+        logger.debug("[FINGERPRINT] last_turn_timestamp update failed", exc_info=True)
+
+
+def _aggregate_governance_evidence(
+    state: dict,
+    thread_id: str,
+    turn_id: str,
+    triggered_kinds: list[str] | None = None,
+) -> None:
+    """Governance Phase A: 既存候補に証拠を積む。
+
+    candidate_harvester の後に呼ばれる。
+    triggered_kinds は同ターンで harvester が生成した候補の kind リスト。
+    同期実行。例外は呼び出し元で握りつぶされる。
+    """
+    from backend.services.memory.evidence_aggregator import (
+        EvidenceSignals,
+        aggregate_evidence,
+    )
+
+    skeleton = state.get("conversation_skeleton") or {}
+
+    # correction_level
+    correction_level = "none"
+    try:
+        from backend.services.memory.somatic_feedback import detect_correction_level
+        user_text = str(state.get("user_text") or "")
+        correction_level = detect_correction_level(user_text)
+    except Exception:
+        pass
+
+    signals = EvidenceSignals(
+        selected_depth=int(state.get("selected_depth") or 0),
+        surprise_score=float(state.get("surprise_score") or 0.0),
+        correction_level=correction_level,
+        skeleton_focus=skeleton.get("focus"),
+        skeleton_response_intent=skeleton.get("response_intent"),
+        triggered_kinds=triggered_kinds,
+        retrieval_top_similarity=float(state.get("retrieval_top_similarity") or 0.0),
+        thread_id=thread_id,
+        turn_id=turn_id,
+        message_id=str(state.get("message_id") or "") or None,
+        stream_id=str(state.get("stream_id") or "") or None,
+    )
+
+    aggregate_evidence(signals)

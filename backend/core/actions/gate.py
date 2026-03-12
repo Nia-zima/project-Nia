@@ -83,6 +83,14 @@ class ActionGate:
                 f"(depth={depth}, risk={action.risk_level.name})"
             )
 
+            if action.requires_confirmation and action.risk_level != RiskLevel.CRITICAL:
+                return ActionDecision(
+                    should_execute=False,
+                    reason=f"Depth{depth}では自動実行できないため、ユーザー確認が必要です",
+                    suggested_depth=1 if depth == 0 else None,
+                    requires_confirmation=True,
+                )
+
             # CRITICALリスクの場合は特別なメッセージ
             if action.risk_level == RiskLevel.CRITICAL:
                 reason = "重大なリスクがあるため、明示的な承認が必要です"

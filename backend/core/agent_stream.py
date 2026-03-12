@@ -131,6 +131,7 @@ class StreamingContext:
 
     # Identifiers
     thread_id: str
+    turn_id: str | None
     stream_id: str | None
     message_id: str | None
     input_text: str
@@ -421,9 +422,11 @@ async def run_agent_stream(
         raise RuntimeError("ports.vision is required for run_agent_stream")
     logger.info(f"Stream Start: Thread={thread_id} Mode={mode}")
 
+    turn_id = None
     stream_id = None
     message_id = None
     if isinstance(memory_refs, dict):
+        turn_id = memory_refs.get("turn_id")
         stream_id = memory_refs.get("stream_id")
         message_id = memory_refs.get("message_id")
 
@@ -436,6 +439,7 @@ async def run_agent_stream(
 
     ctx = StreamingContext(
         thread_id=thread_id,
+        turn_id=str(turn_id) if turn_id is not None else None,
         stream_id=stream_id,
         message_id=message_id,
         input_text=input_text,
@@ -484,6 +488,10 @@ async def run_agent_stream(
                 inputs: AgentState = {
                     "messages": [HumanMessage(content=content)],
                     "has_user_text": ctx.has_user_text,
+                    "thread_id": ctx.thread_id,
+                    "turn_id": ctx.turn_id,
+                    "message_id": ctx.message_id,
+                    "stream_id": ctx.stream_id,
                     # Prevent stale checkpoint values from leaking across turns.
                     "draft": "",
                     "depth1_text": "",

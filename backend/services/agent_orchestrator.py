@@ -94,6 +94,7 @@ class DefaultAgentOrchestrator:
         mode: str,
         stream_id: Optional[str],
         message_id: Optional[str],
+        turn_id: Optional[str] = None,
     ) -> Iterable[dict]:
         """Pass-through to core agent stream."""
         from backend.core.agent import run_agent_stream
@@ -107,6 +108,7 @@ class DefaultAgentOrchestrator:
             mode=mode,
             memory_refs={
                 "conversation_id": thread_id,
+                "turn_id": turn_id,
                 "message_id": message_id,
                 "stream_id": stream_id,
             },
@@ -203,6 +205,7 @@ class DefaultAgentOrchestrator:
                 mode=mode,
                 stream_id=stream_id,
                 message_id=message_id or user_message_id,
+                turn_id=str(sctx.current_turn_id) if sctx.current_turn_id is not None else None,
             ):
                 sctx.last_event = ev if isinstance(ev, dict) else {"type": "non_dict", "value": str(ev)}
                 if not isinstance(ev, dict):
@@ -268,10 +271,11 @@ class DefaultAgentOrchestrator:
         final_result イベントの final_text（merge 済み・タグ除去済み）を優先。
         なければストリーミングチャンクの結合テキストにフォールバック。
         """
+        import uuid as _uuid
         streaming_text = ""
         final_text = ""
         try:
-            async for chunk in self.stream_chat(input_text=input_text, thread_id=thread_id, voice_id="14", image_data=None, mode="normal", stream_id=None, message_id=None):
+            async for chunk in self.stream_chat(input_text=input_text, thread_id=thread_id, voice_id="14", image_data=None, mode="normal", stream_id=_uuid.uuid4().hex, message_id=_uuid.uuid4().hex):
                 if isinstance(chunk, dict):
                     if chunk.get("type") == "text":
                         content = chunk.get("content", "")

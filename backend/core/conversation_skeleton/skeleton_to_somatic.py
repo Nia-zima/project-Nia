@@ -52,6 +52,15 @@ _FOCUS_TEMPLATES: dict[Focus, tuple[str, float]] = {
         "相手の揺れが妙に気になっている",
         0.7,
     ),
+    # Meeting extension (ME.1)
+    Focus.RETURNING_THEME: (
+        "前にも触れていたものが、また戻ってきている感じがある",
+        0.6,
+    ),
+    Focus.LINGERING_STATE: (
+        "まだ残っているものがある",
+        0.5,
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -74,6 +83,11 @@ _INTENT_TEMPLATES: dict[ResponseIntent, tuple[str, float]] = {
     ResponseIntent.HOLD: (
         "まだ何かが整理されていない感じがする。急がないほうがいい",
         0.7,
+    ),
+    # Meeting extension (ME.1)
+    ResponseIntent.OFFER_FRAGILE_SELF_OBSERVATION: (
+        "まだ固まっていないものを、そのまま差し出そうとしている感じがある",
+        0.6,
     ),
 }
 
@@ -102,6 +116,11 @@ _QUESTION_TEMPLATES: dict[QuestionIntent, tuple[str, float]] = {
         "記憶のどこかで不協和音が鳴っている気がする",
         0.7,
     ),
+    # Meeting extension (ME.1)
+    QuestionIntent.HOLD_OPEN_SPACE: (
+        "急いで埋めず、そのまま持っていたい感じがある",
+        0.5,
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -128,6 +147,15 @@ _COMPOSED_TEMPLATES: dict[tuple[Focus, ResponseIntent], tuple[str, float]] = {
     (Focus.PRIORITY_DECISION, ResponseIntent.HOLD): (
         "いろいろ重なっていて、まだ順序が見えない。焦らないでおこう",
         0.7,
+    ),
+    # Meeting extension (ME.1)
+    (Focus.RETURNING_THEME, ResponseIntent.OFFER_FRAGILE_SELF_OBSERVATION): (
+        "前にも触れたものが戻ってきている。まだ固まっていないまま、そっと差し出してみたい",
+        0.6,
+    ),
+    (Focus.LINGERING_STATE, ResponseIntent.OFFER_FRAGILE_SELF_OBSERVATION): (
+        "まだ残っているものがある。形にならないまま、そのまま出してみたい",
+        0.6,
     ),
 }
 

@@ -231,18 +231,37 @@ class ActionExecutor:
 
     async def _handle_post_tweet(self, payload: Dict[str, Any]) -> Any:
         """ツイート投稿"""
-        from backend.services.twitter_client import twitter_client
+        from backend.services.x_post_service import x_post_service
         text = payload.get("tweet_text", "")
         if not text:
             raise ValueError("tweet_text is required")
-        result = await twitter_client.post_tweet(text)
-        if not result.success:
-            raise RuntimeError(f"Tweet failed: {result.error}")
+        thread_id = str(payload.get("thread_id") or "default_thread")
+        pending_id = payload.get("_pending_id")
+        result = await x_post_service.publish_approved_text(
+            thread_id=thread_id,
+            text=text,
+            source="phase5_action",
+            turn_id=str(payload.get("turn_id") or "") or None,
+            message_id=str(payload.get("message_id") or "") or None,
+            stream_id=str(payload.get("stream_id") or "") or None,
+            source_ref=str(pending_id) if pending_id else None,
+            actor="user",
+            metadata={
+                "action_payload": {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"tweet_text"}
+                },
+            },
+        )
+        if not result.get("success"):
+            raise RuntimeError(f"Tweet failed: {result.get('error')}")
         return {
             "posted": True,
-            "tweet_id": result.tweet_id,
-            "tweet_text": result.tweet_text,
-            "char_count": len(result.tweet_text or ""),
+            "tweet_id": result.get("tweet_id"),
+            "tweet_text": result.get("tweet_text"),
+            "char_count": len(result.get("tweet_text") or ""),
+            "proposal_id": (result.get("proposal") or {}).get("proposal_id"),
         }
 
     async def _handle_mc_action(self, payload: Dict[str, Any]) -> Any:

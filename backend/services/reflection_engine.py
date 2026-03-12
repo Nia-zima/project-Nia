@@ -99,6 +99,7 @@ async def run_reflection(thread_id: str) -> dict:
         return result
 
     # Save daily_log to daily_reflections
+    daily_log_id = uuid.uuid4().hex
     try:
         with managed_conn() as conn:
             session_idx = _compute_session_index(conn, thread_id, today_str)
@@ -108,7 +109,7 @@ async def run_reflection(thread_id: str) -> dict:
                     content_json, turn_count, token_count, created_at)
                    VALUES (?, ?, ?, ?, 'daily_log', ?, ?, 0, ?)""",
                 (
-                    uuid.uuid4().hex,
+                    daily_log_id,
                     thread_id,
                     today_str,
                     session_idx,
@@ -223,53 +224,31 @@ async def run_reflection(thread_id: str) -> dict:
             logger.warning("[ReflectionEngine] Phase 3 (cross-day) failed: %s", exc)
             result["errors"].append(f"cross_day: {exc}")
 
-    # Phase T: Auto-post tweet after daily_log
+    # Phase T: Generate a durable proposal after daily_log
     if result["daily_log_saved"] and getattr(settings, "TWITTER_AUTO_PROPOSE", False):
         try:
-            from backend.services.twitter_client import twitter_client
-            if twitter_client.enabled and daily_log:
-                summary = daily_log.get("summary", "")
-                topics = ", ".join(daily_log.get("key_topics", []))
-                context = f"{summary}\n話題: {topics}" if topics else summary
-                tweet_text = await twitter_client.generate_tweet(
-                    style="diary", context=context, thread_id=thread_id,
+            from backend.services.x_post_service import x_post_service
+
+            proposal = await x_post_service.propose_reflection_daily_log(
+                thread_id=thread_id,
+                daily_log=daily_log,
+                source_ref=daily_log_id,
+            )
+            if proposal:
+                result["tweet_proposed"] = True
+                result["tweet_proposal_id"] = proposal.get("proposal_id")
+                logger.info(
+                    "[ReflectionEngine] tweet proposal created: %s (proposal_id=%s)",
+                    (proposal.get("tweet_text") or "")[:50],
+                    proposal.get("proposal_id"),
                 )
-                if tweet_text:
-                    post_result = await twitter_client.post_tweet(tweet_text)
-                    if post_result.success:
-                        result["tweet_posted"] = True
-                        logger.info("[ReflectionEngine] tweet posted: %s (id=%s)", tweet_text[:50], post_result.tweet_id)
-                    else:
-                        logger.warning("[ReflectionEngine] tweet post failed: %s", post_result.error)
         except Exception as exc:
-            logger.warning("[ReflectionEngine] tweet failed: %s", exc)
+            logger.warning("[ReflectionEngine] tweet proposal failed: %s", exc)
 
     result["success"] = True
     return result
 
-
 # ── Internal helpers ──────────────────────────────────────────────
-
-
-def _store_tweet_proposal(thread_id: str, tweet_text: str) -> None:
-    """Store tweet proposal in telemetry_kv for frontend polling."""
-    with managed_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES (?, ?, ?)",
-            (
-                "pending_tweet_proposal",
-                json.dumps(
-                    {
-                        "tweet_text": tweet_text,
-                        "thread_id": thread_id,
-                        "proposed_at": time.time(),
-                        "id": uuid.uuid4().hex,
-                    },
-                    ensure_ascii=False,
-                ),
-                int(time.time()),
-            ),
-        )
 
 
 def _compute_session_index(conn, thread_id: str, reflection_date: str) -> int:

@@ -389,6 +389,23 @@ def decay_by_status() -> int:
                 "[SemanticStore] decay_by_status: updated=%d revoked=%d",
                 len(updates), len(revoked_ids),
             )
+
+        # Phase M0: governance observability — record decay sweep (空振りも記録)
+        if getattr(_settings, "GOVERNANCE_OBSERVE_ENABLED", False):
+            try:
+                from backend.services.memory.governance_event_writer import record_event
+                record_event(
+                    event_name="decay_sweep_completed",
+                    payload={
+                        "scanned_count": len(rows),
+                        "updated_count": len(updates),
+                        "revoked_count": len(revoked_ids),
+                        "revoked_ids": revoked_ids[:50],
+                    },
+                )
+            except Exception:
+                logger.debug("[SemanticStore] governance event failed", exc_info=True)
+
         return len(revoked_ids)
 
 

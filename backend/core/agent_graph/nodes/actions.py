@@ -15,6 +15,9 @@ from .commit_helpers import (
     _update_pip_interaction,
     _record_niacore_experience,
     _record_skeleton,
+    _harvest_governance_candidates,
+    _aggregate_governance_evidence,
+    _record_fingerprint,
 )
 
 
@@ -60,10 +63,10 @@ async def action_processing(state: AgentState) -> dict:
             "payload": {"query": final_text[:50]},
         })
 
-    # Tweet proposal detection
+    # Tweet proposal detection — only trigger on explicit user requests
     user_text = state.get("user_text") or ""
-    tweet_keywords = ["呟", "つぶや", "ツイート", "tweet", "投稿して"]
-    if any(kw in (final_text + user_text).lower() for kw in tweet_keywords):
+    tweet_keywords = ["つぶやいて", "ツイートして", "投稿して", "tweetして"]
+    if any(kw in user_text for kw in tweet_keywords):
         try:
             from backend.services.twitter_client import twitter_client
             if twitter_client.enabled:
@@ -82,7 +85,10 @@ async def action_processing(state: AgentState) -> dict:
                 if tweet_text:
                     proposed_actions.append({
                         "action_id": "post_tweet",
-                        "payload": {"tweet_text": tweet_text},
+                        "payload": {
+                            "tweet_text": tweet_text,
+                            "thread_id": state.get("thread_id") or "default_thread",
+                        },
                     })
         except Exception as exc:
             logger.warning("[ACTION] tweet generation failed: %s", exc, exc_info=True)
@@ -109,6 +115,10 @@ async def action_processing(state: AgentState) -> dict:
             "category": action.category.value,
             "risk_level": action.risk_level.name,
             "risk_score": action.risk_score,
+            "thread_id": state.get("thread_id"),
+            "turn_id": state.get("turn_id"),
+            "message_id": state.get("message_id"),
+            "stream_id": state.get("stream_id"),
             "payload": payload,
         }
 
@@ -426,6 +436,28 @@ async def s5_commit(state: AgentState) -> dict:
                         _record_skeleton(state, thread_id, turn_id)
                     except Exception:
                         logger.debug("[S5_COMMIT] skeleton record failed", exc_info=True)
+
+                # Governance Phase A: Harvest promotion candidates
+                _triggered_kinds: list[str] = []
+                if getattr(settings, "GOVERNANCE_CANDIDATE_ENABLED", False):
+                    try:
+                        _triggered_kinds = _harvest_governance_candidates(state, thread_id, turn_id) or []
+                    except Exception:
+                        logger.debug("[S5_COMMIT] candidate harvest failed", exc_info=True)
+
+                # Governance Phase A: Aggregate evidence for existing candidates
+                if getattr(settings, "GOVERNANCE_EVIDENCE_ENABLED", False):
+                    try:
+                        _aggregate_governance_evidence(state, thread_id, turn_id, _triggered_kinds)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] evidence aggregation failed", exc_info=True)
+
+                # TS.0: Record turn fingerprint for temporal somatic contrast
+                if getattr(settings, "FINGERPRINT_RECORD_ENABLED", False):
+                    try:
+                        _record_fingerprint(state, thread_id, turn_id)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] fingerprint record failed", exc_info=True)
 
                 break
             if attempt < max_retries - 1:

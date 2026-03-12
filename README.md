@@ -91,6 +91,13 @@ Safety → Dissonance → DepthSelector → Depth0/1/2/WAIT → Merge → Action
 
 記憶は S0〜S5 の状態機械で管理。Semantic 生成は Sleep Cycle で LLM バッチ抽出。
 
+**現在地:** Memory Governance は Phase 0 計装と Step 2 の共通骨格まで実装済み。
+
+- 観測: `governance_events` に retrieval / context / semantic_promoted / decay sweep を記録
+- 骨格: `semantic_state`, `raw_promotion_candidates`, `memory_claims`, `memory_evidence`, `promotion_reviews`, `semantic_lineage`, `semantic_reviews`, `semantic_tombstones`, `semantic_transitions`
+- writer 方針: `governance_repository.upsert_semantic_bundle()` が `semantic_memories + semantic_state` の single-writer 入口
+- provenance: candidate / claim / evidence / review / lineage まで `thread_id`, `turn_id`, `message_id`, `stream_id`, `trace_id` を保持
+
 Context Builder が Depth 別にメモリコンテキストを制御:
 - Depth0: PINNED FACTS のみ
 - Depth1/2: PINNED FACTS + PATTERNS（日横断パターン） + WORKING + Short/Long Term
@@ -243,8 +250,12 @@ Minecraft 以外の任意のゲームを **画面キャプチャ → Gemini Flas
 
 | モード | トリガー | フロー |
 |:---|:---|:---|
-| **手動** | 「呟いて」「ツイートして」等 | LLM 生成 → ActionPanel で承認 → X API v2 投稿 |
-| **自律** | daily_log 完了後 | 日記風ツイート生成 → `telemetry_kv` に提案保存 → 承認/却下 |
+| **手動** | 「呟いて」「ツイートして」等 | 生成 → `x_post_proposals` に proposal 保存 → `proposal_id` ベースで承認/却下 → 投稿 |
+| **自律** | reflection / daily_log 完了後 | reflection は proposal 作成のみ。直接投稿しない。承認後にのみ公開 |
+
+- X は proposal-first 設計。公開判断の正規データは `x_post_proposals`
+- `nero_meeting_*` など公開禁止 source/thread は proposal 生成時点で block
+- cooldown / daily max / duplicate 判定は proposal approve 時ではなく posting reservation 時に適用
 
 ### 動画解析
 
@@ -634,8 +645,9 @@ cd frontend && npm run dev
 | メソッド | パス | 説明 |
 |:---|:---|:---|
 | POST | `/api/actions/tweet/generate` | ツイート生成 |
-| POST | `/api/actions/tweet/approve` | ツイート承認＋投稿 |
-| GET | `/api/actions/tweet/pending` | 自律提案のポーリング |
+| GET | `/api/actions/tweet/pending` | pending proposal 一覧 |
+| POST | `/api/actions/tweet/approve` | `proposal_id` を承認して投稿 |
+| POST | `/api/actions/tweet/reject` | `proposal_id` を却下 |
 
 ### 動画
 
@@ -648,17 +660,20 @@ cd frontend && npm run dev
 
 | メソッド | パス | 説明 |
 |:---|:---|:---|
-| GET | `/stats/summary` | 会話統計 |
-| GET | `/stats/internal_state` | 内部状態 |
-| GET | `/stats/memory_graph` | 記憶ネットワーク可視化 |
-| GET | `/stats/inner_monologue` | 内心独白履歴 |
+| GET | `/api/stats/summary` | 会話統計 |
+| GET | `/api/stats/internal_state` | 内部状態 |
+| GET | `/api/stats/dataset_export` | canonical dataset の export |
+| GET | `/api/stats/dataset_audit` | training-ready / source audit |
+| GET | `/api/stats/memory_graph` | 記憶ネットワーク可視化 |
+| GET | `/api/stats/inner_monologue` | 内心独白履歴 |
 
 ### 管理
 
 | メソッド | パス | 説明 |
 |:---|:---|:---|
 | GET | `/health` | ヘルスチェック |
-| POST | `/system/sleep` | Sleep Cycle 手動実行 |
+| POST | `/api/system/sleep` | Sleep Cycle 手動実行 |
+| POST | `/api/system/training_dataset_snapshot` | training-ready snapshot を手動生成 |
 | GET | `/api/manager/context` | Nero 用コンテキスト取得 |
 | WebSocket | `/ws/room` | 部屋状態リアルタイム同期 |
 
@@ -711,11 +726,14 @@ ruff check backend/ && pytest tests/
 | `docs/nia_design_philosophy.md` | 設計思想（全12セクション） |
 | `docs/niacore_lnn_design.md` | NiaCore LNN 設計書 v0.3 |
 | `docs/skeletoncore_design.md` | SkeletonCore 設計書 v0.3 |
+| `docs/skeletoncore_meeting_extension.md` | SkeletonCore の meeting 拡張メモ |
 | `docs/somatic_self_awareness_design.md` | 体感ベース自己認識 |
 | `docs/nia_metacognition_design.md` | メタ認知 N.0〜N.5 |
 | `docs/pip_and_room_design.md` | Pip + 部屋の統合設計 |
 | `docs/memory_system_overview.md` | 記憶システム全体像 |
 | `docs/memory_retrieval_design.md` | Query-Aware Retrieval |
+| `docs/data_accuracy_2026-03.md` | 2026-03 のデータ精度改善まとめ |
+| `docs/governance_phase_a_status_2026-03-11.md` | Governance Phase A の現在地と probe 方針 |
 | `docs/body_constitution.md` | 身体憲章 |
 | `CLAUDE.md` | AI エージェント向け設計ガイドライン |
 | `identity.md` | ニアの人格定義（変更は承認制） |

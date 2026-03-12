@@ -158,6 +158,7 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
             inputs: AgentState = {
                 "messages": [HumanMessage(content=content)],
                 "has_user_text": has_user_text,
+                "thread_id": thread_id,
                 # Prevent stale checkpoint values from leaking across turns.
                 "draft": "",
                 "depth1_text": "",

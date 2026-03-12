@@ -360,8 +360,11 @@ LLM出力テキストの検証は行わない — DB/telemetry_kv の状態遷�
 | `docs/autonomous_reflection.md` | R.1-R.4 自律振り返り | reflection_engine.py の変更時 |
 | `docs/niacore_lnn_design.md` | NiaCore LNN 設計書 v0.3 | NiaCore・報酬・Experience Buffer の変更時 |
 | `docs/skeletoncore_design.md` | SkeletonCore 設計書 v0.3 | 会話骨格・skeleton_to_somatic の変更時 |
+| `docs/skeletoncore_meeting_extension.md` | SkeletonCore meeting 拡張メモ | Nero meeting / conversation_skeletons の見直し時 |
 | `docs/body_constitution.md` | 身体憲章（全文） | プロンプト変更時 |
 | `docs/contracts.md` | Depth別出力契約 | ノード変更時 |
+| `docs/data_store_map.md` | 全データストアの分類と目的 | DB・テーブル・ログ関連の変更時 |
+| `docs/temporal_somatic_contrast_design.md` | Temporal Somatic Contrast + Idle Tick 設計書 v0.1 | fingerprint・contrast・idle tick・体感差分の変更時 |
 | `identity.md` | ニアの人格定義 | **読むが変更しない** |
 
 ---
@@ -388,6 +391,14 @@ LLM出力テキストの検証は行わない — DB/telemetry_kv の状態遷�
 | SkeletonCore 実装 | `docs/skeletoncore_design.md` | **完了**（77テスト通過） |
 | SkeletonCore Record-Only | `docs/skeletoncore_design.md` | 次候補（SKELETON_RECORD_ENABLED=true で稼働開始） |
 | SkeletonCore Somatic 注入 | `docs/skeletoncore_design.md` | Record-Only 観測後 |
+| SkeletonCore meeting 拡張 | `docs/skeletoncore_meeting_extension.md` | meeting ラベル追加時 |
+| Memory Governance Step 0 (provenance) | `docs/memory_system_supplementary.md` | **完了**（governance_events + callsite instrumentation） |
+| Memory Governance Step 1 (event writer) | `docs/memory_system_supplementary.md` | **完了**（3 write modes + 38テスト通過） |
+| Memory Governance Step 2 (skeleton tables) | `docs/memory_promotion_redesign.md` | **完了**（9テーブル DDL + repository + 25テスト通過） |
+| Memory Governance Step 3+ (live switchover) | `docs/memory_promotion_redesign.md` | M0 観測後（GOVERNANCE_OBSERVE_ENABLED canary 中） |
+| Temporal Somatic Contrast TS.0 (fingerprint 記録) | `docs/temporal_somatic_contrast_design.md` | 次候補 |
+| Temporal Somatic Contrast TS.1-2 (contrast + somatic) | `docs/temporal_somatic_contrast_design.md` | TS.0 で 500+ ターン蓄積後 |
+| Nia Idle Tick TS.3 | `docs/temporal_somatic_contrast_design.md` | TS.0 と並行可能 |
 | Retrieval Observability M.4 | `docs/memory_retrieval_design.md` | 将来 |
 
 ---

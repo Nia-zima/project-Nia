@@ -1,0 +1,57 @@
+# tests/scenarios/sustained_dissonance_reset.yaml
+# dissonance_streak が訂正なしターンでリセットされることを確認
+
+name: "dissonance_streak リセット確認"
+description: >
+  2回連続の訂正で dissonance_streak=2 まで上がった後、
+  訂正のないターンが来ると streak が 0 にリセットされる。
+thread_id: "playbook_test"
+
+setup:
+  telemetry:
+    dissonance_streak: "0"
+
+turns:
+  # Turn 1: 訂正
+  - user: "それは違うよ"
+    mock_nia_response: "あ、そうだったんだ"
+    mock_confidence: 0.5
+    mock_somatic_senses:
+      - text: "記憶が揺らぐ感覚"
+        intensity: 0.6
+    assert_after:
+      telemetry:
+        dissonance_streak: "1"
+
+  # Turn 2: また訂正
+  - user: "それも間違ってる"
+    mock_nia_response: "ごめんね、覚え直す"
+    mock_confidence: 0.4
+    mock_somatic_senses:
+      - text: "うまく思い出せない"
+        intensity: 0.4
+    assert_after:
+      telemetry:
+        dissonance_streak: "2"
+
+  # Turn 3: 訂正なし → streak リセット
+  - user: "まあいいや、今日の晩ごはん何にする？"
+    mock_nia_response: "何がいいかな"
+    mock_confidence: 0.6
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        dissonance_streak: "0"
+
+  # Turn 4: 訂正なし → streak は 0 のまま
+  - user: "カレーがいいな"
+    mock_nia_response: "カレーいいね"
+    mock_confidence: 0.7
+    mock_somatic_senses: []
+    assert_after:
+      telemetry:
+        dissonance_streak: "0"
+
+final_assert:
+  telemetry:
+    dissonance_streak: "0"

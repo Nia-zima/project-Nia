@@ -1,6 +1,6 @@
 """Tests for Twitter client — tweet generation, cleaning, and posting."""
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 
 # ── _clean_tweet tests ────────────────────────────────────────────
@@ -157,20 +157,23 @@ class TestPostTweet:
 class TestExecutorHandler:
     @pytest.mark.asyncio
     async def test_handle_post_tweet_success(self):
-        from backend.services.twitter_client import TweetResult
-        mock_result = TweetResult(
-            success=True, tweet_id="12345", tweet_text="テストツイート"
-        )
+        mock_result = {
+            "success": True,
+            "tweet_id": "12345",
+            "tweet_text": "テストツイート",
+            "proposal": {"proposal_id": "prop-1"},
+        }
         with patch(
-            "backend.services.twitter_client.twitter_client"
-        ) as mock_client:
-            mock_client.post_tweet = AsyncMock(return_value=mock_result)
+            "backend.services.x_post_service.x_post_service"
+        ) as mock_service:
+            mock_service.publish_approved_text = AsyncMock(return_value=mock_result)
             from backend.core.actions.executor import action_executor
             result = await action_executor._handle_post_tweet(
-                {"tweet_text": "テストツイート"}
+                {"tweet_text": "テストツイート", "thread_id": "default_thread", "_pending_id": "p1"}
             )
             assert result["posted"] is True
             assert result["tweet_id"] == "12345"
+            assert result["proposal_id"] == "prop-1"
 
     @pytest.mark.asyncio
     async def test_handle_post_tweet_missing_text(self):
@@ -180,16 +183,15 @@ class TestExecutorHandler:
 
     @pytest.mark.asyncio
     async def test_handle_post_tweet_failure(self):
-        from backend.services.twitter_client import TweetResult
-        mock_result = TweetResult(success=False, error="API error")
+        mock_result = {"success": False, "error": "API error", "proposal": {"proposal_id": "prop-1"}}
         with patch(
-            "backend.services.twitter_client.twitter_client"
-        ) as mock_client:
-            mock_client.post_tweet = AsyncMock(return_value=mock_result)
+            "backend.services.x_post_service.x_post_service"
+        ) as mock_service:
+            mock_service.publish_approved_text = AsyncMock(return_value=mock_result)
             from backend.core.actions.executor import action_executor
             with pytest.raises(RuntimeError, match="Tweet failed"):
                 await action_executor._handle_post_tweet(
-                    {"tweet_text": "テスト"}
+                    {"tweet_text": "テスト", "thread_id": "default_thread"}
                 )
 
 
@@ -202,7 +204,7 @@ class TestActionRegistration:
         action = action_registry.get("post_tweet")
         assert action is not None
         assert action.name == "ツイート投稿"
-        assert action.requires_confirmation is False
+        assert action.requires_confirmation is True
 
     def test_post_tweet_is_medium_risk(self):
         from backend.core.actions import action_registry

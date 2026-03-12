@@ -7,8 +7,10 @@ import asyncio
 import logging
 import re
 import time
+from typing import Any
 
 from backend.core.config import settings
+from backend.core.decision_events import build_decision_event_payload
 from backend.core.logger import logger
 from backend.core.agent_helpers import (
     PONDERING_TAG_RE,
@@ -30,6 +32,18 @@ _THINK_FULL_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 # ── TTS enqueue helper ───────────────────────────────────────
+
+
+async def _emit_decision_telemetry(ctx, payload: dict[str, Any]) -> None:
+    telemetry_sink = None
+    if isinstance(getattr(ctx, "ports", None), dict):
+        telemetry_sink = ctx.ports.get("telemetry")
+    if telemetry_sink is None:
+        return
+    try:
+        await telemetry_sink.event(getattr(ctx, "thread_id", None), "decision_event", payload)
+    except Exception:
+        logger.debug("[DECISION_EVENT] telemetry emit failed", exc_info=True)
 
 async def _generate_audio_chained(ctx, text, vid, prev_task, queue, tid):
     """Fire-and-forget TTS generation with dedup."""
@@ -161,7 +175,13 @@ async def _handle_merge_end(ctx, data: dict) -> None:
     """Process merge node completion: hold_request, TTS enqueue, final_result emit."""
     output = data.get("output") or {}
     if not ctx.hold_request_sent:
-        ev = build_hold_request_event(output)
+        ev = build_hold_request_event(
+            output,
+            thread_id=getattr(ctx, "thread_id", None),
+            turn_id=getattr(ctx, "turn_id", None),
+            message_id=getattr(ctx, "message_id", None),
+            stream_id=getattr(ctx, "stream_id", None),
+        )
         if ev:
             payload = ev.get("payload") or {}
             token = payload.get("review_token") or ""
@@ -176,6 +196,7 @@ async def _handle_merge_end(ctx, data: dict) -> None:
                 len(preview_text),
             )
             await ctx.output_queue.put(ev)
+            await _emit_decision_telemetry(ctx, payload)
             ctx.hold_request_sent = True
     else:
         logger.debug("[REVIEW_EV] hold_request skipped=already_sent")
@@ -271,7 +292,13 @@ async def _handle_safety_end(ctx, data: dict) -> None:
         output = data.get("output") or {}
         reasons = output.get("reason_codes") or []
         if "system_hold_cancelled_new_input" in reasons:
-            ev = build_hold_cancelled_event(ctx.prev_review_token)
+            ev = build_hold_cancelled_event(
+                ctx.prev_review_token,
+                thread_id=getattr(ctx, "thread_id", None),
+                turn_id=getattr(ctx, "turn_id", None),
+                message_id=getattr(ctx, "message_id", None),
+                stream_id=getattr(ctx, "stream_id", None),
+            )
             if ev:
                 short = (ctx.prev_review_token or "")[:8]
                 logger.info(
@@ -280,6 +307,7 @@ async def _handle_safety_end(ctx, data: dict) -> None:
                     ctx.prev_merge_mode,
                 )
                 await ctx.output_queue.put(ev)
+                await _emit_decision_telemetry(ctx, ev.get("payload") or {})
                 ctx.hold_cancelled_sent = True
     else:
         logger.debug("[REVIEW_EV] hold_cancelled skipped=already_sent")
@@ -294,40 +322,94 @@ async def _handle_action_end(ctx, data: dict) -> None:
     results = output.get("action_results") or []
 
     for item in proposed:
-        payload = {
-            "action_id": item.get("action_id"),
-            "name": item.get("name"),
-            "risk_level": item.get("risk_level"),
-            "category": item.get("category"),
-        }
+        payload = build_decision_event_payload(
+            source="phase5",
+            entity_kind="action",
+            decision="propose",
+            status="proposed",
+            thread_id=getattr(ctx, "thread_id", None),
+            actor="gate",
+            turn_id=getattr(ctx, "turn_id", None),
+            message_id=getattr(ctx, "message_id", None),
+            stream_id=getattr(ctx, "stream_id", None),
+            action_id=item.get("action_id"),
+            item_kind=str(item.get("kind") or "action"),
+            extras={
+                "name": item.get("name"),
+                "risk_level": item.get("risk_level"),
+                "category": item.get("category"),
+            },
+        )
         await ctx.output_queue.put({"type": "event", "name": "action_proposed", "payload": payload})
+        await _emit_decision_telemetry(ctx, payload)
 
     for item in results:
-        payload = {
-            "action_id": item.get("action_id"),
-            "status": item.get("status"),
-            "result": item.get("result"),
-        }
+        payload = build_decision_event_payload(
+            source="phase5",
+            entity_kind="action",
+            decision="approve",
+            status=str(item.get("status") or "success"),
+            thread_id=getattr(ctx, "thread_id", None),
+            actor="gate",
+            turn_id=getattr(ctx, "turn_id", None),
+            message_id=getattr(ctx, "message_id", None),
+            stream_id=getattr(ctx, "stream_id", None),
+            action_id=item.get("action_id"),
+            item_kind=str(item.get("kind") or "action"),
+            approved_by=item.get("approved_by") or "gate",
+            result=item.get("result"),
+        )
         await ctx.output_queue.put({"type": "event", "name": "action_approved", "payload": payload})
+        await _emit_decision_telemetry(ctx, payload)
 
     for item in pending:
-        payload = {
-            "action_id": item.get("action_id"),
-            "name": item.get("name"),
-            "risk_level": item.get("risk_level"),
-            "reason": (item.get("decision") or {}).get("reason"),
-            "requires_confirmation": (item.get("decision") or {}).get("requires_confirmation"),
-        }
+        payload = build_decision_event_payload(
+            source="phase5",
+            entity_kind="action",
+            decision="hold",
+            status="pending_confirmation",
+            thread_id=getattr(ctx, "thread_id", None),
+            actor="gate",
+            turn_id=getattr(ctx, "turn_id", None),
+            message_id=getattr(ctx, "message_id", None),
+            stream_id=getattr(ctx, "stream_id", None),
+            pending_id=item.get("pending_id"),
+            action_id=item.get("action_id"),
+            item_kind=str(item.get("kind") or "action"),
+            reason=(item.get("decision") or {}).get("reason"),
+            extras={
+                "name": item.get("name"),
+                "risk_level": item.get("risk_level"),
+                "category": item.get("category"),
+                "requires_confirmation": (item.get("decision") or {}).get("requires_confirmation"),
+            },
+        )
         await ctx.output_queue.put({"type": "event", "name": "action_blocked", "payload": payload})
+        await _emit_decision_telemetry(ctx, payload)
 
     for item in rejected:
-        payload = {
-            "action_id": item.get("action_id"),
-            "name": item.get("name"),
-            "risk_level": item.get("risk_level"),
-            "reason": item.get("reason"),
-        }
+        payload = build_decision_event_payload(
+            source="phase5",
+            entity_kind="action",
+            decision="reject",
+            status=str(item.get("status") or "rejected"),
+            thread_id=getattr(ctx, "thread_id", None),
+            actor="gate",
+            turn_id=getattr(ctx, "turn_id", None),
+            message_id=getattr(ctx, "message_id", None),
+            stream_id=getattr(ctx, "stream_id", None),
+            pending_id=item.get("pending_id"),
+            action_id=item.get("action_id"),
+            item_kind=str(item.get("kind") or "action"),
+            reason=item.get("reason"),
+            extras={
+                "name": item.get("name"),
+                "risk_level": item.get("risk_level"),
+                "category": item.get("category"),
+            },
+        )
         await ctx.output_queue.put({"type": "event", "name": "action_blocked", "payload": payload})
+        await _emit_decision_telemetry(ctx, payload)
 
 
 async def _handle_stream_chunk(ctx, data: dict) -> None:

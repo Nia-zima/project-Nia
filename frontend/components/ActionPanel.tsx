@@ -31,10 +31,13 @@ const riskBadge = (risk?: string) => {
 };
 
 type TweetProposal = {
+  proposal_id: string;
   tweet_text: string;
-  proposed_at: number;
+  created_at: number;
   id: string;
   thread_id: string;
+  source: string;
+  status: string;
 };
 
 export default function ActionPanel({ threadId = "default_thread" }: ActionPanelProps) {
@@ -46,7 +49,7 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
   const [error, setError] = useState<string | null>(null);
   const [reasonById, setReasonById] = useState<Record<string, string>>({});
   const [resultTab, setResultTab] = useState<"state" | "history">("state");
-  const [tweetProposal, setTweetProposal] = useState<TweetProposal | null>(null);
+  const [tweetProposals, setTweetProposals] = useState<TweetProposal[]>([]);
 
   const fetchPending = async () => {
     try {
@@ -106,8 +109,8 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
   useEffect(() => {
     const pollTweet = async () => {
       try {
-        const data = await apiClient.fetchPendingTweet();
-        setTweetProposal(data?.proposal ?? null);
+        const data = await apiClient.fetchPendingTweet(threadId);
+        setTweetProposals(Array.isArray(data?.items) ? data.items : []);
       } catch {
         // Silently ignore polling errors
       }
@@ -115,16 +118,16 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
     pollTweet();
     const interval = setInterval(pollTweet, 30_000);
     return () => clearInterval(interval);
-  }, []);
+  }, [threadId]);
 
-  const handleTweetDecision = async (decision: "approve" | "reject") => {
+  const handleTweetDecision = async (proposalId: string, decision: "approve" | "reject") => {
     try {
-      if (decision === "approve" && tweetProposal) {
-        await apiClient.approveTweet(tweetProposal.tweet_text, tweetProposal.thread_id || threadId);
+      if (decision === "approve") {
+        await apiClient.approveTweet(proposalId);
       } else {
-        await apiClient.rejectTweet();
+        await apiClient.rejectTweet(proposalId);
       }
-      setTweetProposal(null);
+      setTweetProposals((prev) => prev.filter((item) => item.proposal_id !== proposalId));
     } catch (e) {
       console.error(e);
       setError(`ツイートの${decision}に失敗しました`);
@@ -203,12 +206,12 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
 
       <div
         className={`mt-2.5 space-y-2.5 pr-1 ${
-          hasPending || tweetProposal ? "flex-1 min-h-0 overflow-y-auto" : ""
+          hasPending || tweetProposals.length > 0 ? "flex-1 min-h-0 overflow-y-auto" : ""
         }`}
       >
         {/* Autonomous tweet proposal (from Reflection Engine) */}
-        {tweetProposal && (
-          <div className="rounded-xl border border-blue-400/30 bg-blue-900/20 p-2.5">
+        {tweetProposals.map((tweetProposal) => (
+          <div key={tweetProposal.proposal_id} className="rounded-xl border border-blue-400/30 bg-blue-900/20 p-2.5">
             <div className="flex items-center justify-between gap-2">
               <div className="text-sm text-blue-100 flex items-center gap-1.5">
                 <span className="text-base">𝕏</span> Tweet Proposal
@@ -217,25 +220,28 @@ export default function ActionPanel({ threadId = "default_thread" }: ActionPanel
                 {tweetProposal.tweet_text.length}/280
               </span>
             </div>
+            <div className="mt-1 text-[10px] text-blue-200/80">
+              {tweetProposal.source} / {tweetProposal.thread_id}
+            </div>
             <div className="mt-2 text-xs text-gray-200 bg-black/30 rounded-lg p-2 whitespace-pre-wrap">
               {tweetProposal.tweet_text}
             </div>
             <div className="mt-1.5 flex items-center gap-2">
               <button
-                onClick={() => handleTweetDecision("approve")}
+                onClick={() => handleTweetDecision(tweetProposal.proposal_id, "approve")}
                 className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/20 px-2 py-1 text-xs text-emerald-100"
               >
                 <Check size={12} /> 投稿する
               </button>
               <button
-                onClick={() => handleTweetDecision("reject")}
+                onClick={() => handleTweetDecision(tweetProposal.proposal_id, "reject")}
                 className="flex items-center gap-1 rounded-lg border border-red-500/40 bg-red-500/20 px-2 py-1 text-xs text-red-100"
               >
                 <X size={12} /> 却下
               </button>
             </div>
           </div>
-        )}
+        ))}
         {pending.map((item, idx) => {
           const pendingId = item.pending_id;
           const actionId = item.action_id;

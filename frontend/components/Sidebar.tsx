@@ -69,7 +69,9 @@ const BOTTOM_TABS: TabItem[] = [
     { id: 'settings', icon: Settings, label: '設定' },
 ];
 
-const SYSTEM_TOKEN = process.env.NEXT_PUBLIC_SYSTEM_TOKEN || "";
+// System token is loaded from localStorage only (never from NEXT_PUBLIC_ env
+// vars, as those are bundled into the client build and visible to anyone).
+const SYSTEM_TOKEN = "";
 
 function getGroupForTab(tabId: string): string | null {
     for (const group of TAB_GROUPS) {
@@ -82,15 +84,14 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
     const [visionEnabled, setVisionEnabled] = React.useState(false);
     const [actionIssues, setActionIssues] = React.useState<ActionIssue[]>([]);
     const [systemTokenInput, setSystemTokenInput] = React.useState("");
-    const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>(() => {
-        if (typeof window !== 'undefined') {
-            try {
-                const saved = localStorage.getItem('sidebar_collapsed');
-                return saved ? JSON.parse(saved) : {};
-            } catch { return {}; }
-        }
-        return {};
-    });
+    const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({});
+
+    React.useEffect(() => {
+        try {
+            const saved = localStorage.getItem('sidebar_collapsed');
+            if (saved) setCollapsed(JSON.parse(saved));
+        } catch { /* ignore */ }
+    }, []);
 
     const toggleGroup = (groupId: string) => {
         setCollapsed(prev => {

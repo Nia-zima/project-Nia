@@ -1,13 +1,15 @@
+import asyncio
 import time
 
-from fastapi import APIRouter, BackgroundTasks, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.core.auth import verify_system_token
 from backend.core.config import settings
 from backend.core.logger import logger
 from backend.services.public_status import read_public_status, update_public_status
 from backend.scripts.sleep_cycle import integrated_sleep_cycle
+from backend.services.training_dataset_snapshot import run_daily_training_dataset_snapshot_if_due
 
 router = APIRouter()
 
@@ -18,6 +20,12 @@ def _ms() -> int:
 
 class VisionRequest(BaseModel):
     enabled: bool
+
+
+class TrainingDatasetSnapshotRequest(BaseModel):
+    thread_id: str | None = Field(default=None, max_length=256)
+    format: str = Field(default="jsonl", pattern="^(jsonl|csv)$")
+    force: bool = True
 
 
 @router.post("/system/sleep", dependencies=[Depends(verify_system_token)])
@@ -52,7 +60,7 @@ async def get_public_status():
         return status
     except Exception as e:
         logger.exception("[status] API error: %s", e)
-        return {"ok": False, "error": str(e)}
+        raise HTTPException(status_code=500, detail="status_fetch_failed")
 
 
 @router.post("/system/vision", dependencies=[Depends(verify_system_token)])
@@ -61,6 +69,17 @@ async def set_vision_status(req: VisionRequest):
 
     logger.info(f"Vision Status Changed: {req.enabled}")
     return {"status": "success", "vision_enabled": req.enabled}
+
+
+@router.post("/system/training_dataset_snapshot", dependencies=[Depends(verify_system_token)])
+async def trigger_training_dataset_snapshot(req: TrainingDatasetSnapshotRequest):
+    result = await asyncio.to_thread(
+        run_daily_training_dataset_snapshot_if_due,
+        thread_id=req.thread_id,
+        fmt=req.format,
+        force=bool(req.force),
+    )
+    return result
 
 
 @router.get("/system/diagnostics", dependencies=[Depends(verify_system_token)])
@@ -89,10 +108,23 @@ async def system_diagnostics():
         kv_rows = conn.execute("SELECT k, v FROM telemetry_kv").fetchall()
         kv = {r["k"]: r["v"] for r in kv_rows}
 
+    training_scope = (getattr(settings, "TRAINING_DATASET_SNAPSHOT_THREAD_ID", None) or "all_threads").strip() or "all_threads"
+    snapshot_kv = {
+        "last_date": kv.get(f"training_dataset_snapshot:last_date:{training_scope}"),
+        "last_run_at": kv.get(f"training_dataset_snapshot:last_run_at:{training_scope}"),
+        "last_status": kv.get(f"training_dataset_snapshot:last_status:{training_scope}"),
+        "last_row_count": kv.get(f"training_dataset_snapshot:last_row_count:{training_scope}"),
+        "last_baseline_ts": kv.get(f"training_dataset_snapshot:last_baseline_ts:{training_scope}"),
+        "latest_data_path": kv.get(f"training_dataset_snapshot:latest_data_path:{training_scope}"),
+        "latest_summary_path": kv.get(f"training_dataset_snapshot:latest_summary_path:{training_scope}"),
+        "last_error": kv.get(f"training_dataset_snapshot:last_error:{training_scope}"),
+    }
+
     return {
         "event_counts_24h": event_counts,
         "memory": {"semantic_active": sem_count, "working_open": working_count},
         "telemetry_kv": kv,
+        "training_dataset_snapshot": snapshot_kv,
         "service_health": service_health.get_all(),
         "ts": int(time.time()),
     }

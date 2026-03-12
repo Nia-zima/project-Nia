@@ -6,6 +6,7 @@ import os
 import time
 import uuid
 from datetime import date, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -25,6 +26,7 @@ def _setup_db():
         conn.execute("DELETE FROM semantic_memories")
         conn.execute("DELETE FROM daily_reflections")
         conn.execute("DELETE FROM telemetry_kv")
+        conn.execute("DELETE FROM x_post_proposals")
     finally:
         conn.close()
     yield
@@ -645,5 +647,91 @@ class TestCrossDayStateTag:
             for r in phase3_rows:
                 assert r["state_tag"] == "insight"
                 assert "cross_day:" in r["note"]
+        finally:
+            conn.close()
+
+
+class TestTweetProposalPhase:
+    @pytest.mark.asyncio
+    async def test_phase_t_creates_proposal_instead_of_posting(self, monkeypatch):
+        _insert_event("t1", "Memory Retrieval を改善したい", "設計から始めましょう")
+
+        call_count = 0
+
+        async def mock_llm(messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return DAILY_LOG_JSON
+            return "[]"
+
+        proposal_calls = []
+
+        async def mock_propose(*, thread_id, daily_log, source_ref):
+            proposal_calls.append(
+                {
+                    "thread_id": thread_id,
+                    "daily_log": daily_log,
+                    "source_ref": source_ref,
+                }
+            )
+            return {
+                "proposal_id": "prop-1",
+                "tweet_text": "今日は設計の話を進めた",
+            }
+
+        post_calls = []
+
+        async def mock_post_tweet(*args, **kwargs):
+            post_calls.append((args, kwargs))
+            raise AssertionError("reflection should not post directly")
+
+        monkeypatch.setattr("backend.services.reflection_engine.call_llm", mock_llm)
+        monkeypatch.setattr(
+            "backend.services.x_post_service.x_post_service.propose_reflection_daily_log",
+            mock_propose,
+        )
+        monkeypatch.setattr(
+            "backend.services.twitter_client.twitter_client.post_tweet",
+            mock_post_tweet,
+        )
+        monkeypatch.setattr("backend.services.reflection_engine.settings.TWITTER_AUTO_PROPOSE", True)
+
+        from backend.services.reflection_engine import run_reflection
+
+        result = await run_reflection("t1")
+
+        assert result["success"] is True
+        assert result["daily_log_saved"] is True
+        assert result["tweet_proposed"] is True
+        assert result["tweet_proposal_id"] == "prop-1"
+        assert len(proposal_calls) == 1
+        assert proposal_calls[0]["thread_id"] == "t1"
+        assert post_calls == []
+
+    @pytest.mark.asyncio
+    async def test_reflection_proposal_skips_nero_meeting_thread(self, monkeypatch):
+        from backend.services.x_post_service import x_post_service
+
+        twitter_mock = AsyncMock(return_value="これは提案されない")
+        monkeypatch.setattr(
+            "backend.services.twitter_client.twitter_client.generate_tweet",
+            twitter_mock,
+        )
+        monkeypatch.setattr("backend.services.twitter_client.twitter_client.enabled", True)
+
+        proposal = await x_post_service.propose_reflection_daily_log(
+            thread_id="nero_meeting_20260307_123000",
+            daily_log={"summary": "内部会話", "key_topics": ["internal"]},
+            source_ref="daily-log-1",
+        )
+
+        assert proposal is None
+        twitter_mock.assert_not_called()
+
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM x_post_proposals").fetchone()
+            assert row[0] == 0
         finally:
             conn.close()

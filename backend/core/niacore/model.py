@@ -61,7 +61,7 @@ class StateVector:
       [3-7]   confidence metrics      5 metrics, already [0,1]
       [8]     retrieval_hit_rate      avg retrieval score [0,1]
       [9]     surprise_score          from state [0,1]
-      [10]    surprise_v              integer (raw)
+      [10]    surprise_v              normalized (raw/5, clamped [0,1])
       [11]    somatic_value           top somatic intensity [0,1]
       [12-31] last_5_depths_onehot    5 turns × 4 depths (0 or 1)
       [32]    time_of_day             hour/24.0 [0,1]
@@ -140,8 +140,8 @@ def build_state_vector(
     # [9] surprise_score
     vec[9] = _clamp(float(surprise_score))
 
-    # [10] surprise_v (raw integer, no clamp)
-    vec[10] = float(int(surprise_v))
+    # [10] surprise_v (normalized: typically 0-5 range → /5, clamped [0,1])
+    vec[10] = _clamp(float(surprise_v) / 5.0)
 
     # [11] somatic_value (top intensity)
     if somatic_senses:

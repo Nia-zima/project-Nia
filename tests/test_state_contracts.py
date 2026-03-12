@@ -55,6 +55,7 @@ def _base_state(**overrides) -> AgentState:
         "hold_kind": None,
         "review_token": None,
         "review_pending_actions": [],
+        "review_rejected_actions": [],
         "suppressed_actions": [],
         "confidence": 0.5,
         "confidence_metrics": {},
@@ -313,11 +314,11 @@ class TestContract3_HoldCancel:
             merge_mode=f"review:{token}",
             hold_required=True,
             review_pending_actions=[{"kind": "say", "text": "発話"}],
-            rejected_actions=[],
+            review_rejected_actions=[],
         )
         cancel_update = cancel_review_on_new_input(state, user_text="新入力")
-        assert len(cancel_update["rejected_actions"]) >= 1
-        shadowed = cancel_update["rejected_actions"][0]
+        assert len(cancel_update["review_rejected_actions"]) >= 1
+        shadowed = cancel_update["review_rejected_actions"][0]
         assert shadowed.get("cancel_reason") == "new_user_input"
 
     def test_cancel_without_user_text_is_noop(self):
@@ -369,7 +370,7 @@ class TestContract4_TokenMatch:
 # =====================================================================
 # 契約 5: Commit 原子性契約
 #   approve → final_text=候補テキスト + state クリア
-#   reject  → final_text="WAIT" + rejected_actions 記録
+#   reject  → final_text="WAIT" + review_rejected_actions 記録
 # =====================================================================
 class TestContract5_CommitAtomicity:
     """Commit 原子性契約: 承認と却下の出力パターンが正確。"""
@@ -405,8 +406,8 @@ class TestContract5_CommitAtomicity:
         assert result["hold_required"] is False
         assert result["review_pending_actions"] == []
         assert result["merge_mode"] == "wait"
-        assert len(result["rejected_actions"]) >= 1
-        assert result["rejected_actions"][-1]["text"] == "却下テキスト"
+        assert len(result["review_rejected_actions"]) >= 1
+        assert result["review_rejected_actions"][-1]["text"] == "却下テキスト"
 
     def test_reject_increases_dissonance(self):
         token = uuid.uuid4().hex
@@ -541,12 +542,16 @@ class TestContract7_SSEPayloadCompat:
         payload = ev["payload"]
         required = {"review_token", "hold_kind", "preview_text", "reason_codes", "pending_actions"}
         assert required.issubset(set(payload.keys()))
+        assert payload["source"] == "review_window"
+        assert payload["decision"] == "hold"
 
     def test_hold_cancelled_payload_has_required_keys(self):
         ev = build_hold_cancelled_event(uuid.uuid4().hex)
         payload = ev["payload"]
         required = {"review_token", "reason"}
         assert required.issubset(set(payload.keys()))
+        assert payload["source"] == "review_window"
+        assert payload["decision"] == "cancel"
 
     def test_final_result_event_shape(self):
         """final_result イベントの構造を検証（agent_stream.py と同じ形式）。"""

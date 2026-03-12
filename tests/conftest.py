@@ -115,6 +115,13 @@ from backend.services.memory.models import SemanticMemory, WorkingItem  # noqa: 
 # uses data/nia_test.sqlite3 instead of the production data/nia.sqlite3.
 _settings.DB_PATH = _TEST_DB_PATH
 
+# Disable Twitter during tests to prevent real API calls.
+# Without this, tests that trigger reflection Phase T can post real tweets
+# because call_llm is only mocked at the reflection module level,
+# not at the twitter_client level.
+_settings.TWITTER_ENABLED = False
+_settings.TRAINING_DATASET_SNAPSHOT_ENABLED = False
+
 
 # ── Pytest runtime config ───────────────────────────────────────────
 

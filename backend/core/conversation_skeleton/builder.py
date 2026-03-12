@@ -47,6 +47,18 @@ def build_conversation_skeleton(
         # Memory hit rate proxy
         memory_hit_rate = _estimate_memory_hit_rate(state)
 
+        # Meeting extension (ME.1): is_meeting は builder が判定
+        is_meeting = thread_id.startswith("nero_meeting_")
+
+        # turn_index: user メッセージ数（現在の user turn を含む）
+        messages = state.get("messages") or []
+        try:
+            from langchain_core.messages import HumanMessage
+            turn_index = sum(1 for m in messages if isinstance(m, HumanMessage))
+        except Exception:
+            # フォールバック: content 持ちメッセージの半数 + 1
+            turn_index = len([m for m in messages if hasattr(m, "content")]) // 2 + 1
+
         inp = SkeletonInput(
             context_coverage=metrics.get("context_coverage", 0.5),
             self_consistency=metrics.get("self_consistency", 0.5),
@@ -60,6 +72,9 @@ def build_conversation_skeleton(
             depth_action=state.get("depth_action") or "depth0",
             correction_strong=correction_strong,
             review_rejected=review_rejected,
+            is_meeting=is_meeting,
+            retrieval_top_similarity=float(state.get("retrieval_top_similarity") or 0.0),
+            turn_index=turn_index,
             **syntax,
         )
 
