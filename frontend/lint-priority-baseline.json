@@ -1,9 +1,11 @@
 {
-  "updated_at": "2026-02-20T14:13:49.066Z",
-  "total": 44,
+  "updated_at": "2026-03-29T05:40:00.000Z",
+  "total": 57,
   "by_rule": {
     "@typescript-eslint/no-explicit-any": 32,
-    "react-hooks/exhaustive-deps": 10,
-    "react-hooks/set-state-in-effect": 2
+    "react-hooks/exhaustive-deps": 15,
+    "react-hooks/preserve-manual-memoization": 6,
+    "react-hooks/refs": 1,
+    "react-hooks/set-state-in-effect": 3
   }
 }

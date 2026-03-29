@@ -193,7 +193,7 @@ jobs:
         run: |
           bandit -r backend/ \
             -s B101,B311 \
-            -f github \
+            -f txt \
             --severity-level medium
 
       - name: Record Duration

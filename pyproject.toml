@@ -20,6 +20,7 @@ dependencies = [
     "langchain-community",
     "langchain-ollama",
     "langgraph",
+    "langgraph-checkpoint-sqlite",
     "chromadb (>=1.4.0,<2.0.0)",
     "sentence-transformers (>=5.2.0,<6.0.0)",
     "pyautogui",
