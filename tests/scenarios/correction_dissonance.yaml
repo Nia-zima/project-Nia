@@ -1,0 +1,68 @@
+# tests/scenarios/correction_dissonance.yaml
+# ユーザー訂正 → 体感矛盾検出 → dissonance_streak 蓄積
+
+name: "ユーザー訂正 → 体感矛盾検出"
+description: >
+  ユーザーが記憶を訂正すると、somatic dissonance が検出され、
+  dissonance_streak が蓄積する。2回連続の訂正で streak=2 になる。
+thread_id: "playbook_test"
+
+setup:
+  semantics:
+    - content: "ジュンはコーヒーが好き"
+      status: confirmed
+      confidence: 0.85
+      state_tag: origin
+  telemetry:
+    awareness_average: "0.1"
+    dissonance_streak: "0"
+
+turns:
+  # Turn 1: 通常の会話（訂正なし）
+  - user: "ジュンはコーヒーが好きだよ"
+    mock_nia_response: "うん、コーヒーが好きなんだよね"
+    mock_confidence: 0.85
+    mock_somatic_senses:
+      - text: "この話題については、はっきり覚えていることがある気がする"
+        intensity: 0.9
+    assert_after:
+      telemetry:
+        dissonance_streak: "0"
+      somatic_log:
+        min_outcomes: 1
+        has_outcome: confirmed
+    assert_not_state:
+      somatic_no_outcome:
+        - contradicted
+
+  # Turn 2: ユーザー訂正（「違う」キーワード）
+  - user: "違うよ、紅茶派だった"
+    mock_nia_response: "あ、そうだったんだ。紅茶のほうが好きなんだね"
+    mock_confidence: 0.6
+    mock_somatic_senses:
+      - text: "この話題については、はっきり覚えていることがある気がする"
+        intensity: 0.9
+    assert_after:
+      telemetry:
+        dissonance_streak: "1"
+      somatic_log:
+        has_outcome: contradicted
+
+  # Turn 3: 連続訂正（「間違い」キーワード）
+  - user: "それも間違い。日本茶だよ"
+    mock_nia_response: "日本茶なんだ。覚え直すね"
+    mock_confidence: 0.4
+    mock_somatic_senses:
+      - text: "うまく思い出せない"
+        intensity: 0.3
+    assert_after:
+      telemetry:
+        dissonance_streak: "2"
+      somatic_log:
+        has_outcome: contradicted
+
+final_assert:
+  somatic_log:
+    min_outcomes: 3
+  telemetry:
+    dissonance_streak: "2"

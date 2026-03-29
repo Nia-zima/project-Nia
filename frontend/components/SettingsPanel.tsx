@@ -1,12 +1,14 @@
 import React from 'react';
-import { Settings, Gamepad2, Terminal, User } from 'lucide-react';
+import { Settings, Gamepad2, Terminal, User, Box, Layers } from 'lucide-react';
 
 interface SettingsPanelProps {
     currentMode: string;
     onModeChange: (mode: string) => void;
+    avatarRenderer?: 'vrm' | 'live2d';
+    onRendererChange?: (renderer: 'vrm' | 'live2d') => void;
 }
 
-export default function SettingsPanel({ currentMode, onModeChange }: SettingsPanelProps) {
+export default function SettingsPanel({ currentMode, onModeChange, avatarRenderer = 'vrm', onRendererChange }: SettingsPanelProps) {
     const modes = [
         {
             id: 'normal',
@@ -70,7 +72,39 @@ export default function SettingsPanel({ currentMode, onModeChange }: SettingsPan
                 </div>
             </section>
 
-            {/* 将来的にここに他の設定（API Key設定、音声設定など）を追加可能 */}
+            <section>
+                <h3 className="text-sm font-medium text-gray-400 mb-4 uppercase tracking-wider">アバターレンダラー</h3>
+                <div className="grid grid-cols-2 gap-4">
+                    {([
+                        { id: 'vrm' as const, name: 'VRM (3D)', icon: <Box size={24} className="text-cyan-400" />, desc: 'Three.js + VRM モデル' },
+                        { id: 'live2d' as const, name: 'Live2D', icon: <Layers size={24} className="text-pink-400" />, desc: 'Cubism SDK + 2D モデル' },
+                    ] as const).map((r) => (
+                        <button
+                            key={r.id}
+                            onClick={() => onRendererChange?.(r.id)}
+                            className={`
+                                flex flex-col items-center gap-2 p-4 rounded-xl text-center transition-all duration-200
+                                border border-white/5 hover:border-white/20
+                                ${avatarRenderer === r.id
+                                    ? 'bg-blue-600/20 ring-2 ring-blue-500/50'
+                                    : 'bg-white/5 hover:bg-white/10'
+                                }
+                            `}
+                        >
+                            <div className={`p-3 rounded-lg bg-black/30 ${avatarRenderer === r.id ? 'bg-blue-500/20' : ''}`}>
+                                {r.icon}
+                            </div>
+                            <span className={`font-semibold text-sm ${avatarRenderer === r.id ? 'text-blue-200' : 'text-gray-200'}`}>
+                                {r.name}
+                            </span>
+                            <p className="text-xs text-gray-400">{r.desc}</p>
+                            {avatarRenderer === r.id && (
+                                <span className="text-xs bg-blue-500/80 text-white px-2 py-0.5 rounded-full">Active</span>
+                            )}
+                        </button>
+                    ))}
+                </div>
+            </section>
         </div>
     );
 }

@@ -1,32 +1,33 @@
-import json
-import os
-import sys
 import argparse
+import json
 from datetime import datetime
 from collections import Counter
 from statistics import mean
+from pathlib import Path
+
+from backend.core.config import settings
 
 # 設定: デフォルトのログパス
 # プロジェクトルートからの相対パスを想定
 # 実行ディレクトリに関わらず logs/judge_audit.jsonl を見つけられるようにする
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "judge_audit.jsonl")
+PROJECT_ROOT = settings.PROJECT_ROOT
+DEFAULT_LOG_PATH = PROJECT_ROOT / "logs" / "judge_audit.jsonl"
 
 class JudgeInspector:
-    def __init__(self, log_path=DEFAULT_LOG_PATH):
-        self.log_path = log_path
+    def __init__(self, log_path: Path | None = None) -> None:
+        self.log_path = log_path or DEFAULT_LOG_PATH
         self.logs = []
         self.load_logs()
 
-    def load_logs(self):
+    def load_logs(self) -> None:
         """ログファイルを読み込む"""
-        if not os.path.exists(self.log_path):
+        if not self.log_path.exists():
             # logger ではなく print を使用（コマンドラインツールのため）
             print(f"❌ Log file not found: {self.log_path}")
             return
 
         try:
-            with open(self.log_path, "r", encoding="utf-8") as f:
+            with self.log_path.open("r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line: continue

@@ -44,7 +44,7 @@ call "%VENV_ACTIVATE%"
 set PYTHONPATH=.
 
 REM バックグラウンドでサーバー起動
-start "NIA Backend" cmd /k "python -m uvicorn backend.server:app --host 127.0.0.1 --port 8000 --reload"
+start "NIA Backend" cmd /k "cd /d %PROJECT_ROOT% && set PYTHONPATH=. && .venv\Scripts\python.exe -m uvicorn backend.server:app --host 127.0.0.1 --port 8000 --reload"
 
 REM === Backendの起動待機 (Health Check) ===
 echo [WAIT] Waiting for backend to be healthy...
@@ -58,11 +58,25 @@ if errorlevel 1 (
 )
 echo [OK] Backend is UP!
 
+REM === Nero Server起動 (別ウィンドウ) ===
+set "NERO_ROOT=C:\Users\jk023\Desktop\Nero"
+if exist "%NERO_ROOT%\nero\server.py" (
+    REM ポート8001を使っている既存プロセスを終了
+    for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8001.*LISTENING"') do (
+        echo [CLEANUP] Killing old process on port 8001 (PID=%%p)
+        taskkill /F /PID %%p >nul 2>&1
+    )
+    echo [LAUNCH] Starting Nero Server...
+    start "Nero Server" cmd /k "cd /d %NERO_ROOT% && .venv\Scripts\python.exe -m uvicorn nero.server:app --host 127.0.0.1 --port 8001 --reload"
+) else (
+    echo [SKIP] Nero not found at %NERO_ROOT%
+)
+
 REM === Frontend起動 (別ウィンドウ) ===
 echo [LAUNCH] Starting Frontend...
 if exist "frontend" (
     start "Nia Frontend" cmd /k "cd /d %PROJECT_ROOT%\frontend && npm run dev"
-    
+
     REM ブラウザ自動起動
     timeout /t 3 > nul
     start http://localhost:3000

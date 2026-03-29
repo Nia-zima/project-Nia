@@ -1,0 +1,16 @@
+--- Testing Memory ---
+Current memories table:
+
+--- Testing recall_memories('ジュン') ---
+・fact
+・ジュンは山派
+・いってらっしゃいが状況に合ってるかな
+・ジュンは同居人がいる
+・None
+
+--- Testing recall_memories('仕事') ---
+・fact
+・fact A
+・fact A
+・fact A
+・fact B

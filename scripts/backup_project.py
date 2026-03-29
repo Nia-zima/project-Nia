@@ -1,51 +1,45 @@
-import shutil
-import os
-import datetime
 import zipfile
+from pathlib import Path
+from datetime import datetime
 
-def backup_project():
+def backup_project() -> None:
     # project_root is assumed to be one level up from this script (scripts/)
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_dir = os.path.join(project_root, "backups")
-    os.makedirs(backup_dir, exist_ok=True)
-    
-    backup_filename = f"AI_Buddy_Backup_{timestamp}.zip"
-    backup_path = os.path.join(backup_dir, backup_filename)
-    
-    print(f"Starting backup...")
+    project_root = Path(__file__).resolve().parents[1]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = project_root / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    backup_filename = f"project_nia_backup_{timestamp}.zip"
+    backup_path = backup_dir / backup_filename
+
+    exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "backups", ".vscode", ".idea"}
+    exclude_exts = {".zip", ".log"}
+    exclude_files = {"chat_history.db"}
+
+    print("Starting backup...")
     print(f"Source: {project_root}")
     print(f"Destination: {backup_path}")
-    
+
     try:
-        with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(project_root):
-                # Exclude directories
-                # modify dirs in-place to prune the walk
-                dirs[:] = [d for d in dirs if d not in ['.venv', '__pycache__', '.git', 'node_modules', 'backups', '.vscode', '.idea']]
-                
-                for file in files:
-                    # Exclude large binaries or previous backups if any leak in (though backups dir is excluded)
-                    if file.endswith('.zip') or file.endswith('.log') or file == "chat_history.db":
-                        # chat_history.db is 174MB, maybe skip for light backup unless requested?
-                        # User said "Backup save", usually implies all state. 
-                        # But it might be locked if server is running.
-                        # I will try to include it, but catch permission errors.
-                        # Actually, server is running, so DBs might be locked.
-                        pass
-                        
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, project_root)
-                    
-                    try:
-                        zipf.write(file_path, arcname)
-                    except PermissionError:
-                        print(f"Skipped (Permission Denied): {arcname}")
-                    except OSError as e:
-                        print(f"Skipped (Error): {arcname} - {e}")
-                        
+        with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in project_root.rglob("*"):
+                if file_path.is_dir():
+                    continue
+                rel_path = file_path.relative_to(project_root)
+                if any(part in exclude_dirs for part in rel_path.parts):
+                    continue
+                if file_path.name in exclude_files or file_path.suffix.lower() in exclude_exts:
+                    continue
+
+                try:
+                    zipf.write(file_path, rel_path)
+                except PermissionError:
+                    print(f"Skipped (Permission Denied): {rel_path}")
+                except OSError as e:
+                    print(f"Skipped (Error): {rel_path} - {e}")
+
         print(f"Backup completed successfully: {backup_filename}")
-        
+
     except Exception as e:
         print(f"Backup failed: {e}")
 

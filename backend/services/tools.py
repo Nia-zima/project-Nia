@@ -1,10 +1,11 @@
-from langchain_core.tools import tool
-import os
 import asyncio
 import base64
 import io
-import datetime
 
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
+
+from backend.core.config import settings
 from backend.core.logger import logger
 
 # --- Vision Dependencies ---
@@ -17,8 +18,6 @@ try:
     from langchain_ollama import ChatOllama
 except ImportError:
     ChatOllama = None
-
-from langchain_core.messages import HumanMessage
 
 
 # ---------------------------------------------------------
@@ -131,7 +130,7 @@ def see_screen(query: str) -> str:
 
         # 画像対応モデル（Ollama/Qwen-VL等）を想定
         llm = ChatOllama(
-            model=os.getenv("VISION_MODEL", "qwen2.5-vl"),
+            model=settings.VISION_MODEL,
             temperature=0.2
         )
 

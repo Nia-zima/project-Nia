@@ -1,0 +1,14 @@
+"""Rate limiting configuration using slowapi."""
+from __future__ import annotations
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+from backend.core.config import settings
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[],
+    enabled=getattr(settings, "RATE_LIMIT_ENABLED", True),
+    storage_uri="memory://",
+)

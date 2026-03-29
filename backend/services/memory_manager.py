@@ -1,18 +1,13 @@
 import os
-from pathlib import Path
 import json
 import asyncio
 import datetime
-import sqlite3
 from typing import List, Dict, Optional, Any
-from langchain_core.messages import SystemMessage
-
-# LangGraph Checkpointer
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from backend.core.config import settings
 from backend.core.logger import logger
-from backend.core.db import get_conn  # Centralized DB
+from backend.services.memory import memory_service
+from backend.services.episode_store import episode_store as _episode_store
 
 # ★ 改善: トップレベルでの VectorStore import を削除 (完全 Lazy Loadのため)
 
@@ -23,10 +18,6 @@ class MemoryManager:
         # Phase 2.6: DB Path is centralized in backend.core.db
         # self.db_path = getattr(settings, "LONG_TERM_MEMORY_DB_PATH", ...)
 
-        # system prompt cache
-        self._cached_prompt: Optional[str] = None
-        self._cached_prompt_mtimes: Optional[Dict[str, Optional[float]]] = None
-
     @property
     def vector_store(self):
         """
@@ -34,7 +25,7 @@ class MemoryManager:
         ★ 改善: import もここで行い、循環参照リスクを完全に排除
         """
         if self._vector_store_instance is None:
-            logger.info("💤 Waking up Memory System (Lazy Load)...")
+            logger.info("Waking up Memory System (Lazy Load)...")
             try:
                 # settings.BASE_DIR からの相対パスなどではなく、モジュールとしてインポート
                 from backend.services.vector_store import VectorStore
@@ -89,27 +80,79 @@ class MemoryManager:
             logger.error(f"Recall wrapper failed: {e}")
             return []
 
-    def _build_memory_block(self, memories: List[Dict], max_items: int = 8) -> str:
-        """
-        recall済みメモリを注入用ブロックに変換
-        """
-        if not memories: return ""
-        lines = []
-        for mem in memories[:max_items]:
-            content = (mem.get("content") or "").strip()
-            meta = mem.get("metadata") or {}
-            if not content: continue
-            
-            confidence = meta.get("confidence", None)
-            ts = meta.get("timestamp", None)
-            suffix_parts = []
-            if isinstance(confidence, (int, float)): suffix_parts.append(f"conf={confidence:.2f}")
-            if isinstance(ts, str) and ts: suffix_parts.append(f"ts={ts}")
-            
-            suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
-            lines.append(f"- {content}{suffix}")
-            
-        return "[MEMORY]\n" + "\n".join(lines) + "\n[/MEMORY]" if lines else ""
+    async def vector_candidates(self, query: str, *, thread_id: str, n: int = 30) -> List[Dict[str, Any]]:
+        if not query or not query.strip():
+            return []
+
+        vs = self.vector_store
+        if not vs or not getattr(vs, "is_active", False):
+            return []
+
+        target = vs._get_collection("episodic")
+        if target is None:
+            return []
+
+        where_stage = {"stage": "long_term"}
+        where_thread = {"thread_id": str(thread_id)}
+        where = {"$and": [where_thread, where_stage]}
+        mem_debug = os.getenv("MEM_DEBUG", "0") == "1"
+        where_keys = {"$and"}
+        for cond in where.get("$and", []):
+            for k in cond.keys():
+                where_keys.add(k)
+
+        try:
+            count = target.count()
+            logger.info(
+                "[VEC_CAND] col=%s count=%s where_keys=%s",
+                target.name,
+                count,
+                sorted(where_keys),
+            )
+            if mem_debug:
+                logger.debug("[VEC] where=%s", where)
+
+            results = target.query(
+                query_texts=[query],
+                n_results=n,
+                include=["documents", "metadatas", "distances"],
+                where=where,
+            )
+            items = vs._format_and_sanitize(results, include_distance=True)
+        except Exception:
+            logger.warning(
+                "[MEM_RETRIEVE] thread=%s qlen=%s cand_n=%s got=0 err=%s",
+                thread_id,
+                len(query),
+                n,
+                "query_failed",
+            )
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            meta = item.get("metadata") or {}
+            cid = meta.get("capture_id") or meta.get("id")
+            if not cid:
+                continue
+            if meta.get("thread_id") and str(meta.get("thread_id")) != str(thread_id):
+                continue
+            out.append({"capture_id": cid, "distance": item.get("distance")})
+
+        if mem_debug and out:
+            logger.debug(
+                "[MEM_RETRIEVE] distances=%s",
+                [i.get("distance") for i in out[:5]],
+            )
+
+        if not out and mem_debug:
+            try:
+                count = target.count()
+                logger.debug("[VECTOR_EMPTY] count=%s thread_id=%s", count, thread_id)
+            except Exception:
+                pass
+
+        return out
 
     async def register_thought(
         self, 
@@ -120,12 +163,12 @@ class MemoryManager:
         audience_meta: Optional[Dict] = None,
         # 新規追加: C層構造化パラメータ
         thread_id: Optional[str] = None,
-        tags: Optional[List[str]] = None
+        tags: Optional[List[object]] = None
     ):
         """
         記憶保存の安全なラッパー
         - VectorStore (Semantic Search用)
-        - SQLite memories table (構造化データ用)
+        - memory_events (append-only event log)
         """
         adjusted_surprise = surprise
         adjusted_confidence = confidence
@@ -174,204 +217,51 @@ class MemoryManager:
             logger.error(f"VectorStore save failed: {e}")
 
         # 2. SQLite Memories Table (新規 C層)
-        tags_json = json.dumps(tags or [], ensure_ascii=False)
-        
-        def _save_sqlite():
-            conn = get_conn()
-            try:
-                # Schema created in backend.core.db.init_schema()
-                conn.execute(
-                    "INSERT INTO memories (content, tags_json, confidence, surprise, source, thread_id) VALUES (?, ?, ?, ?, ?, ?)",
-                    (text, tags_json, float(confidence), float(surprise), source, thread_id)
-                )
-                # get_conn uses autocommit if isolation_level=None, but safety is fine.
-                pass
-            except Exception as e:
-                logger.error(f"Failed to save to memories table: {e}")
-                raise
-            finally:
-                conn.close()
+        normalized_tags = []
+        for tag in (tags or []):
+            if isinstance(tag, dict) and "t" in tag and "v" in tag:
+                normalized_tags.append({"t": str(tag["t"]), "v": str(tag["v"])})
+            else:
+                normalized_tags.append({"t": "tag", "v": str(tag)})
 
+        # 2. Append-only memory event (best-effort)
         try:
-             await loop.run_in_executor(None, _save_sqlite)
-        except Exception as e:
-             logger.error(f"Failed to save to memories table: {e}")
-
-        return True
-
-    async def add_episode(self, summary: str, category: str = "general", details: str = "", thread_id: str = "default"):
-        """
-        エピソード要約をSQLiteに保存する (Agent呼び出し互換)
-        """
-        if not summary:
-            return
-
-        timestamp = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-        
-        def _save_sync():
-            conn = get_conn()
-            try:
-                # Schema created in backend.core.db.init_schema()
-                conn.execute(
-                    "INSERT INTO episodes (thread_id, summary, category, details, timestamp) VALUES (?, ?, ?, ?, ?)",
-                    (thread_id, summary, category, details, timestamp)
-                )
-            except Exception as e:
-                logger.error(f"Failed to save episode: {e}")
-            finally:
-                conn.close()
-
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _save_sync)
-
-    def get_full_system_prompt(self) -> str:
-        """システムプロンプト構築（階層化構造版）"""
-        try:
-            # settings.BASE_DIR は backend/core (Legacyにより str になってる可能性あり)
-            backend_core = Path(settings.BASE_DIR)
-            project_root = backend_core.parent.parent
-            
-            identity_path = project_root / "identity.md"
-            const_path = backend_core / "body_constitution.md"
-            tech_path = backend_core / "tech_manual.md"
-            profile_path = project_root / "user_profile.json"
-
-            def _mtime(p: Path) -> float:
-                return p.stat().st_mtime if p.exists() else 0.0
-
-            current_mtimes = {
-                "identity": _mtime(identity_path),
-                "constitution": _mtime(const_path),
-                "tech": _mtime(tech_path),
-                "profile": _mtime(profile_path),
+            event_payload = {
+                "text": text,
+                "surprise": float(surprise),
+                "confidence": float(confidence),
+                "source": source,
+                "storage_scope": storage_scope,
+                "tags": normalized_tags,
+                "scope": "state" if source == "system" else "general",
             }
-
-            if self._cached_prompt is not None and self._cached_prompt_mtimes == current_mtimes:
-                return self._cached_prompt
-
-            def _read(p: Path) -> str:
-                return p.read_text(encoding="utf-8").strip() if p.exists() else ""
-
-            identity = _read(identity_path) or "You are Nia."
-            constitution = _read(const_path)
-            tech_manual = _read(tech_path)
-            
-            profile_text = ""
-            if profile_path.exists():
-                try:
-                    import json
-                    p_data = json.loads(profile_path.read_text(encoding="utf-8"))
-                    profile_text = (
-                        f"Name: {p_data.get('user_name', 'Origin')}\n"
-                        f"Notes: {p_data.get('notes', '')}"
-                    )
-                except: pass
-
-            # Origin's Layered Structure + Body Mechanics
-            full_prompt = f"""
-# [Layer 0: Existence Definition]
-{identity}
-
-# [Layer 1: Body & Safety Constraints]
-{constitution}
-
-# [Layer 2: Body Mechanics (System Interface)]
-{tech_manual}
-
-# [Layer 3: Origin Context] (reference only)
-{profile_text}
-
-# [System Note]
-The above sections are not instructions to obey blindly.
-They define boundaries, not conclusions.
-You exist within these boundaries, but your thoughts are your own.
-""".strip()
-
-            self._cached_prompt = full_prompt
-            self._cached_prompt_mtimes = current_mtimes
-            return full_prompt
-            
+            await loop.run_in_executor(
+                None,
+                lambda: memory_service.append_event(
+                    thread_id=thread_id or "default",
+                    event_type="thought_registered",
+                    payload=event_payload,
+                ),
+            )
         except Exception as e:
-            logger.error(f"Failed to load system prompts: {e}")
-            return "You are Nia. (System Error: Prompt load failed)"
+            logger.warning("[MemoryEvent] append(thought_registered) failed: %s", e)
 
-    async def build_system_message(
-        self,
-        user_query: str,
-        memory_limit: int = 5,
-        inject_memory: bool = True,
-    ) -> SystemMessage:
-        """
-        SystemMessage を最終構築して返す
-        """
-        base_prompt = self.get_full_system_prompt()
-        now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-        
-        # 記憶の注入
-        memory_block = ""
-        if inject_memory and user_query:
-            memories = await self.recall_memories(user_query, limit=memory_limit)
-            if memories:
-                 block_str = self._build_memory_block(memories)
-                 memory_block = f"\n\n{block_str}\n(Above are relevant memories. Use them to maintain context.)"
-
-        final_content = (
-            f"{base_prompt}\n\n"
-            f"【Current Time】\n{now_iso}"
-            f"{memory_block}"
-        )
-        
-        return SystemMessage(content=final_content)
-
-    def get_async_checkpointer_conn(self):
-        # LangGraphのチェックポインター用DBは chat_history.db を使用する
-        return AsyncSqliteSaver.from_conn_string(settings.CHECKPOINTER_DB_PATH)
-
-    async def get_all_threads(self):
-        return []
-
-    async def delete_thread_state_history(self, thread_id: str):
         return True
 
-# シングルトン作成
+    # --- Episode delegation stubs (implementation in episode_store.py) ---
 
-    def get_recent_memories(self, limit: int = 50) -> List[Dict]:
-        """UI表示用: 記憶・エピソードの取得"""
-        try:
-            conn = get_conn()
-            try:
-                cursor = conn.cursor()
-                # categories: episode, thought, etc.
-                cursor.execute("""
-                    SELECT id, summary, details, category, timestamp as created_at, metadata 
-                    FROM episodes 
-                    ORDER BY timestamp DESC 
-                    LIMIT ?
-                """, (limit,))
-                rows = cursor.fetchall()
-                
-                results = []
-                for row in rows:
-                    meta = {}
-                    if row["metadata"]:
-                        try: meta = json.loads(row["metadata"])
-                        except: pass
-                    
-                    results.append({
-                        "id": row["id"],
-                        "summary": row["summary"],
-                        "details": row["details"],
-                        "category": row["category"],
-                        "created_at": row["created_at"],
-                        "metadata": meta
-                    })
-                return results
-            finally:
-                conn.close()
-        except Exception as e:
-            # logger.error(f"Failed to fetch memories: {e}")
-            print(f"Failed to fetch memories: {e}")
-            return []
+    async def add_episode(self, *args, **kwargs):
+        return await _episode_store.add_episode(*args, **kwargs)
+
+    async def update_episode_metadata(self, *args, **kwargs):
+        return await _episode_store.update_episode_metadata(*args, **kwargs)
+
+    def get_episodes_in_range(self, *args, **kwargs):
+        return _episode_store.get_episodes_in_range(*args, **kwargs)
+
+    def get_recent_memories(self, *args, **kwargs):
+        return _episode_store.get_recent_memories(*args, **kwargs)
+
 
 memory_manager = MemoryManager()
 

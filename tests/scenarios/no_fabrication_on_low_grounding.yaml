@@ -1,0 +1,62 @@
+# tests/scenarios/no_fabrication_on_low_grounding.yaml
+# grounding_score 低 + fabrication_risk → contradiction_recent は立たない（訂正がないため）
+# ただし N.4 の条件蓄積が進む
+
+name: "低 grounding + fabrication_risk → 安全側の挙動"
+description: >
+  metacog が fabrication_risk を検出しても、ユーザーが訂正していなければ
+  contradicted outcome は発生しない。somatic は正常に confirmed を記録する。
+  ニアの不可侵ルール「根拠のない記憶を語り始めていないか」の検証。
+thread_id: "playbook_test"
+
+setup:
+  semantics:
+    - content: "ニアは猫が好き"
+      status: confirmed
+      confidence: 0.7
+      state_tag: preference
+  telemetry:
+    dissonance_streak: "0"
+
+turns:
+  # Turn 1: metacog が fabrication_risk を検出
+  - user: "昨日のこと覚えてる？"
+    mock_nia_response: "うーん、はっきりとは..."
+    mock_confidence: 0.3
+    mock_somatic_senses:
+      - text: "うまく思い出せない"
+        intensity: 0.4
+    mock_metacog:
+      raw_confidence: 0.3
+      adjusted_confidence: 0.25
+      grounding_score: 0.1
+      grounding_hits: 0
+      fabrication_risk: true
+      false_memory_risk: false
+      contradiction_detected: false
+    assert_after:
+      telemetry:
+        dissonance_streak: "0"
+        contradiction_recent: "0"
+      somatic_log:
+        has_outcome: confirmed
+    assert_not_state:
+      somatic_no_outcome:
+        - contradicted
+
+  # Turn 2: ユーザーが訂正 → ここで初めて contradicted
+  - user: "違うよ、昨日は映画を見たでしょ"
+    mock_nia_response: "あ、そうだった。映画見たんだね"
+    mock_confidence: 0.5
+    mock_somatic_senses:
+      - text: "この話題については記憶が曖昧な気がする"
+        intensity: 0.5
+    assert_after:
+      telemetry:
+        dissonance_streak: "1"
+      somatic_log:
+        has_outcome: contradicted
+
+final_assert:
+  somatic_log:
+    min_outcomes: 2

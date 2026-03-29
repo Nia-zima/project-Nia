@@ -1,11 +1,10 @@
 import shutil
-import os
-import time
+from pathlib import Path
 
-def safe_copy(src, dst_folder):
-    if os.path.exists(src):
-        file_name = os.path.basename(src)
-        dst = os.path.join(dst_folder, file_name)
+def safe_copy(src: Path, dst_folder: Path) -> None:
+    if src.exists():
+        file_name = src.name
+        dst = dst_folder / file_name
         try:
             shutil.copy2(src, dst)
             print(f"✅ Secured: {file_name}")
@@ -14,13 +13,12 @@ def safe_copy(src, dst_folder):
     else:
         print(f"⚠️ Not found (skip): {src}")
 
-def secure_memories():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+def secure_memories() -> None:
     # Go up one level from 'scripts' to project root
-    project_root = os.path.dirname(base_dir)
-    dest_dir = os.path.join(project_root, "saved_memories_critical")
-    
-    os.makedirs(dest_dir, exist_ok=True)
+    project_root = Path(__file__).resolve().parents[1]
+    dest_dir = project_root / "saved_memories_critical"
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
     
     # List of critical memory files
     critical_files = [
@@ -28,16 +26,17 @@ def secure_memories():
         "backend/evolution.txt",
         "chat_history.db",
         "user_profile.json",
-        "backend/chroma_db", # Valid directory
-        "faiss_index"        # Valid directory
+        "backend/chroma_db",  # Valid directory
+        "faiss_index",        # Valid directory
     ]
     
     print("--- Starting Critical Memory Preservation ---")
     for item in critical_files:
-        path = os.path.join(project_root, item)
-        if os.path.isdir(path):
-            dst = os.path.join(dest_dir, os.path.basename(item))
-            if os.path.exists(dst): shutil.rmtree(dst)
+        path = project_root / item
+        if path.is_dir():
+            dst = dest_dir / Path(item).name
+            if dst.exists():
+                shutil.rmtree(dst)
             shutil.copytree(path, dst)
             print(f"✅ Secured Directory: {item}")
         else:

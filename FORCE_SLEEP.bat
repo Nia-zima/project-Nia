@@ -9,7 +9,7 @@ cd /d "%PROJECT_ROOT%"
 echo.
 echo =========================================
 echo   NIA FORCE SLEEP (Manual Trigger)
-echo   Running sleep_cycle.py...
+echo   Running sleep_cycle orchestrator...
 echo =========================================
 echo.
 
@@ -23,7 +23,7 @@ if exist "%VENV_ACTIVATE%" (
 )
 
 set PYTHONPATH=.
-python backend/scripts/sleep_cycle.py
+python -m backend.scripts.sleep_cycle.orchestrator
 
 echo.
 echo [DONE] Sleep cycle finished.

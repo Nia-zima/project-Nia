@@ -1,18 +1,89 @@
 [project]
-name = "ai-buddy"
+name = "project-nia"
 version = "0.1.0"
-description = "AI Partner Application"
+description = "Nia — AI VTuber with multi-layer agent graph and memory system"
 authors = [
     {name = "Your Name",email = "you@example.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "python-dotenv",
+    "requests",
+    "aiosqlite",
+    "langchain",
+    "langchain-openai",
+    "langchain-anthropic",
+    "langchain-community",
+    "langchain-ollama",
+    "langgraph",
     "chromadb (>=1.4.0,<2.0.0)",
-    "sentence-transformers (>=5.2.0,<6.0.0)"
+    "sentence-transformers (>=5.2.0,<6.0.0)",
+    "pyautogui",
+    "pydirectinput>=1.0.4",
+    "pillow",
+    "mss",
+    "numpy",
+    "watchdog",
+    "dspy-ai>=2.5.0",
+    "tweepy>=4.14",
+    "gymnasium>=1.0",
+    "janome>=0.5",
+    "yt-dlp>=2025.1.26",
+    "slowapi>=0.1.9",
+    "ncps>=0.0.7",
 ]
 
+
+[tool.poetry]
+package-mode = false
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+    "pyyaml>=6.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider --ignore=data --ignore=.tmp --ignore=.pytest_cache"
+cache_dir = "data/pytest_cache"
+testpaths = ["tests", "backend/tests"]
+pythonpath = [".", "tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "agent: agent integration tests (requires local LLM services)",
+    "server: server connectivity tests (requires running backend/LLM)",
+    "e2e: end-to-end tests",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long
+    "E402",  # module-level import not at top
+    "E701",  # multiple statements on one line
+    "E722",  # bare except
+    "E741",  # ambiguous variable name
+    "F401",  # unused import
+    "F541",  # f-string missing placeholders
+    "F811",  # redefined while unused
+    "F821",  # undefined name (dynamic imports)
+    "F841",  # unused variable
+    "W291",  # trailing whitespace
+    "W292",  # missing newline at end of file
+    "W293",  # whitespace before ':'
+]

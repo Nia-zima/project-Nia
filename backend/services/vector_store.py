@@ -1,13 +1,18 @@
-import chromadb
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+except ImportError:
+    chromadb = None  # Will be handled in VectorStore
+    embedding_functions = None
+
 import uuid
 import datetime
-import json
-import os
 import time
-from typing import List, Dict, Optional, Any, Tuple
-from chromadb.utils import embedding_functions
+from typing import List, Dict, Optional
+
 from backend.core.logger import logger
 from backend.core.config import settings
+from backend.core.embedding_model import MODEL_NAME as EMBEDDING_MODEL_NAME
 
 class VectorStore:
     _instance = None
@@ -26,60 +31,68 @@ class VectorStore:
             return
         
         self.is_active = False
-        self.persist_path = os.path.join(settings.BASE_DIR, "chroma_db_storage")
-        os.makedirs(self.persist_path, exist_ok=True)
+        self.persist_path = settings.PROJECT_ROOT / "backend" / "chroma_db_storage"
+        self.persist_path.mkdir(parents=True, exist_ok=True)
         
         # オフライン時ログ抑制用（warningの連打を防ぐ）
         self._inactive_warned_once = False
         self._inactive_last_log_ts = 0.0
         self._inactive_log_interval_sec = 60.0  # 60秒に1回まで
 
+        # 1. Check if chromadb is available
+        if chromadb is None:
+            logger.warning("Chromadb not available; VectorStore is offline.")
+            self.is_active = False
+            self.client = None
+            self.collection = None
+            self.col_stream = None
+            self.collections = {}
+            self._initialized = True
+            return
+
         try:
             # Mark as initialized immediately to prevent recursion if logger calls back (unlikely but safe)
             self._initialized = True
-            
-            logger.info("🔌 Initializing VectorStore...")
-            
-            # 1. クライアント接続
-            self.client = chromadb.PersistentClient(path=self.persist_path)
-            
-            # 2. Embeddingモデルのロード
+
+            logger.info("Initializing VectorStore...")
+
+            # 2. クライアント接続
+            self.client = chromadb.PersistentClient(path=str(self.persist_path))
+
+            # 3. Embeddingモデルのロード
             self.embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="all-MiniLM-L6-v2" 
+                model_name=EMBEDDING_MODEL_NAME
             )
-            
-            # 3. コレクションの確保
-            # メイン記憶 (Private/Episodic)
+
+            # 4. コレクションの確保
             self.collection = self.client.get_or_create_collection(
                 name=collection_name,
                 embedding_function=self.embedding_func,
-                metadata={"hnsw:space": "cosine"} 
             )
-            # ストリーム記憶 (Stream)
             self.col_stream = self.client.get_or_create_collection(
                 name="stream_memory",
                 embedding_function=self.embedding_func,
-                metadata={"hnsw:space": "cosine"}
             )
-            
-            # 4. コレクションマップの作成 (将来の拡張性確保)
+
+            # 5. 参照用（後段で _get_collection("episodic") する前提ならここが重要）
             self.collections = {
                 "episodic": self.collection,
                 "stream": self.col_stream,
-                # "semantic": self.col_semantic,  # 将来ここに追加するだけでOK
             }
-            
+
             self.is_active = True
-            logger.info(f"✅ VectorStore Online. Docs: {self.collection.count()} / Stream: {self.col_stream.count()}")
-            
+            logger.info("VectorStore Online. Docs: %s / Stream: %s", self.collection.count(), self.col_stream.count())
+
         except Exception as e:
-            logger.critical(f"⚠️ VectorStore Initialization Failed: {e}")
-            logger.warning("🚀 Nia will start in [Memory Offline Mode]. Conversation is possible, but no memory will be retained.")
+            # 初期化失敗時も“オフライン”で継続
+            logger.exception("VectorStore init failed; VectorStore is offline: %s", e)
             self.is_active = False
+            self.client = None
             self.collection = None
             self.col_stream = None
-            self.embedding_func = None
             self.collections = {}
+            self._initialized = True
+            return
 
     def _now_iso(self) -> str:
         """必ずタイムゾーン付きISO8601を返す"""
@@ -94,7 +107,7 @@ class VectorStore:
 
         # 初回はwarning、それ以降は一定間隔でwarning（それ以外はdebug）
         if not self._inactive_warned_once:
-            logger.warning("VectorStore is active. Skipping operation.")
+            logger.warning("VectorStore is inactive. Skipping operation.")
             self._inactive_warned_once = True
             self._inactive_last_log_ts = now
         else:
@@ -149,11 +162,86 @@ class VectorStore:
                 ids=[memory_id]
             )
             tag = f"[{collection_type.upper()}]"
-            logger.info(f"🧠 {tag} Memory Saved: [{text[:20]}...] (ID: {memory_id})")
+            logger.info(f"{tag} Memory Saved: [{text[:20]}...] (ID: {memory_id})")
             return memory_id
         except Exception as e:
             logger.error(f"❌ Failed to save memory: {e}")
             return None
+
+    def upsert_long_term(
+        self,
+        capture_id: str,
+        raw_text: str,
+        metadata: Optional[Dict] = None,
+        collection_type: str = "episodic",
+        embedding: Optional[List[float]] = None,
+    ) -> bool:
+        """
+        長期記憶の upsert を VectorStore 経由で統一する。
+        同じ client / collection / embedding_function を必ず使う。
+
+        embedding が渡された場合はそれを直接使い、ChromaDB 側での
+        再エンコードをスキップする。None の場合は従来通り documents から
+        ChromaDB が自動エンコードする。
+        """
+        if not capture_id or not raw_text:
+            return False
+
+        target_collection = self._get_collection(collection_type)
+        if target_collection is None:
+            return False
+
+        meta = (metadata or {}).copy()
+
+        defaults = {
+            "timestamp": self._now_iso(),
+            "surprise": 0.0,
+            "confidence": 1.0,
+            "source": "conversation",
+            "cluster_hint": "daily_log",
+        }
+        for key, val in defaults.items():
+            if key not in meta:
+                meta[key] = val
+
+        try:
+            if embedding is not None:
+                target_collection.upsert(
+                    embeddings=[embedding],
+                    metadatas=[meta],
+                    ids=[capture_id],
+                )
+            else:
+                target_collection.upsert(
+                    documents=[raw_text],
+                    metadatas=[meta],
+                    ids=[capture_id],
+                )
+
+            logger.info("[VEC] collection=%s count=%s", target_collection.name, target_collection.count())
+            # Diagnostic peek (filter out None values; ChromaDB rejects them)
+            where_parts = {k: v for k, v in {
+                "thread_id": meta.get("thread_id"),
+                "stage": meta.get("stage"),
+            }.items() if v is not None}
+            if len(where_parts) > 1:
+                where = {"$and": [{k: v} for k, v in where_parts.items()]}
+            elif where_parts:
+                where = where_parts
+            else:
+                where = None
+            if where:
+                logger.info("[VEC] peek where=%s", where)
+                peek = target_collection.get(where=where, limit=3, include=["metadatas"])
+                logger.info(
+                    "[VEC] peek_n=%s meta0=%s",
+                    len(peek.get("ids") or []),
+                    (peek.get("metadatas") or [None])[0],
+                )
+            return True
+        except Exception:
+            logger.exception("[VECTOR_UPSERT] upsert failed")
+            return False
 
     def search_memory(
         self,
@@ -174,16 +262,55 @@ class VectorStore:
             return []
 
         try:
-            # count() は呼ばず、queryでダメなら例外を握る
             results = target_collection.query(
                 query_texts=[query_text],
                 n_results=n_results
             )
             return self._format_and_sanitize(results, include_distance=include_distance)
-
         except Exception as e:
             logger.error(f"❌ Search failed: {e}")
             return []
+
+    def delete_memories_containing(self, text_fragment: str, collection_type: str = "episodic") -> int:
+        """全文検索で一致するドキュメントを削除する（小規模想定）"""
+        if not text_fragment:
+            return 0
+
+        target_collection = self._get_collection(collection_type)
+        if target_collection is None:
+            return 0
+
+        try:
+            all_docs = target_collection.get(include=["documents"]) or {}
+            documents = all_docs.get("documents") or []
+            ids = all_docs.get("ids") or []
+
+            delete_ids = [doc_id for doc_id, doc in zip(ids, documents) if doc and text_fragment in doc]
+            if not delete_ids:
+                return 0
+
+            target_collection.delete(ids=delete_ids)
+            logger.info("VectorStore deleted %d items (fragment=%s)", len(delete_ids), text_fragment)
+            return len(delete_ids)
+        except Exception as e:
+            logger.error("❌ VectorStore delete failed: %s", e)
+            return 0
+
+    def delete_by_ids(self, ids: List[str], collection_type: str = "episodic") -> int:
+        if not ids:
+            return 0
+
+        target_collection = self._get_collection(collection_type)
+        if target_collection is None:
+            return 0
+
+        try:
+            target_collection.delete(ids=ids)
+            logger.info("VectorStore deleted %d items (ids)", len(ids))
+            return len(ids)
+        except Exception as e:
+            logger.error("❌ VectorStore delete by ids failed: %s", e)
+            return 0
 
     def _format_and_sanitize(self, chroma_results: Dict, include_distance: bool = False) -> List[Dict]:
         """

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uloop execute-dynamic-code --code ':*)",
+      "Bash(npm list:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_monitor_stagnation.py tests/test_closer.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_meeting_client.py::TestMeet::test_companion_mode_multi_turn -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_meeting_client.py::TestMeet::test_companion_mode_multi_turn -v -s)",
+      "Bash(uloop --version)",
+      "Read(//d//**)",
+      "Bash(uloop status:*)",
+      "Bash(uloop execute-dynamic-code --code \":*)",
+      "Bash(uloop execute-menu-item:*)",
+      "Bash(uloop control-play-mode:*)",
+      "Bash(.venv/Scripts/python.exe:*)"
+    ]
+  }
+}

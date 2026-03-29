@@ -1,12 +1,12 @@
 import socket
-import os
 import sys
+import subprocess
 
 # Windows環境での文字コードエラー対策
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
 
-def get_local_ip():
+def get_local_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         # 実際に接続はしないが、ルートを確認してIPを特定する
@@ -18,13 +18,14 @@ def get_local_ip():
         s.close()
     return IP
 
-def show_qr():
+def show_qr() -> None:
     ip = get_local_ip()
-    port = "8000"
+    port = 8000
     url = f"http://{ip}:{port}"
     
     # コンソールクリア
-    os.system('cls' if os.name == 'nt' else 'clear')
+    clear_cmd = "cls" if sys.platform == "win32" else "clear"
+    subprocess.run(clear_cmd, shell=True, check=False)
     
     print("\n" + "="*50)
     print(f" 📱 Scan to open Nia on Mobile")

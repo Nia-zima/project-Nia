@@ -1,31 +1,29 @@
-import sys
 import os
-from langchain_core.messages import SystemMessage
+import sys
+from pathlib import Path
+import pytest
 
 # Add path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
-from backend.agent import run_agent
-from backend.config import AI_PERSONALITY
+if not os.getenv("RUN_AGENT_TESTS"):
+    pytest.skip("Set RUN_AGENT_TESTS=1 to run agent integration tests.", allow_module_level=True)
 
-def test():
-    print("Testing Agent Connection and Logic...")
-    
-    # Init history
-    history = [SystemMessage(content=AI_PERSONALITY)]
-    
-    # Test query
-    query = "10 + 20 の計算をして。"
-    print(f"Query: {query}")
-    
-    try:
-        response, new_history = run_agent(query, history)
-        print(f"Response: {response}")
-        print("Success!")
-    except Exception as e:
-        print(f"Failed with error: {e}")
-        import traceback
-        traceback.print_exc()
+from backend.core.agent import run_agent_non_stream
 
-if __name__ == "__main__":
-    test()
+
+@pytest.mark.agent
+@pytest.mark.asyncio
+async def test_agent_basic_math():
+    response = await run_agent_non_stream(
+        "10 + 20 の計算をして。",
+        thread_id="test_run_thread",
+        voice_id="14",
+        image_data=None,
+        mode="normal",
+        ports=None,
+    )
+    assert isinstance(response, dict)
+    assert "content" in response

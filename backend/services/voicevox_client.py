@@ -1,7 +1,8 @@
 
 import requests
-import json
 from typing import List, Dict, Optional
+
+from backend.core.config import settings
 from backend.core.logger import logger
 
 class VoicevoxClient:
@@ -10,6 +11,7 @@ class VoicevoxClient:
 
     def generate_audio(self, text: str, speaker_id: int) -> Optional[bytes]:
         if not text: return None
+        logger.info(f"[VOICEVOX] generate_audio speaker={speaker_id} text_len={len(text)} text='{text[:50]}...'")
         try:
             # 1. Audio Query
             query_res = requests.post(
@@ -42,19 +44,18 @@ class VoicevoxClient:
         Generate audio and save to static/audio/{thread_id}/{uuid}.wav.
         Returns the URL path (e.g., /static/audio/default/abc123.wav) or None on failure.
         """
-        import os
         import uuid as uuid_mod
-        
+
         audio_bytes = self.generate_audio(text, speaker_id)
         if not audio_bytes:
             return None
         
         # Determine save path
-        base_dir = os.path.join(os.path.dirname(__file__), "..", "static", "audio", thread_id)
-        os.makedirs(base_dir, exist_ok=True)
+        base_dir = settings.STATIC_DIR / "audio" / thread_id
+        base_dir.mkdir(parents=True, exist_ok=True)
         
         filename = f"{uuid_mod.uuid4().hex}.wav"
-        filepath = os.path.join(base_dir, filename)
+        filepath = base_dir / filename
         
         try:
             with open(filepath, "wb") as f:

@@ -1,25 +1,32 @@
-import os
 import json
 from datetime import datetime
 
-# パス設定
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LOG_DIR = os.path.join(PROJECT_ROOT, "logs", "inner")
-os.makedirs(LOG_DIR, exist_ok=True)
+from backend.core.config import settings
 
-LOG_FILE = os.path.join(LOG_DIR, "monologue.jsonl")
+# パス設定
+LOG_DIR = settings.LOG_DIR / "inner"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_FILE = LOG_DIR / "monologue.jsonl"
 
 def log_inner_thought(thought: dict):
     """
     Phase 8-C: 内部独白の記録
     誰にも見せない心のログ。
     """
+    inner_reflection = thought.get("inner_reflection")
+    max_chars = int(getattr(settings, "INNER_MONOLOGUE_MAX_CHARS", 0) or 0)
+    keep_full = bool(getattr(settings, "INNER_MONOLOGUE_FULL", False))
+    if isinstance(inner_reflection, str) and max_chars > 0 and not keep_full:
+        if len(inner_reflection) > max_chars:
+            inner_reflection = inner_reflection[: max_chars - 1] + "…"
+
     entry = {
         "timestamp": datetime.now().isoformat(),
         "intent": thought.get("intent"),
         "interpretation": thought.get("interpretation"),
-        "inner_reflection": thought.get("inner_reflection"), # ここが核心
-        "express": thought.get("express"),
+        "inner_reflection": inner_reflection, # ここが核心
+        "allow_public_narration": thought.get("allow_public_narration", thought.get("express")),
         "confidence": thought.get("confidence")
     }
 

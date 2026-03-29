@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useState } from 'react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 import { Loader2, Calendar, ChevronDown, ChevronRight, Clock } from 'lucide-react';
 
 interface MemoryItem {
@@ -32,10 +32,8 @@ export default function MemoryTimeline() {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const res = await fetch(`${API_URL}/stats/memory_timeline`);
-                if (res.ok) {
-                    setData(await res.json());
-                }
+                const data = await apiClient.fetchMemoryTimeline() as unknown as TimelineData;
+                setData(data);
             } catch (e) {
                 console.error('Failed to fetch timeline:', e);
             }

@@ -1,8 +1,265 @@
 import re
-from typing import Optional
+
+# --- Stream Sanitizer (Robust Rolling Buffer) ---
+
+# ── LLM Special Token Stripping ──────────────────────────────────
+# Qwen/ChatML 系の制御トークン: <|start|>, <|end|>, <|im_start|>, <|message|> 等
+# トークン直後に続く制御語 (final, system, commentary 等) も一緒にキャプチャ
+LLM_SPECIAL_TOKEN_RE = re.compile(
+    r"<\|[^|]*\|>"
+    r"(?:\s*(?:final|system|user|assistant|end|im_start|im_end"
+    r"|commentary|developer|message|tool|done)\b)?",
+    re.IGNORECASE,
+)
+
+# ChatML セクション構造: <|start|>final<|message|> の位置を検出
+_CHATML_FINAL_SECTION_RE = re.compile(
+    r"<\|start\|>\s*final\s*(?:<\|message\|>)?\s*",
+    re.IGNORECASE,
+)
+_CHATML_NEXT_SECTION_RE = re.compile(r"<\|start\|>", re.IGNORECASE)
+
+
+def _extract_final_section(text: str) -> str | None:
+    """ChatML セクション構造が検出された場合、final セクションの内容のみを抽出する。
+
+    Returns None if no final section marker is found.
+    """
+    m = _CHATML_FINAL_SECTION_RE.search(text)
+    if not m:
+        return None
+    after_final = text[m.end():]
+    # 次のセクション開始があればそこで切る
+    next_section = _CHATML_NEXT_SECTION_RE.search(after_final)
+    if next_section:
+        return after_final[:next_section.start()].strip()
+    return after_final.strip()
+
+
+def strip_llm_special_tokens(text: str) -> str:
+    """Remove LLM special tokens like <|start|>, <|message|>, etc.
+
+    If ChatML-style sections (commentary/developer/final) are detected,
+    extract only the 'final' section content and discard internal sections.
+    """
+    if "<|" not in text:
+        return text
+    # まず final セクション抽出を試みる
+    final_content = _extract_final_section(text)
+    if final_content is not None:
+        # final セクション内の残留トークンも除去
+        return LLM_SPECIAL_TOKEN_RE.sub("", final_content).strip()
+    # セクション構造なし → 全トークンをフラット除去
+    return LLM_SPECIAL_TOKEN_RE.sub("", text).strip()
+
+
+# ── Shared Tag Constants ──────────────────────────────────────────
+STATE_TAGS = [
+    "CONSENT", "DISSONANCE", "PONDERING",
+    "HAPPY", "SAD", "SURPRISED", "ANGRY", "RELAXED", "SHY", "SIGH", "NEUTRAL",
+]
+# 半角ブラケット用（extract_metadata の findall 等で使用）
+TAG_PATTERN = re.compile(
+    r"\[(%s)\]" % "|".join(map(re.escape, STATE_TAGS)),
+    re.IGNORECASE,
+)
+# 全角ブラケット・前後スペース対応（finalize_output の本文浄化用）
+STATE_TAG_RE = re.compile(
+    r"[\[\［]\s*(?:%s)\s*[\]\］]" % "|".join(map(re.escape, STATE_TAGS)),
+    re.IGNORECASE,
+)
+
+# ── Gesture Tag Constants ────────────────────────────────────────
+GESTURE_TAGS = [
+    "NOD", "WAVE", "SHRUG", "TILT_HEAD", "POINT", "CLAP", "BOW", "FIST_PUMP",
+]
+# [GESTURE:NOD] / [GESTURE: NOD] / ［GESTURE：NOD］ 形式を抽出（既知タグのみ）
+GESTURE_TAG_PATTERN = re.compile(
+    r"[\[\［]\s*GESTURE\s*(?:[:：]|\s+)\s*(%s)\s*[\]\］]" % "|".join(map(re.escape, GESTURE_TAGS)),
+    re.IGNORECASE,
+)
+# Catch-all: 任意の [GESTURE:xxx] を除去（サニタイズ用、未知タグも含む）
+GESTURE_TAG_ANY_RE = re.compile(
+    r"[\[\［]\s*GESTURE\s*(?:[:：]|\s+)\s*[A-Za-z_][A-Za-z0-9_]*\s*[\]\］]",
+    re.IGNORECASE,
+)
+
+TOOL_BEGIN = re.compile(r"\[(SEARCH_MEMORY|SEARCH|TOOL_CALL)\]", re.IGNORECASE)
+TOOL_END   = re.compile(r"\[(END_SEARCH_MEMORY|END_SEARCH|END_TOOL_CALL)\]", re.IGNORECASE)
+
+# 「ツールJSON断片」の最小検出（誤爆を避け、search_memory だけ狙う）
+TOOL_JSON_HINT = re.compile(r'"(?:name|arguments)"\s*:\s*|search_memory', re.IGNORECASE)
+
+class StreamSanitizer:
+    """
+    RAWバッファとマッピングを使用した堅牢なストリームクリーナー。
+    - chunk跨ぎのタグ分割 ([POND... + ERING]) を処理
+    - 状態保持によるツールブロック除去 ([SEARCH]...[END_SEARCH] または [SEARCH]...EOF)
+    - ツールブロック直前の有効なテキスト（例: 'working'）の保護
+    """
+
+    # 日本語向けの“切り位置”優先順（長い方を先に）
+    _BOUNDARIES = ["\n\n", "\n", "。", "！", "？", "!", "?", "、"]
+
+    def __init__(
+        self,
+        keep_chars: int = 80,
+        max_buf: int = 16384,
+        min_emit_chars: int = 20,
+        boundary_window: int = 120,
+    ):
+        self.keep_chars = keep_chars
+        self.max_buf = max_buf
+        self.min_emit_chars = min_emit_chars
+        self.boundary_window = boundary_window
+        self.raw_buf = ""
+
+    def _get_clean_and_mapping(self, s: str):
+        """Finds skip ranges (tags, tool blocks) and returns cleaned text with raw index mapping."""
+        skip_ranges = []
+
+        # 0. LLM special tokens (<|start|>final<|message|> etc.) + trailing control words
+        for m in LLM_SPECIAL_TOKEN_RE.finditer(s):
+            skip_ranges.append((m.start(), m.end()))
+
+        # 1. Standard Tags (PONDERING etc)
+        for m in TAG_PATTERN.finditer(s):
+            skip_ranges.append((m.start(), m.end()))
+        # 1b. Gesture Tags — catch-all ([GESTURE:任意] を全て除去)
+        for m in GESTURE_TAG_ANY_RE.finditer(s):
+            skip_ranges.append((m.start(), m.end()))
+            
+        # 2. Stateful Tool Blocks (Handles [SEARCH_MEMORY]... to [END_SEARCH_MEMORY] or EOF)
+        i = 0
+        while i < len(s):
+            m_begin = TOOL_BEGIN.search(s, i)
+            if not m_begin:
+                break
+            m_end = TOOL_END.search(s, m_begin.end())
+            if m_end:
+                skip_ranges.append((m_begin.start(), m_end.end()))
+                i = m_end.end()
+            else:
+                # Open-ended tool block (leaks until the end of current buffer)
+                skip_ranges.append((m_begin.start(), len(s)))
+                break
+        
+        # 3. Specific Tool JSON Hint (e.g. {"name": "search_memory"})
+        # Only triggered if it looks like a JSON line start
+        for m in re.finditer(r'^\s*\{\s*["\'][^"\']+["\']\s*[:：]', s, re.MULTILINE):
+            line_end = s.find("\n", m.start())
+            if line_end == -1: line_end = len(s)
+            line_content = s[m.start():line_end]
+            if TOOL_JSON_HINT.search(line_content):
+                skip_ranges.append((m.start(), line_end + 1 if line_end < len(s) else line_end))
+
+        # Merge overlapping skip ranges
+        skip_ranges.sort()
+        merged = []
+        for start, end in skip_ranges:
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+
+        # Build clean string and index mapping
+        clean_parts = []
+        mapping = [0]
+        curr_raw = 0
+        for start, end in merged:
+            if curr_raw < start:
+                chunk = s[curr_raw:start]
+                clean_parts.append(chunk)
+                for _ in range(len(chunk)):
+                    curr_raw += 1
+                    mapping.append(curr_raw)
+            curr_raw = end # skip
+        
+        if curr_raw < len(s):
+            chunk = s[curr_raw:]
+            clean_parts.append(chunk)
+            for _ in range(len(chunk)):
+                curr_raw += 1
+                mapping.append(curr_raw)
+                
+        return "".join(clean_parts), mapping
+
+    def _choose_emit_len(self, clean_all: str) -> int:
+        """
+        keep_chars を除いた範囲の中で、できるだけ自然な区切りまでを送る。
+        """
+        base = len(clean_all) - self.keep_chars
+        if base <= 0:
+            return 0
+        if base < self.min_emit_chars:
+            return 0
+
+        # baseの直前あたり（boundary_window内）で区切りを探す
+        search_from = max(0, base - self.boundary_window)
+        head = clean_all[:base]
+
+        best = -1
+        for b in self._BOUNDARIES:
+            pos = head.rfind(b, search_from)
+            if pos != -1:
+                cut = pos + len(b)  # 区切り文字も含める
+                # もっとも後ろの区切りを優先
+                if cut > best:
+                    best = cut
+
+        # 見つかったが短すぎる断片になるなら採用しない
+        if best != -1 and best >= self.min_emit_chars:
+            return best
+
+        # 区切りが無ければ base をそのまま
+        return base
+
+    def push(self, chunk: str = "") -> str:
+        """
+        新しいchunkを投入し、安全に確定したテキストを返す。
+        chunk="" の場合は「drain/tick」として、現バッファから吐けるものがあれば吐く。
+        """
+        if chunk is None:
+            return ""
+
+        if chunk:
+            self.raw_buf += chunk
+            # OOM防止
+            if len(self.raw_buf) > self.max_buf:
+                self.raw_buf = self.raw_buf[-self.max_buf:]
+
+        if not self.raw_buf:
+            return ""
+
+        clean_all, mapping = self._get_clean_and_mapping(self.raw_buf)
+
+        emit_len = self._choose_emit_len(clean_all)
+        if emit_len <= 0:
+            return ""
+
+        emit_text = clean_all[:emit_len]
+
+        # 送出した「浄化後テキスト」に対応する「生テキスト」のインデックス
+        raw_cut_idx = mapping[emit_len]
+        self.raw_buf = self.raw_buf[raw_cut_idx:]
+        return emit_text
+
+    def flush(self) -> str:
+        """
+        バッファに残っている全テキストを浄化して返し、バッファを空にする。
+        """
+        if not self.raw_buf:
+            return ""
+        clean_all, _ = self._get_clean_and_mapping(self.raw_buf)
+        self.raw_buf = ""
+        return clean_all
+
+# Backward compatibility aliases
+RollingStreamCleaner = StreamSanitizer
+
 
 # 沈黙時の既定文
-SILENCE_DEFAULT = "……今は、静かにここにいます。"
+SILENCE_DEFAULT = "……"
 
 # ト書き・描写の削除パターン
 STAGE_DIRECTIONS = [
@@ -16,17 +273,33 @@ TAG_LINE_RE = re.compile(r'^\[\[[A-Z0-9_]+\]\]\s*\{.*\}\s*$', re.IGNORECASE)
 SILENCE_TAG_RE = re.compile(r'^\s*\[SILENCE\]\s*$', re.IGNORECASE)
 
 # 内部状態やLLMメタ情報のハードブロック（本気で漏洩している場合のみ沈黙へ）
-HARD_BLOCK = [
-    # 思考・内部状態の露出（確定系）
+# 定数定義: JSON検知パターン（誤爆判定用に分離）
+JSON_SHAPE_PAT = r"""\{\s*["'][^"']+["']\s*[:：]"""
+
+# 本当に止めたいもの（少数精鋭）
+CRITICAL_BLOCK = [
+    # 内部プロンプト/会話構造が露出している系（強いシグナル）
+    r'["\']role["\']\s*[:：]\s*["\'](system|developer|assistant|user|tool)["\']',
+    r'["\']messages["\']\s*[:：]\s*\[',          # messages 配列
+    r'["\']system(_prompt)?["\']\s*[:：]',       # system / system_prompt
+    r'["\']developer(_prompt)?["\']\s*[:：]',    # developer / developer_prompt
+    r'["\']tool_calls["\']\s*[:：]',             # tool_calls
+    r'["\']function_call["\']\s*[:：]',          # function_call
+    # JSON構造 + 内部キーの組み合わせ（確度が高いのでブロック）
+    r"""\{\s*["'][^"']+["']\s*[:：][\s\S]{0,200}["'](summary|details|category|importance|confidence|surprise|tags|reason_tag)["']\s*[:：]""",
+]
+
+# 誤爆しやすいので “検知だけ” に回す
+WARN_ONLY = [
+    # あなたの「思考露出」系は言い回しが広すぎるので warn に落とすのが無難
     r"私は考えています",
     r"判断しました",
     r"記憶の断片",
     r"頭の中でざわめ",
     r"内部ログ",
-    # --- JSON/辞書形式の漏洩ブロック（確度を上げる） ---
-    # { "key": ... } / { 'key': ... } の形だけをハードブロック
-    r"""\{\s*["'][^"']+["']\s*[:：]""",
-    # “内部タグ由来”のキーが本文に出たらほぼ漏洩確定
+    # JSON形（単体は危険じゃない）
+    JSON_SHAPE_PAT,
+    # 内部タグ由来キー（単体だと普通の文章でも出るので warn）
     r'["\']summary["\']\s*[:：]',
     r'["\']details["\']\s*[:：]',
     r'["\']category["\']\s*[:：]',
@@ -37,25 +310,142 @@ HARD_BLOCK = [
     r'["\']reason_tag["\']\s*[:：]',
 ]
 
-# 記憶の明示的な言及を柔らかい表現に置換（伴走レイヤーへの誘導）
-SOFT_REWRITE = [
-    # 基本の言い換え
+# 技術・システム用語の自然化（安全な置換）
+SOFT_REWRITE_SAFE = [
+    (r"プロンプト", "内側の約束"),
+    (r"レイヤー", "層"),
+    # ツール・検索の軟化（メタ発言の自然化）
+    (r"検索(します|してみる)", "思い出してみるね"),
+    (r"検索を実行(します|した|中)", "少し考えてみるね"),
+    (r"ツールを?(使い|使)います", "やってみるね"),
+    (r"(関数|function)\s*を?(呼|使|実行)", "……"),
+    (r"データを?(取得|参照)します", "見てみるね"),
+]
+
+# 人格・記憶に関わる表現（ニア自身の揺らぎとして保護するため、通常は適用しない）
+SOFT_REWRITE_PERSONALITY = [
     (r"覚えています", "そうですね"),
     (r"以前も言いました", "今の話に沿うと"),
     (r"過去にも言いましたね", "今の文脈だと"),
     (r"覚えている通り", "そうですね"),
-    # 開発語彙の自然化
-    (r"プロンプト", "内側の約束"),
-    (r"レイヤー", "層"),
-    # 内部っぽい独り言の消去・軟化
     (r"心の中で", ""),
     (r"頭の中で", ""),
     (r"記憶がざわめ(く|きます)?", ""),
     (r"内部(で|に)は", ""),
-    # 思考の言語化の言い換え
     (r"私は考えています", "……"),
     (r"判断しました", "そう感じる"),
 ]
+
+# --- Style Guard: Suppress instant conclusions / forced guidance ---
+DECISIVE_PATTERNS = [
+    r"答えは",
+    r"結論は",
+    r"正解は",
+    r"〜に決まってる",
+    r"断言(できる|します)",
+]
+
+GUIDANCE_PATTERNS = [
+    r"まず.+?(しよう|してください|するのがいい)",
+    r"次に.+?(しよう|してください|するのがいい)",
+    r"こう考えるべき",
+    r"これが正解",
+]
+
+FORCED_QUESTION_PATTERNS = [
+    r"何かお(手伝い|話したいこと|困りのこと)",
+    r"どんなことでも構いません",
+    r"お気軽に",
+    r"どうしましたか",
+    r"どうされましたか",
+]
+
+# Internal planner line patterns (leak guard)
+INTERNAL_PLAN_LINE_RE = re.compile(
+    r"^\s*[-•]\s*(Acknowledge|Briefly|Explain|Ask|Confirm|Summarize|Rephrase|Provide|Offer|Suggest|State|Clarify)\b",
+    re.IGNORECASE,
+)
+PLAN_VERB_RE = re.compile(
+    r"\b(acknowledge|briefly|explain|ask|confirm|summarize|rephrase|provide|offer|suggest|state|clarify)\b",
+    re.IGNORECASE,
+)
+
+# LLM第三者メタ推論パターン（多層防御: helpers.py と同一パターン）
+# ユーザーについての推論・応答計画をプレーンテキストで出力するケースを検出。
+# 英語比率ではなく第三者視点の推論パターンのみ対象 → 正当な英語応答を保護。
+_META_REASONING_RES = [
+    re.compile(r"^The user\b", re.IGNORECASE),
+    re.compile(r"^User (wants|says|is|asks|said|needs)\b", re.IGNORECASE),
+    re.compile(r"^They (want|are asking|said|need|seem|mention|'re asking)", re.IGNORECASE),
+    re.compile(r"^The (message|input|query|request|question)\b", re.IGNORECASE),
+    re.compile(r"^Should (I|be|we)\b", re.IGNORECASE),
+    re.compile(r"^Let'?s (do|say|respond|go with|keep|use|try)\b", re.IGNORECASE),
+    re.compile(r"^I (should|need to|will|'ll) (respond|reply|say|answer|keep|give)\b", re.IGNORECASE),
+    re.compile(r"^(Provide|Keep|Give|Use|Try|Make|Write|Generate)\s+(a |it |the |simple|short|brief)", re.IGNORECASE),
+    re.compile(r"^Ok(ay)?[.\s,!]", re.IGNORECASE),
+    re.compile(r"^(So|Now|Then)\s+I('ll| will| should| need)\b", re.IGNORECASE),
+    re.compile(r"^(Response|Answer|Reply)\s*:", re.IGNORECASE),
+    re.compile(r"^(This|That) (is|seems like) (a |an )?(greeting|question|request|casual)\b", re.IGNORECASE),
+]
+
+def _ascii_ratio(s: str) -> float:
+    if not s:
+        return 0.0
+    total = 0
+    ascii_count = 0
+    for ch in s:
+        if ch.isspace():
+            continue
+        total += 1
+        if ord(ch) < 128:
+            ascii_count += 1
+    return (ascii_count / total) if total else 0.0
+
+def _looks_like_plan_line(line: str) -> bool:
+    if not line:
+        return False
+    if INTERNAL_PLAN_LINE_RE.match(line):
+        return True
+    # 第三者メタ推論パターン検出（多層防御）
+    s = line.strip()
+    if s and any(p.match(s) for p in _META_REASONING_RES):
+        return True
+    if PLAN_VERB_RE.search(line):
+        # If it's mostly ASCII and not Japanese, it's likely a leaked plan
+        if _ascii_ratio(line) >= 0.7 and not re.search(r"[ぁ-んァ-ン一-龥]", line):
+            return True
+    return False
+
+SOFTEN_DECISIVE_RULES = [
+    (r"答えは(.+?)です", r"今の文脈だと\1かもしれません"),
+    (r"結論は(.+?)です", r"現時点では\1とも言えます"),
+    (r"正解は(.+?)です", r"ひとつの見方としては\1かもしれません"),
+    (r"すべき", "する考え方もあります"),
+]
+
+def _soften_decisive_guidance(text: str) -> str:
+    if not text:
+        return text
+
+    # Drop forced-question sentences
+    sentences = re.split(r"(?<=[。！？\n])", text)
+    kept = []
+    for s in sentences:
+        if any(re.search(p, s) for p in FORCED_QUESTION_PATTERNS):
+            continue
+        kept.append(s)
+    t = "".join(kept).strip()
+
+    # Soft replacements
+    for pat, repl in SOFTEN_DECISIVE_RULES:
+        t = re.sub(pat, repl, t)
+
+    # If still decisive/guiding, append a hedge
+    if any(re.search(p, t) for p in (DECISIVE_PATTERNS + GUIDANCE_PATTERNS)):
+        if not re.search(r"(断定|言い切)|(?:かもしれません|とは限らない)", t):
+            t = t + "\n\n断定は避けておくね。"
+
+    return t
 
 def finalize_output(text: str, *, force_silence: bool = False) -> str:
     """
@@ -65,7 +455,37 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
     if not text:
         return SILENCE_DEFAULT
 
-    # --- 1) 行分割とタグの退避 ---
+    # 0) LLM特殊トークン除去 (<|start|>, <|message|> 等)
+    text = strip_llm_special_tokens(text)
+
+    # 1) 状態タグ除去（最優先・最強力）
+    #    文中のどこにあっても確実に消す
+    text = STATE_TAG_RE.sub("", text)
+    text = GESTURE_TAG_ANY_RE.sub("", text)
+
+    # 2) [SEARCH_MEMORY]... 等のtool block除去
+    text = re.sub(
+        r"\[SEARCH_[A-Z0-9_]+\][\s\S]*?\[END_SEARCH_[A-Z0-9_]+\]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    
+    # 3) 行頭整理（タグ除去後の空行削除）
+    text = re.sub(r"^\s*\n+", "", text)      # 冒頭の空行を削る
+    text = re.sub(r"\n{3,}", "\n\n", text)   # 空行連発を整える
+
+    # 4) 特定のツール定義JSON (search_memory等) 除去
+    text = re.sub(
+        r'\{\s*"name"\s*:\s*"(search_memory|internal_op|blob_op)"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}\s*',
+        "",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+    # ── Phase 2: Line-level filtering ───────────────────────────────
+
+    # 5) 行分割とシステムタグの退避
     lines = text.splitlines()
     speech_lines = []
     system_tags = []
@@ -79,13 +499,13 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
 
     speech_body = "\n".join(speech_lines).strip()
 
-    # --- 2) 沈黙（SILENCE）判定：最優先 ---
+    # 6) 沈黙（SILENCE）判定
     if force_silence or SILENCE_TAG_RE.fullmatch(speech_body) or "[SILENCE]" in speech_body:
         return SILENCE_DEFAULT
 
     t = speech_body
 
-    # --- 3) 技術タグの除去：閉じタグがある時だけブロック除去 ---
+    # 7) 技術XMLタグの除去
     t = re.sub(
         r"<(INTERNAL_LOG|SYSTEM_INSTRUCTION)>\s*.*?\s*</\1>",
         "",
@@ -94,50 +514,79 @@ def finalize_output(text: str, *, force_silence: bool = False) -> str:
     )
     t = re.sub(r"</?(INTERNAL_LOG|SYSTEM_INSTRUCTION)>", "", t, flags=re.IGNORECASE)
 
-    # --- 4) 接頭辞・レイヤータグの除去（行頭のみ） ---
+    # 8) 接頭辞・レイヤータグ・ログ行の除去
     t = re.sub(r"^\s*\[?(LAYER\s*3|SPEECH|RESPONSE|ニア|応答)[^\]]*\]?[:：]?\s*", "", t, flags=re.IGNORECASE)
 
-    # フィルタ後の行を精査（ログ形式の行を排除）
-    final_speech_lines = []
-    # 完全に排除したいキーワード（大文字小文字無視）
     LOG_KEYWORDS = [r"Memory Pending", r"INFO", r"ERROR", r"WARNING", r"DEBUG", r"VectorStore", r"telemetry"]
     log_pattern = re.compile(rf"({'|'.join(LOG_KEYWORDS)})", re.IGNORECASE)
 
+    final_speech_lines = []
     for line in t.splitlines():
-        # 日付形式 (2026-01-11) や ログキーワードを含む行を排除
+        if _looks_like_plan_line(line):
+            continue
         if re.search(r'^\d{4}-\d{2}-\d{2}', line) or log_pattern.search(line):
             continue
         final_speech_lines.append(line)
     t = "\n".join(final_speech_lines).strip()
 
-    # --- 5) HARD_BLOCK（行単位でチェックして誤爆防止） ---
+    # 9) CRITICAL行ブロック（該当行のみ除外）
     t_lines = t.splitlines()
-    for pat in HARD_BLOCK:
-        if any(re.search(pat, line) for line in t_lines):
-            t = "" # 本文全体を無効化
-            break
+    final_t_lines = [line for line in t_lines
+                     if not any(re.search(pat, line, re.IGNORECASE) for pat in CRITICAL_BLOCK)]
+    t = "\n".join(final_t_lines).strip()
 
-    # --- 6) ト書き削除 / ソフト置換 ---
+    # ── Phase 3: Text-level cleanup ──────────────────────────────
+
+    # 10) 残留状態タグの完全除去 + 空白正規化
+    t = TAG_PATTERN.sub("", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+
+    # 11) ト書き削除 + ソフト置換
     for pat in STAGE_DIRECTIONS:
         t = re.sub(pat, "", t, flags=re.MULTILINE)
-    for pat, repl in SOFT_REWRITE:
+    for pat, repl in SOFT_REWRITE_SAFE:
         t = re.sub(pat, repl, t)
 
     clean_speech = t.strip()
 
-    # --- 7) 最後のゴミ掃除（孤立したカッコの除去） ---
-    # アドバイザー推奨：独立した ] や [[ を消す
+    # 12) ツール言及文の除去
+    TOOL_SENTENCE_RE = re.compile(
+        r"(検索(を実行|します|中)|ツールを?(呼|起動|使)|関数を?(呼|起動|使)|(tool|search|function|query)\s*(call|exec|run|running))",
+        re.IGNORECASE
+    )
+    sentences = re.split(r"(?<=[。！？\n])", clean_speech)
+    clean_speech = "".join(s for s in sentences if not TOOL_SENTENCE_RE.search(s)).strip()
+
+    # 13) スタイルガード（断定抑制）
+    clean_speech = _soften_decisive_guidance(clean_speech)
+
+    # 14) 孤立ブラケット除去 + 最終沈黙判定
     clean_speech = re.sub(r"^\s*[\[\]]+\s*$", "", clean_speech, flags=re.MULTILINE).strip()
     clean_speech = re.sub(r"\[\[[^\n]*$", "", clean_speech).strip()
 
-    # --- 8) 最終沈黙判定と救済 ---
     if (not clean_speech) or re.fullmatch(r"[\.\,。．、…・\s!！?？\-—～〜ー]*", clean_speech):
-        if system_tags:
-            return SILENCE_DEFAULT
-        else:
-            return SILENCE_DEFAULT
+        return SILENCE_DEFAULT
 
     return clean_speech
+
+
+def extract_metadata(text: str):
+    """
+    タグを抽出し、本文から完全に除去する。
+    - 全タグを大文字化して返す
+    - primary_tag は末尾に最も近いタグを採用
+    - gesture_tags: [GESTURE:NOD] 等のジェスチャータグも抽出
+    Returns: (cleaned_text, primary_tag, all_tags, gesture_tags)
+    """
+    if not text:
+        return "", "NONE", [], []
+
+    all_tags = [t.upper() for t in TAG_PATTERN.findall(text)]
+    gesture_tags = [t.upper() for t in GESTURE_TAG_PATTERN.findall(text)]
+    cleaned_text = TAG_PATTERN.sub("", text)
+    cleaned_text = GESTURE_TAG_ANY_RE.sub("", cleaned_text).replace("  ", " ").strip()
+    primary_tag = all_tags[-1] if all_tags else "NONE"
+    return cleaned_text, primary_tag, all_tags, gesture_tags
 
 
 # --- 高精度 greeting-only 判定 (Adviser's Advanced Version) ---
@@ -233,7 +682,39 @@ def is_greeting_only(ai_text: str, last_user_text: str = "") -> tuple:
         return True, "greet_plus_generic"
     
     # 残りがごく短い場合だけ追加で True（例: 「おはよ！」）
+    
     if len(tmp) <= 2:
         return True, "greet_only_short_tail"
     
     return False, "has_content"
+
+
+def detect_internal_leak(text: str) -> dict[str, list[str]]:
+    """
+    Check if the text contains any internal system leaks.
+    Separates results into 'critical' (must block) and 'warn' (logging only).
+    """
+    out = {"critical": [], "warn": []}
+    if not text:
+        return out
+    
+    # Check CRITICAL
+    for pat in CRITICAL_BLOCK:
+        if re.search(pat, text, re.IGNORECASE):
+            out["critical"].append(f"Matched CRITICAL: {pat}")
+
+    # Check WARN
+    for pat in WARN_ONLY:
+        if re.search(pat, text, re.IGNORECASE):
+            out["warn"].append(f"Matched WARN: {pat}")
+            
+    return out
+
+
+def is_critical_leak(leak: dict[str, list[str]]) -> bool:
+    """
+    Determine if the detected leaks are critical enough to block the stream/output.
+    """
+    if not leak:
+        return False
+    return bool(leak.get("critical"))

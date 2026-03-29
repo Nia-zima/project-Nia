@@ -1,37 +1,117 @@
 "use client";
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, Mic, Image as ImageIcon, StopCircle } from 'lucide-react';
-import { API_URL, ChatMessage, getStaticUrl } from '@/lib/api';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useRef, useEffect } from 'react';
+import { API_URL, apiClient, getStaticUrl, type ChatMessage } from '@/lib/apiClient';
+import { ChatMessages, ChatInput } from '@/components/chat';
+import { safeJsonParse } from '@/lib/types';
+import {
+    normalizeContent,
+    extractSpeech,
+    normalizeHistoryMessage,
+    isLikelyDuplicateAppend,
+    dedupeAdjacentDuplicateParagraphs,
+} from '@/components/chat/messageNormalization';
+import { useAudioPlayback } from '@/hooks/useAudioPlayback';
+import { useVoiceMode } from '@/hooks/useVoiceMode';
+import { useChatStore } from '@/lib/stores/chatStore';
+import { useAvatarStore } from '@/lib/stores/avatarStore';
 
 interface ChatInterfaceProps {
-    onStateChange: (isTalking: boolean, emotion: string) => void;
     agentMode: string;
 }
 
-export default function ChatInterface({ onStateChange, agentMode }: ChatInterfaceProps) {
-    const [messages, setMessages] = useState<ChatMessage[]>([]);
-    const [input, setInput] = useState("");
-    const [isLoading, setIsLoading] = useState(false);
-    const [threadId, setThreadId] = useState<string>("");
-    const [currentEmotion, setCurrentEmotion] = useState("neutral");
+export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
+    const TEST_MODE_STORAGE_KEY = "chat_test_mode";
+    const {
+        messages, setMessages, addMessage, updateMessageContent, upsertMessage, clearMessages,
+        input, setInput, appendInput,
+        isLoading, setIsLoading,
+        threadId, setThreadId,
+        currentEmotion, setCurrentEmotion,
+        connectionState, setConnectionState,
+        thinkingHint, setThinkingHint,
+        selectedImage, setSelectedImage,
+        isListening, setIsListening,
+    } = useChatStore();
 
-    // Vision State
-    const [selectedImage, setSelectedImage] = useState<string | null>(null);
-    const fileInputRef = useRef<HTMLInputElement>(null);
-
-    const AFFECT_REGEX = /\[(happy|sad|angry|relaxed|surprised|shy|sigh|neutral)\]/g;
-    const scrollRef = useRef<HTMLDivElement>(null);
-
-    // Audio Playback Queue
-    const audioQueueRef = useRef<string[]>([]);
-    const isPlayingRef = useRef(false);
-    const audioRef = useRef<HTMLAudioElement | null>(null);
+    // Refs to avoid stale closures in handleMessage callback
+    const currentEmotionRef = useRef(currentEmotion);
+    currentEmotionRef.current = currentEmotion;
+    const thinkingHintRef = useRef(thinkingHint);
+    thinkingHintRef.current = thinkingHint;
 
     // Stream Refs
     const aiMsgIdRef = useRef<string | null>(null);
     const aiTextRef = useRef<string>("");
     const isStreamingRef = useRef(false);
+    const isThinkingRef = useRef(false);
+    const lastEventAtRef = useRef<number>(0);
+    const activeStreamIdRef = useRef<number>(0);
+    const sseStreamIdRef = useRef<string | null>(null);
+    const finalTextLockedRef = useRef<boolean>(false);
+    const drawOnlyTurnRef = useRef<boolean>(false);
+    const turnStartedAtMsRef = useRef<number>(0);
+    const abortControllerRef = useRef<AbortController | null>(null);
+    const currentStateRef = useRef<string>("");
+    const ttsEsRef = useRef<EventSource | null>(null);
+    const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => { });
+    const micVadRef = useRef<any>(null);
+    const [testMode, setTestMode] = React.useState(false);
+
+    const {
+        audioQueueRef,
+        isPlayingRef,
+        audioRef,
+        interruptAudioPlayback,
+        processAudioQueue,
+    } = useAudioPlayback({
+        currentEmotionRef,
+        isThinkingRef,
+        micVadRef,
+    });
+
+    const {
+        voiceModeEnabled,
+        voiceWsState,
+        voiceError,
+        sttPreview,
+        toggleVoiceMode,
+        cleanupVoiceRuntime,
+    } = useVoiceMode({
+        threadId,
+        isLoading,
+        interruptAudioPlayback,
+        isPlayingRef,
+        sendMessageRef,
+        micVadRef,
+    });
+
+    const syncThinking = (next: boolean) => {
+        isThinkingRef.current = next;
+        useAvatarStore.getState().updateState(isPlayingRef.current, currentEmotion, next);
+    };
+
+    const addSystemMessage = (content: string) => {
+        addMessage({ id: newId(), role: 'system', content });
+    };
+
+    useEffect(() => {
+        const timer = setInterval(() => {
+            if (!isThinkingRef.current) return;
+            const lastAt = lastEventAtRef.current || 0;
+            if (Date.now() - lastAt > 30_000) {
+                syncThinking(false);
+                setConnectionState("stale");
+                addSystemMessage("（通信が途切れたため、思考状態を解除しました）");
+                const streamId = String(activeStreamIdRef.current || "");
+                apiClient.reportStreamTimeout(
+                    threadId || "default_thread",
+                    streamId,
+                    "SSE timeout / no events for 30s",
+                );
+            }
+        }, 500);
+        return () => clearInterval(timer);
+    }, [threadId]);
 
     // Helper: Ensure IDs exist
     const ensureIds = (msgs: any[]): ChatMessage[] => {
@@ -51,130 +131,55 @@ export default function ChatInterface({ onStateChange, agentMode }: ChatInterfac
 
     // Initialize Thread & Load History
     useEffect(() => {
-        console.log("[ChatInterface] MOUNT", Date.now());
         const savedThreadId = "default_thread";
         setThreadId(savedThreadId);
 
-        // 安全に content を文字列化（確定版）
-        function safeContentToText(content: any): string {
-            if (content == null) return "";
-            if (typeof content === "string") return content;
-
-            // OpenAI/LLMの「contentが配列」パターンを文字に寄せる
-            if (Array.isArray(content)) {
-                const texts = content
-                    .map((p: any) => {
-                        if (p?.type === "text") return p?.text ?? "";
-                        if (p?.type === "image_url") return "[画像]";
-                        return "";
-                    })
-                    .filter(Boolean);
-                return texts.join("\n");
+        try {
+            const savedTestMode = window.localStorage.getItem(TEST_MODE_STORAGE_KEY);
+            if (savedTestMode === "1") {
+                setTestMode(true);
             }
-
-            // オブジェクト1個で来る変種があっても落ちないように
-            if (typeof content === "object") {
-                if ("text" in content && typeof (content as any).text === "string") return (content as any).text;
-                return "[non-string content]";
-            }
-
-            return String(content);
-        }
+        } catch { }
 
         const loadHistory = async () => {
             if (isStreamingRef.current) return;
 
-            console.log("[loadHistory] start");
-            const t0 = performance.now();
-
             try {
-                console.log("[loadHistory] fetching...");
-                const res = await fetch(`${API_URL}/history/${savedThreadId}`, { cache: "no-store" });
-                console.log("[loadHistory] fetched", res.status, "ms", (performance.now() - t0).toFixed(0));
-
-                console.log("[loadHistory] parsing json...");
-                const data = await res.json();
-                console.log("[loadHistory] json parsed", "ms", (performance.now() - t0).toFixed(0));
+                const data = await apiClient.fetchHistory(savedThreadId);
 
                 const hist = data?.history;
-                console.log("[loadHistory] history type", Array.isArray(hist) ? "array" : typeof hist, "len", hist?.length);
-
                 if (Array.isArray(hist)) {
-                    // 非string検出とログ
-                    let nonString = 0;
-                    for (let i = 0; i < hist.length; i++) {
-                        if (typeof hist[i]?.content !== "string") {
-                            nonString++;
-                            console.warn("[history] non-string content", {
-                                index: i,
-                                role: hist[i]?.role,
-                                contentType: typeof hist[i]?.content,
-                                keys: hist[i]?.content ? Object.keys(hist[i].content) : []
-                            });
-                        }
-                    }
-                    console.log("[loadHistory] non-string count", nonString);
-
-                    const cleaned = hist.map((m: any) => {
-                        const text = safeContentToText(m?.content); // 必ず string へ
-                        return {
-                            ...m,
-                            content: extractSpeech(text), // extractSpeech は string 前提でOK
-                        };
-                    });
+                    const cleaned = hist.map((m: any) => normalizeHistoryMessage(m));
 
                     // パフォーマンス: 表示件数を制限（UIだけ軽く、データはDBに全部ある）
                     const MAX_RENDER = 120;
-                    console.log("[loadHistory] setting messages...", `(showing last ${Math.min(cleaned.length, MAX_RENDER)} of ${cleaned.length})`);
                     setMessages(ensureIds(cleaned.slice(-MAX_RENDER)));
-                    console.log("[loadHistory] done");
                 }
             } catch (e) {
-                console.error("[loadHistory] FAILED", e);
-            } finally {
-                console.log("[loadHistory] finally", "ms", (performance.now() - t0).toFixed(0));
+                console.error("[loadHistory] failed", e);
             }
         };
         loadHistory();
 
-        return () => console.log("[ChatInterface] UNMOUNT", Date.now());
+        return () => {
+            cleanupVoiceRuntime();
+        };
     }, []);
 
-    useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-    }, [messages]);
+    const toggleTestMode = React.useCallback(() => {
+        setTestMode((prev) => {
+            const next = !prev;
+            try {
+                window.localStorage.setItem(TEST_MODE_STORAGE_KEY, next ? "1" : "0");
+            } catch { }
+            return next;
+        });
+    }, []);
 
-    const processAudioQueue = async () => {
-        if (isPlayingRef.current || audioQueueRef.current.length === 0) return;
+    // Scroll is handled inside ChatMessages component
 
-        isPlayingRef.current = true;
-        const audioUrl = audioQueueRef.current.shift();
-        if (!audioUrl) {
-            isPlayingRef.current = false;
-            onStateChange(false, "neutral");
-            return;
-        }
-
-        onStateChange(true, "happy");
-
-        // Use URL directly (from static/audio/...)
-        console.log("[AUDIO PLAY]", audioUrl);
-        const audio = new Audio(audioUrl);
-        audioRef.current = audio;
-
-        audio.onended = () => {
-            isPlayingRef.current = false;
-            setTimeout(processAudioQueue, 100);
-        };
-
-        audio.addEventListener("error", () => console.error("[AUDIO ERROR]", audio.error));
-        await audio.play().catch(e => console.error("[PLAY REJECTED]", e));
-    };
 
     // --- Speech Recognition ---
-    const [isListening, setIsListening] = useState(false);
     const recognitionRef = useRef<any>(null);
 
     useEffect(() => {
@@ -196,7 +201,7 @@ export default function ChatInterface({ onStateChange, agentMode }: ChatInterfac
                     }
 
                     if (finalTranscript) {
-                        setInput(prev => prev + finalTranscript);
+                        appendInput(finalTranscript);
                     }
                 };
 
@@ -240,243 +245,423 @@ export default function ChatInterface({ onStateChange, agentMode }: ChatInterfac
         }
     };
 
-    // OpenAI互換 content を文字列に正規化
-    type ContentPart =
-        | { type: "text"; text?: string }
-        | { type: "input_text"; text?: string }
-        | { type: "image_url"; image_url?: { url?: string } }
-        | { type: string;[k: string]: any };
-
-    function normalizeContent(content: any): string {
-        if (content == null) return "";
-
-        // 文字列はそのまま
-        if (typeof content === "string") return content;
-
-        // 配列（OpenAI互換content）
-        if (Array.isArray(content)) {
-            return content
-                .map((p: ContentPart) => {
-                    if (!p) return "";
-                    if (p.type === "text" || p.type === "input_text") return p.text ?? "";
-                    if (p.type === "image_url") {
-                        const url = p.image_url?.url ?? "";
-                        // data: はデカいので表示はプレースホルダーにする
-                        return url.startsWith("data:") ? "\n[画像]\n" : `\n[画像: ${url}]\n`;
-                    }
-                    return ""; // 不明タイプは無視
-                })
-                .join("")
-                .trim();
-        }
-
-        // オブジェクト（変則ケース）
-        if (typeof content === "object") {
-            // よくある形を救済
-            if ("text" in content && typeof (content as any).text === "string") return (content as any).text;
-            if ("content" in content) return normalizeContent((content as any).content);
-
-            // 最後の砦（巨大ログ化防止で短く）
-            try {
-                const s = JSON.stringify(content);
-                return s.length > 500 ? s.slice(0, 500) + "…" : s;
-            } catch {
-                return String(content);
-            }
-        }
-
-        return String(content);
-    }
-
-    // extractSpeech: normalizeContent を使って安全に string 化
-    function extractSpeech(input: any): string {
-        const text = normalizeContent(input);
-
-        const idx = text.indexOf("\n[[");
-        if (idx !== -1) return text.slice(0, idx).trim();
-
-        if (text.trimStart().startsWith("[[")) {
-            const lines = text.split("\n");
-            const speechLines = lines.filter((l) => !l.trim().startsWith("[["));
-            return speechLines.join("\n").trim();
-        }
-
-        return text.trim();
-    }
-
-    // OpenAI multipart 形式対応の normalizeHistoryMessage
-    function normalizeHistoryMessage(m: any): ChatMessage {
-        // 1) すでに文字列ならそのまま
-        if (typeof m?.content === "string") {
-            return { ...m, content: extractSpeech(m.content) };
-        }
-
-        // 2) OpenAI互換の multipart 形式（今回の原因）
-        if (Array.isArray(m?.content)) {
-            const parts = m.content;
-
-            const textParts: string[] = [];
-            let imageUrl: string | undefined;
-
-            for (const p of parts) {
-                if (p?.type === "text") {
-                    if (typeof p.text === "string") textParts.push(p.text);
-                } else if (p?.type === "image_url") {
-                    const url = p?.image_url?.url;
-                    if (typeof url === "string") imageUrl = url;
-                }
-            }
-
-            const text = extractSpeech(textParts.join("\n").trim() || (imageUrl ? "[画像]" : ""));
-
-            // ⚠️ data: のbase64はデカいので、履歴表示だけなら捨てるのが安全
-            const safeImage =
-                imageUrl && imageUrl.startsWith("data:") ? undefined : imageUrl;
-
-            const role = m?.role === "user" || m?.role === "ai" || m?.role === "system" ? m.role : "system";
-
-            return {
-                ...m,
-                role,
-                content: text,
-                type: safeImage ? "image" : "text",
-                image: safeImage,
-            };
-        }
-
-        // 3) object等の変な形は文字列化して最低限落ちないように
-        const role = m?.role === "user" || m?.role === "ai" || m?.role === "system" ? m.role : "system";
-        return { ...m, role, content: extractSpeech(String(m?.content ?? "")) };
-    }
-
     // --- Safe AI Message Updates (ID-based) ---
     function beginAiMessage() {
         const id = newId();
         aiMsgIdRef.current = id;
         aiTextRef.current = "";
-
-        setMessages(prev => [
-            ...prev,
-            { id, role: 'ai', content: '' }
-        ]);
+        addMessage({ id, role: 'ai', content: '' });
     }
 
     function appendAiChunk(chunk: string) {
-        // if (!chunk) return; // Allow empty chunk to trigger re-render if needed, but text usually comes with content
+        if (!chunk) return;
+        if (isLikelyDuplicateAppend(aiTextRef.current, chunk)) {
+            return;
+        }
         const id = aiMsgIdRef.current;
         if (!id) {
-            console.error("appendAiChunk: missing aiMsgId");
+            const nextId = newId();
+            aiMsgIdRef.current = nextId;
+            aiTextRef.current = chunk;
+            addMessage({ id: nextId, role: 'ai', content: chunk });
             return;
         }
         aiTextRef.current += chunk;
-
-        setMessages(prev =>
-            prev.map(m => (m.id === id ? { ...m, content: aiTextRef.current } : m))
-        );
+        aiTextRef.current = dedupeAdjacentDuplicateParagraphs(aiTextRef.current);
+        updateMessageContent(id, aiTextRef.current);
     }
 
-    const sendMessage = async () => {
-        if ((!input.trim() && !selectedImage) || isLoading) return;
+    async function backfillLastAssistantMessage(attempt: number = 0) {
+        try {
+            const data = await apiClient.fetchRecentHistory(threadId || "default_thread", 10);
+            const hist = Array.isArray(data?.history) ? data.history : [];
+            const sinceMs = Number(turnStartedAtMsRef.current || 0);
+            const last = [...hist].reverse().find((m: any) => {
+                const role = String(m?.role || "");
+                if (role !== "assistant" && role !== "ai") {
+                    return false;
+                }
+                const ts = Number(m?.ts ?? 0);
+                if (!Number.isFinite(ts)) {
+                    return false;
+                }
+                // Guard against stale replay: only backfill assistant messages
+                // created after this turn started.
+                return ts >= sinceMs;
+            });
+            if (!last) {
+                if (attempt < 2) {
+                    setTimeout(() => backfillLastAssistantMessage(attempt + 1), 250);
+                }
+                return;
+            }
+            const rawText = extractSpeech(normalizeContent(last.content));
+            // Strip draw fences from backfilled text (DrawingCard handles display)
+            const text = rawText?.replace(/```draw\s*\n[\s\S]*?```/gi, "").trim();
+            if (!text) {
+                if (attempt < 2) {
+                    setTimeout(() => backfillLastAssistantMessage(attempt + 1), 250);
+                }
+                return;
+            }
+            if (!aiMsgIdRef.current) {
+                beginAiMessage();
+            }
+            appendAiChunk(text);
+        } catch (e) {
+            console.warn("[backfillLastAssistantMessage] failed", e);
+        }
+    }
+
+    const handleMessage = React.useCallback((msg: any) => {
+        try {
+            if (msg?.stream_id != null) {
+                const got = String(msg.stream_id);
+                if (!sseStreamIdRef.current) {
+                    sseStreamIdRef.current = got;
+                } else if (got !== String(sseStreamIdRef.current)) {
+                    console.warn("[SSE DROP] stream_id mismatch", {
+                        got,
+                        expected: String(sseStreamIdRef.current),
+                        type: msg.type,
+                    });
+                    return;
+                }
+            }
+            lastEventAtRef.current = Date.now();
+            setConnectionState("ok");
+
+            if (msg.type === "text") {
+                if (finalTextLockedRef.current) {
+                    // Authoritative final_result already arrived for this turn.
+                    // Ignore trailing text chunks to keep UI aligned with committed final_text.
+                    return;
+                }
+                const text = String(msg.content ?? "");
+                if (text.trim() === "WAIT") {
+                    // WAIT is handled as a UI hint; don't render as chat text
+                    return;
+                }
+                if (isThinkingRef.current) {
+                    syncThinking(false);
+                }
+                appendAiChunk(text);
+                if (thinkingHintRef.current) {
+                    setThinkingHint(null);
+                }
+
+                // 感情分析 (一時的に無効化)
+                /*
+                try {
+                    if (AFFECT_REGEX.global) {
+                        const matches = [...aiTextRef.current.matchAll(AFFECT_REGEX)];
+                        if (matches.length > 0) {
+                            const lastEmotion = matches[matches.length - 1][1];
+                            if (lastEmotion !== currentEmotion) {
+                                setCurrentEmotion(lastEmotion);
+                                onStateChange(true, lastEmotion);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error("Affect parse failed:", e);
+                }
+                */
+
+            } else if (msg.type === "state") {
+                const tag = String(msg.tag || "").toLowerCase();
+                if (tag) {
+                    currentStateRef.current = tag;
+                    useAvatarStore.getState().setAgentState(tag);
+                    useAvatarStore.getState().updateState(true, currentEmotionRef.current, isThinkingRef.current);
+                }
+            } else if (msg.type === "emotion") {
+                const tag = String(msg.tag || "").toLowerCase();
+                if (tag) {
+                    setCurrentEmotion(tag);
+                    useAvatarStore.getState().updateState(true, tag, isThinkingRef.current);
+                }
+            } else if (msg.type === "gesture") {
+                const tag = String(msg.tag || "").toLowerCase();
+                if (tag) {
+                    useAvatarStore.getState().triggerGesture(tag);
+                }
+            } else if (msg.type === "thinking") {
+                const nextThinking = Boolean(msg.value ?? msg.thinking ?? true);
+                syncThinking(nextThinking);
+            } else if (msg.type === "audio") {
+                // Accept audio only from the active main stream.
+                // Legacy /tts_events payloads can arrive without stream_id and replay stale audio.
+                if (msg?.stream_id == null) {
+                    console.warn("[AUDIO EVT] dropped: missing stream_id", msg);
+                    return;
+                }
+                // Support both msg.url and msg.data?.url
+                const url = msg.url || msg.data?.url;
+                const audioText = String(msg?.data?.text_content ?? "").trim();
+                if (!finalTextLockedRef.current && audioText) {
+                    if (!aiMsgIdRef.current) {
+                        beginAiMessage();
+                    }
+                    const id = aiMsgIdRef.current;
+                    aiTextRef.current = audioText;
+                    if (id) updateMessageContent(id, audioText);
+                    finalTextLockedRef.current = true;
+                }
+                if (url) {
+                    if (String(url).includes("<") || String(url).includes(">")) {
+                        console.warn("[AUDIO EVT] invalid url:", url);
+                        return;
+                    }
+                    // getStaticUrlで統一的にURL組み立て
+                    let audioUrl = getStaticUrl(url);
+                    // Cache buster
+                    audioUrl = audioUrl.includes("?")
+                        ? `${audioUrl}&t=${Date.now()}`
+                        : `${audioUrl}?t=${Date.now()}`;
+                    audioQueueRef.current.push(audioUrl);
+                    processAudioQueue();
+                } else {
+                    console.warn("[AUDIO EVT] missing url:", msg);
+                }
+            } else if (msg.type === "dream") {
+                const dreamMsg: ChatMessage = {
+                    id: msg.dream_id || `dream_${Date.now()}`,
+                    role: 'system',
+                    content: msg.text || '',
+                    kind: 'dream',
+                    meta: { mood: msg.mood, created_at: msg.created_at },
+                };
+                upsertMessage(dreamMsg);
+            } else if (msg.type === "error") {
+                console.error("Stream Error:", msg.content);
+                addMessage({ id: newId(), role: 'system', content: `エラー: ${msg.content}` });
+            } else if (msg.type === "event" && msg.name === "final_result") {
+                const payload = msg.payload || {};
+                const ft = String(payload.final_text ?? "");
+                console.info("[SSE final_result] len=%d merge_mode=%s", ft.length, payload.merge_mode);
+                if (ft.trim() && ft.trim() !== "WAIT") {
+                    // Strip ```draw fences from display text (rendered as DrawingCard instead)
+                    const displayText = ft.replace(/```draw\s*\n[\s\S]*?```/gi, "").trim();
+                    if (displayText) {
+                        if (!aiMsgIdRef.current) {
+                            beginAiMessage();
+                        }
+                        const id = aiMsgIdRef.current;
+                        aiTextRef.current = displayText;
+                        if (id) updateMessageContent(id, displayText);
+                    } else {
+                        // draw-only response: DrawingCard handles display, skip backfill
+                        drawOnlyTurnRef.current = true;
+                    }
+                    finalTextLockedRef.current = true;
+                }
+            } else if (msg.type === "event" && msg.name === "thinking_hint") {
+                setThinkingHint(msg.payload || {});
+            } else if (
+                msg.type === "event" &&
+                (
+                    msg.name === "hold_request" ||
+                    msg.name === "hold_cancelled" ||
+                    msg.name === "action_proposed" ||
+                    msg.name === "action_approved" ||
+                    msg.name === "action_blocked" ||
+                    msg.name === "action_failed"
+                )
+            ) {
+                if (typeof window !== "undefined") {
+                    window.dispatchEvent(
+                        new CustomEvent("phase5-action-event", {
+                            detail: { name: msg.name, payload: msg.payload || {} },
+                        })
+                    );
+                }
+                // Drawing: insert inline chat message for render_drawing results
+                // Uses upsertMessage for SSE replay / reconnection dedup
+                const p = msg.payload || {};
+                if (p.action_id === "render_drawing") {
+                    if (msg.name === "action_approved" && p.result?.result?.svg_artifact) {
+                        const r = p.result.result;
+                        upsertMessage({
+                            id: `drawing-${r.drawing_id || sseStreamIdRef.current || "unknown"}`,
+                            role: 'ai',
+                            content: r.svg_artifact,
+                            kind: 'drawing',
+                            meta: {
+                                drawing_id: r.drawing_id,
+                                element_count: r.element_count,
+                                because_tags: r.because_tags,
+                                replay: r.replay,
+                            },
+                        });
+                    } else if (msg.name === "action_failed") {
+                        const errMsg = p.result?.message || p.reason || "描画に失敗しました";
+                        const failId = `drawing-err-${p.action_id}-${sseStreamIdRef.current || p.message_id || "unknown"}`;
+                        upsertMessage({
+                            id: failId,
+                            role: 'ai',
+                            content: errMsg,
+                            kind: 'drawing_error',
+                            meta: { action_id: "render_drawing" },
+                        });
+                    }
+                }
+            } else if (msg.type === "done") {
+                if (isThinkingRef.current) {
+                    syncThinking(false);
+                }
+                if (!aiTextRef.current.trim() && !drawOnlyTurnRef.current) {
+                    console.warn("[SSE done] aiText is empty — triggering backfill. finalTextLocked=", finalTextLockedRef.current);
+                    backfillLastAssistantMessage();
+                }
+                drawOnlyTurnRef.current = false;
+            } else {
+                console.warn("[SSE NOTICE] unknown event type", msg?.type, msg);
+            }
+        } catch (e) {
+            console.error("handleMessage crashed:", e, msg);
+        }
+    }, []);
+
+    useEffect(() => {
+        const tid = threadId || "default_thread";
+        if (typeof EventSource === "undefined") return;
+        // Audio now arrives on the main /stream_chat SSE.
+        // Keep legacy /tts_events disabled by default to avoid stale backlog playback.
+        const enableLegacyTtsEvents = String(process.env.NEXT_PUBLIC_ENABLE_TTS_EVENTS ?? "0") === "1";
+        if (!enableLegacyTtsEvents) {
+            if (ttsEsRef.current) {
+                ttsEsRef.current.close();
+                ttsEsRef.current = null;
+            }
+            return;
+        }
+
+        if (ttsEsRef.current) {
+            ttsEsRef.current.close();
+            ttsEsRef.current = null;
+        }
+
+        const sseUrl = `${API_URL}/tts_events/${tid}`;
+        const es = new EventSource(sseUrl);
+        ttsEsRef.current = es;
+
+        es.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data);
+                handleMessage(msg);
+            } catch (err) {
+                console.warn("[TTS_ES] bad json", e.data);
+            }
+        };
+
+        let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+        es.onerror = (e) => {
+            console.warn("[TTS_ES] error", e);
+            // EventSource should auto-reconnect, but add manual reconnect as fallback
+            if (es.readyState === EventSource.CLOSED) {
+                es.close();
+                if (ttsEsRef.current === es) ttsEsRef.current = null;
+                // Reconnect after 2 seconds
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null;
+                    if (!ttsEsRef.current) {
+                        const newEs = new EventSource(sseUrl);
+                        ttsEsRef.current = newEs;
+                        newEs.onmessage = (ev) => {
+                            try {
+                                const msg = JSON.parse(ev.data);
+                                handleMessage(msg);
+                            } catch (err) {
+                                console.warn("[TTS_ES] bad json", ev.data);
+                            }
+                        };
+                        newEs.onerror = es.onerror;
+                    }
+                }, 2000);
+            }
+        };
+
+        return () => {
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            es.close();
+            if (ttsEsRef.current === es) ttsEsRef.current = null;
+        };
+    }, [threadId, handleMessage]);
+
+    const sendMessage = async (overrideText?: string) => {
+        const textToSend = overrideText ?? input;
+        if (!textToSend.trim() && !selectedImage) return;
+        // Voice mode (overrideText) can interrupt an active stream;
+        // keyboard input respects the loading guard.
+        if (!overrideText && isLoading) return;
+
+        useAvatarStore.getState().setAgentState("");
+        syncThinking(false);
+        setThinkingHint(null);
+        finalTextLockedRef.current = false;
+        drawOnlyTurnRef.current = false;
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+        }
+
+        // Stop current audio and clear queue
+        if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current = null;
+        }
+        isPlayingRef.current = false;
+        audioQueueRef.current = [];
+
+        activeStreamIdRef.current += 1;
+        sseStreamIdRef.current = null;
+        turnStartedAtMsRef.current = Date.now();
 
         const id = newId();
-        const userMsg: ChatMessage = { id, role: 'user', content: input };
+        const userMsg: ChatMessage = { id, role: 'user', content: textToSend };
         if (selectedImage) userMsg.image = selectedImage;
 
-        setMessages(prev => [...prev, userMsg]);
+        addMessage(userMsg);
         setInput("");
         setSelectedImage(null);
         setIsLoading(true);
         isStreamingRef.current = true;
         const controller = new AbortController();
+        abortControllerRef.current = controller;
+        const streamId = activeStreamIdRef.current;
+        lastEventAtRef.current = Date.now();
+        setConnectionState("ok");
 
         try {
-            const response = await fetch(`${API_URL}/stream_chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: userMsg.content,
-                    voice_id: "14",
-                    image_data: userMsg.image,
-                    mode: agentMode
-                }),
-                signal: controller.signal
-            });
+            const response = await apiClient.streamChat({
+                text: userMsg.content,
+                threadId: threadId || "default_thread",
+                voiceId: "14",
+                imageData: userMsg.image,
+                mode: agentMode,
+                streamId: String(streamId),
+                messageId: userMsg.id,
+                testMode,
+            }, controller.signal);
 
             if (!response.body) throw new Error("No response body");
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder("utf-8");
             let buffer = "";
-            let gotDone = false;
+            let chunkCount = 0;
 
             // Start AI message safely
             beginAiMessage();
-
-            function handleMessage(msg: any) {
-                console.log("HANDLE:", msg.type);
-                try {
-                    if (msg.type === "text") {
-                        appendAiChunk(msg.content ?? "");
-
-                        // 感情分析 (一時的に無効化)
-                        /*
-                        try {
-                            if (AFFECT_REGEX.global) {
-                                const matches = [...aiTextRef.current.matchAll(AFFECT_REGEX)];
-                                if (matches.length > 0) {
-                                    const lastEmotion = matches[matches.length - 1][1];
-                                    if (lastEmotion !== currentEmotion) {
-                                        setCurrentEmotion(lastEmotion);
-                                        onStateChange(true, lastEmotion);
-                                    }
-                                }
-                            }
-                        } catch (e) {
-                            console.error("Affect parse failed:", e);
-                        }
-                        */
-
-                    } else if (msg.type === "audio") {
-                        // URL-based audio (Phase B)
-                        console.log("[AUDIO EVT]", msg);
-                        // Support both msg.url and msg.data?.url
-                        const url = msg.url || msg.data?.url;
-                        console.log("[AUDIO URL]", url);
-                        if (url) {
-                            // getStaticUrlで統一的にURL組み立て
-                            const audioUrl = getStaticUrl(url);
-                            audioQueueRef.current.push(audioUrl);
-                            processAudioQueue();
-                        } else {
-                            console.warn("[AUDIO EVT] missing url:", msg);
-                        }
-                    } else if (msg.type === "dream") {
-                        // 夢イベント（SSE開始直後に1回だけ配信される）
-                        console.log("[DREAM EVT]", msg);
-                        const dreamMsg: ChatMessage = {
-                            id: msg.dream_id || `dream_${Date.now()}`,
-                            role: 'system',
-                            content: msg.text || '',
-                            kind: 'dream',
-                            meta: { mood: msg.mood, created_at: msg.created_at },
-                        };
-                        setMessages(prev => [...prev.filter(m => m.id !== dreamMsg.id), dreamMsg]);
-                    } else if (msg.type === "error") {
-                        console.error("Stream Error:", msg.content);
-                        setMessages(prev => [...prev, { id: newId(), role: 'system', content: `エラー: ${msg.content}` }]);
-                    } else if (msg.type === "done") {
-                        gotDone = true;
-                    }
-                } catch (e) {
-                    console.error("handleMessage crashed:", e, msg);
-                }
-            }
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                buffer += decoder.decode(value, { stream: true });
+                chunkCount++;
+                const decoded = decoder.decode(value, { stream: true });
+                buffer += decoded;
                 buffer = buffer.replace(/\r\n/g, "\n");
 
                 let idx;
@@ -492,157 +677,113 @@ export default function ChatInterface({ onStateChange, agentMode }: ChatInterfac
                     if (dataLines.length === 0) continue;
 
                     const jsonStr = dataLines.join("\n");
-
                     try {
-                        const msg = JSON.parse(jsonStr);
-                        console.log("SSE MSG:", msg.type, msg);
-
-                        if (msg.type === "text") {
-                            console.log("TEXT MSG:", msg);
-                            console.log("TEXT jsonStr:", jsonStr);
+                        let msg: Record<string, unknown>;
+                        const parsed = safeJsonParse<unknown>(jsonStr, null);
+                        if (parsed === null || typeof parsed !== "object") {
+                            msg = { type: "text", content: typeof parsed === "string" ? parsed : jsonStr };
+                        } else {
+                            msg = parsed as Record<string, unknown>;
+                            if (!msg.type && typeof msg.text === "string") {
+                                msg = { type: "text", content: msg.text, stream_id: msg.stream_id };
+                            }
                         }
-
                         // Pass ALL events to handleMessage (including audio)
                         handleMessage(msg);
 
-                        if (gotDone) break; // Inner loop break
                     } catch (e) {
                         console.error("Bad SSE JSON head:", jsonStr.slice(0, 200));
                         console.error("Bad SSE JSON tail:", jsonStr.slice(-200));
                     }
                 }
-                if (gotDone) break; // Outer loop break
             }
 
         } catch (e) {
             console.error("Chat Error:", e);
-            setMessages(prev => [...prev, { id: newId(), role: 'system', content: '接続エラーが発生しました' }]);
+            addMessage({ id: newId(), role: 'system', content: '接続エラーが発生しました' });
         } finally {
-            setIsLoading(false);
-            isStreamingRef.current = false;
-            onStateChange(false, currentEmotion);
+            // Only clean up if this is still the active stream.
+            // A newer sendMessage() call may have incremented activeStreamIdRef.
+            if (streamId === activeStreamIdRef.current) {
+                setIsLoading(false);
+                isStreamingRef.current = false;
+                if (isThinkingRef.current) {
+                    syncThinking(false);
+                }
+                useAvatarStore.getState().updateState(false, currentEmotionRef.current, isThinkingRef.current);
+            }
+        }
+    };
+    sendMessageRef.current = sendMessage;
+
+    const clearChat = async () => {
+        if (isLoading) return;
+        const ok = window.confirm("チャット履歴を削除しますか？");
+        if (!ok) return;
+        try {
+            await apiClient.clearHistory(threadId || "default_thread");
+        } catch (e) {
+            console.error("Clear history failed", e);
+        } finally {
+            clearMessages();
+            aiMsgIdRef.current = null;
+            aiTextRef.current = "";
         }
     };
 
     return (
         <div className="flex flex-col h-full w-full max-w-4xl mx-auto p-2 sm:p-4 relative overflow-hidden box-border">
-            {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden mb-4 space-y-4 pr-2" ref={scrollRef}>
-                <AnimatePresence>
-                    {messages.map((msg) => {
-                        // 夢メッセージは特別なUIで表示
-                        if (msg.kind === 'dream') {
-                            return (
-                                <motion.div
-                                    key={msg.id}
-                                    initial={{ opacity: 0, y: 10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="flex justify-center my-4"
-                                >
-                                    <div className="max-w-[90%] w-full rounded-2xl border border-indigo-500/30 px-4 py-3 bg-indigo-950/50 backdrop-blur-sm">
-                                        <div className="flex items-center gap-2 text-sm text-indigo-300 mb-2">
-                                            <span aria-hidden>🌙</span>
-                                            <span className="font-medium">Niaの夢</span>
-                                            {msg.meta?.mood && (
-                                                <span className="text-indigo-400/60 text-xs">({msg.meta.mood})</span>
-                                            )}
-                                        </div>
-                                        <div className="whitespace-pre-wrap text-indigo-100/90 leading-relaxed text-sm">
-                                            {msg.content}
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            );
-                        }
-
-                        // 通常メッセージ
-                        return (
-                            <div
-                                key={msg.id}
-                                className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                            >
-                                <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                                    {msg.image && (
-                                        <img src={msg.image} alt="User Upload" className="max-w-full sm:max-w-xs rounded-xl mb-2 border border-white/10" />
-                                    )}
-                                    <div className={`p-3 sm:p-4 rounded-2xl whitespace-pre-wrap leading-relaxed shadow-lg backdrop-blur-sm break-all
-                                        ${msg.role === 'user'
-                                            ? 'bg-blue-600/80 text-white rounded-br-none'
-                                            : 'bg-gray-800/80 text-gray-100 rounded-bl-none border border-white/5'
-                                        }
-                                        ${msg.role === 'system' && 'bg-red-900/50 text-red-200 text-sm border-red-500/30'}
-                                    `}>
-                                        {msg.content}
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </AnimatePresence>
-                {isLoading && <div className="text-gray-500 text-sm animate-pulse ml-2">思考中...</div>}
-            </div>
-
-            {/* Input Area */}
-            <div className="relative w-full glass p-2 rounded-2xl flex flex-col gap-2">
-                {selectedImage && (
-                    <div className="relative w-32 h-32 bg-black/50 rounded-xl overflow-hidden group">
-                        <img src={selectedImage} alt="Preview" className="w-full h-full object-cover" />
-                        <button
-                            onClick={() => setSelectedImage(null)}
-                            className="absolute top-1 right-1 bg-red-500/80 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+            {/* Header */}
+            <div className="flex items-center justify-between mb-2 px-1">
+                <div className="flex items-center gap-2">
+                    <div className="text-xs text-gray-500">Chat</div>
+                    <button
+                        type="button"
+                        onClick={toggleTestMode}
+                        className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                            testMode
+                                ? "border-amber-500/40 bg-amber-900/30 text-amber-200"
+                                : "border-white/10 bg-white/5 text-gray-400 hover:bg-white/10"
+                        }`}
+                        title="モデル検証用。会話履歴は残るが、記憶・観測・副作用は保存しない"
+                    >
+                        {testMode ? "TEST ON" : "TEST OFF"}
+                    </button>
+                    {thinkingHint && (
+                        <div
+                            className="text-[11px] px-2 py-0.5 rounded-full border border-amber-500/30 text-amber-200/80 bg-amber-900/20"
+                            title={JSON.stringify(thinkingHint)}
                         >
-                            <StopCircle size={14} />
-                        </button>
-                    </div>
-                )}
-
-                <div className="flex items-center gap-2 w-full">
-                    <input
-                        type="file"
-                        ref={fileInputRef}
-                        hidden
-                        accept="image/*"
-                        onChange={handleImageSelect}
-                    />
-                    <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className={`p-3 rounded-xl transition-colors ${selectedImage ? 'text-blue-400 bg-blue-500/20' : 'hover:bg-white/10 text-gray-400'}`}
-                    >
-                        <ImageIcon size={20} />
-                    </button>
-                    <input
-                        type="text"
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any).isComposing && !isLoading) {
-                                e.preventDefault();
-                                sendMessage();
-                            }
-                        }}
-                        placeholder="メッセージを入力..."
-                        className="flex-1 bg-transparent border-none outline-none text-white px-2 placeholder-gray-500"
-                        disabled={isLoading}
-                    />
-                    <button
-                        onClick={toggleListening}
-                        className={`p-3 rounded-xl transition-all ${isListening
-                            ? 'bg-red-500 text-white animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.5)]'
-                            : 'hover:bg-white/10 text-gray-400'
-                            }`}
-                        title={isListening ? "音声認識停止" : "音声認識開始"}
-                    >
-                        <Mic size={20} />
-                    </button>
-                    <button
-                        onClick={sendMessage}
-                        disabled={isLoading || (!input.trim() && !selectedImage)}
-                        className="p-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20 disabled:opacity-50 transition-all active:scale-95"
-                    >
-                        <Send size={20} />
-                    </button>
+                            thinking…
+                        </div>
+                    )}
                 </div>
+                <button
+                    onClick={clearChat}
+                    className="text-xs text-red-400 hover:text-red-300 border border-red-500/30 px-2 py-1 rounded-lg"
+                >
+                    履歴削除
+                </button>
             </div>
+            {connectionState === "stale" && (
+                <div className="mb-2 px-2 py-1 rounded-lg text-xs text-amber-200 bg-amber-900/40 border border-amber-500/30">
+                    通信が不安定なため、思考状態を解除しました。再同期中…
+                </div>
+            )}
+            {/* Messages */}
+            <ChatMessages />
+
+            {/* Input */}
+            <ChatInput
+                onToggleListening={toggleListening}
+                onSendMessage={() => sendMessage()}
+                onImageSelect={handleImageSelect}
+                voiceModeEnabled={voiceModeEnabled}
+                voiceWsState={voiceWsState}
+                voiceError={voiceError}
+                sttPreview={sttPreview}
+                onToggleVoiceMode={toggleVoiceMode}
+            />
         </div>
     );
 }

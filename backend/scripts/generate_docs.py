@@ -1,8 +1,10 @@
-import os
+from pathlib import Path
+
+from backend.core.config import settings
 
 # プロジェクトルートの特定
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DOCS_DIR = os.path.join(PROJECT_ROOT, "docs")
+PROJECT_ROOT = settings.PROJECT_ROOT
+DOCS_DIR = PROJECT_ROOT / "docs"
 
 # 1. 運用マニュアル (OPERATION_MANUAL.md)
 MANUAL_TEXT = """# 📘 ニア(Near) 運用マニュアル
@@ -24,8 +26,6 @@ MANUAL_TEXT = """# 📘 ニア(Near) 運用マニュアル
 ### ② 活動中 (Activity)
 - **会話:** 普通に話しかける。
 - **配信:** OBSに `obs_output/` 内のテキストファイルを表示。
-    - `chapter_title.txt`: 今の章タイトル
-    - `current_vibe.txt`: 今の気分
 
 ### ③ 就寝 (Sleep Cycle)
 **★重要: 一日の終わりに必ず実行。**
@@ -36,33 +36,14 @@ python -m backend.scripts.sleep_cycle
     - 記憶の整理（Private Memoryへの定着）。
     - 配信ノイズ（Stream Memory）の無視・破棄。
     - 人格の微調整（Guardianによる保護）。
+    - R.4 日横断パターン抽出（3日+の蓄積で自動実行）。
+    - N.3 Self-Model 更新（identity.md Recent Learnings）。
 
-## 🗓️ 2. 週次ルーティン (Weekly Evolution)
-**目的:** 過去1週間（1つの章）を振り返り、人格を進化させるか決める。
-**推奨:** 週末に手動実行。
-
-### ① 章の生成 (Reflection)
-```bash
-python -m backend.scripts.chapter_reflection
-```
-- **結果:** `logs/chapters/` に振り返りデータが生成される。
-- **注意:** この時点では人格は変わらない。
-
-### ② 人間による決裁 (Decision) ★最重要
-```bash
-python -m backend.scripts.chapter_decision
-```
-- 提案内容を見て判断する。
-    - `[a]ccept`: 承認 (人格に反映)
-    - `[r]eject`: 却下 (破棄)
-    - `[h]old`: 保留 (現状維持)
-- **心構え:** 「無理に変える必要はない」。Holdも立派な選択。
-
-## 🛡️ 3. 緊急時の対応
+## 🛡️ 2. 緊急時の対応
 - **変なことを言い出した:**
     - `identity.md` を開き、該当する記述（Recent Learnings等）を手動削除する。
-- **章の提案がおかしい:**
-    - `chapter_decision.py` で `[r]eject` する。
+- **Identity提案がおかしい:**
+    - フロントエンドのアイデンティティパネルから却下する。
 """
 
 # 2. システム仕様書 (SYSTEM_SPEC.md)
@@ -80,8 +61,8 @@ SPEC_TEXT = """# ⚙️ ニア(Near) システム仕様書
 
 ## 3. 人格進化 (The Soul)
 - **Guardian (Layer B):** 人格の管理者。急激な変化や性格の改変をブロックする。
-- **Chapter Evolution (Phase 5):** 週単位で人生を振り返り、自己分析する。
-- **Human Check (Phase 5.4):** 人間が `chapter_decision` で承認しない限り、人格は絶対に書き換わらない。
+- **R.4 CrossDay Distillation:** 日横断パターンを自動抽出し semantic_memories に保存。
+- **Identity Proposals:** 重要な変更は identity_proposals テーブルで承認待ち。フロントエンドから承認/却下。
 
 ## 4. インターフェース (The Interface)
 - **OBS連携 (Phase 6):** `obs_writer` が人格回路と絶縁された状態でテキストを出力。
@@ -99,7 +80,7 @@ DIR_TEXT = """# 📂 ディレクトリマップ
 | :--- | :--- | :--- |
 | `identity.md` | ニアの魂。 ここが変わると性格が変わる。 | ★★★ |
 | `backend/core/config.py` | 設定ファイル。APIキーやURLはここ。 | ★★★ |
-| `logs/chapters/` | 決裁ログ。 過去の章と判断記録。 | ★★☆ |
+| `sleep_outputs/` | Sleep Cycle 出力（日記、自己モデル等）。 | ★★☆ |
 | `logs/judge_audit.jsonl` | 会話ログ。全ての記憶判断の記録。 | ★★☆ |
 | `logs/world_context/` | 外伝ダイジェスト。配信の空気感。 | ★☆☆ |
 | `obs_output/` | 配信表示用テキスト。OBSはここを見る。 | ★☆☆ |
@@ -107,18 +88,18 @@ DIR_TEXT = """# 📂 ディレクトリマップ
 """
 
 def generate():
-    os.makedirs(DOCS_DIR, exist_ok=True)
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
     
     # Manual
-    with open(os.path.join(DOCS_DIR, "OPERATION_MANUAL.md"), "w", encoding="utf-8") as f:
+    with open(DOCS_DIR / "OPERATION_MANUAL.md", "w", encoding="utf-8") as f:
         f.write(MANUAL_TEXT)
     
     # Specs
-    with open(os.path.join(DOCS_DIR, "SYSTEM_SPEC.md"), "w", encoding="utf-8") as f:
+    with open(DOCS_DIR / "SYSTEM_SPEC.md", "w", encoding="utf-8") as f:
         f.write(SPEC_TEXT)
     
     # Dir Map
-    with open(os.path.join(DOCS_DIR, "DIRECTORY_MAP.md"), "w", encoding="utf-8") as f:
+    with open(DOCS_DIR / "DIRECTORY_MAP.md", "w", encoding="utf-8") as f:
         f.write(DIR_TEXT)
     
     print(f"✅ Documentation generated in: {DOCS_DIR}")

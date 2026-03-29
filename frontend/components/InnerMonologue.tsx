@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useState } from 'react';
-import { API_URL } from '@/lib/api';
+import { apiClient } from '@/lib/apiClient';
 import { Loader2, Brain, Eye, Wind, MessageCircle, Clock } from 'lucide-react';
 
 interface MonologueEntry {
@@ -43,10 +43,8 @@ export default function InnerMonologue() {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const res = await fetch(`${API_URL}/stats/inner_monologue?limit=100`);
-                if (res.ok) {
-                    setData(await res.json());
-                }
+                const result = await apiClient.fetchInnerMonologue(100);
+                setData(result as unknown as MonologueData);
             } catch (e) {
                 console.error('Failed to fetch monologue:', e);
             }

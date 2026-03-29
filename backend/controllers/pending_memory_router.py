@@ -1,19 +1,20 @@
+import json
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import json
-import sqlite3
-import traceback
 
+from backend.services.memory import memory_service
 from backend.services.memory_manager import memory_manager
 from backend.services.telemetry_logger import telemetry
-from backend.core.config import settings
-from backend.core.db import get_conn
 
 router = APIRouter(prefix="/api/pending_memories", tags=["Pending Memories"])
+logger = logging.getLogger(__name__)
 
 class PendingMemoryItem(BaseModel):
-    id: int # event table id
+    id: str
     timestamp: str
     thread_id: str
     summary: str
@@ -21,58 +22,67 @@ class PendingMemoryItem(BaseModel):
     confidence: float
 
 class ReviewRequest(BaseModel):
-    event_id: int
+    event_id: str
     confirm: str # "APPROVE" or "REJECT"
     tags_override: Optional[List[str]] = None
     note: Optional[str] = None
 
 @router.get("", response_model=List[PendingMemoryItem])
-def list_pending_memories(limit: int = 50):
-    """B層の 'memory_pending' イベントを取得"""
-    conn = get_conn()
+def list_pending_memories(limit: int = 50, thread_id: str = "default_thread"):
+    """B層の 'memory_pending' イベントを取得（memory_events path only）"""
     try:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Exclude already approved or rejected memories
-        cursor.execute("""
-            SELECT id, ts as timestamp, thread_id, payload_json 
-            FROM events 
-            WHERE event_type = 'memory_pending' 
-            AND id NOT IN (
-                SELECT CAST(json_extract(payload_json, '$.ref_event_id') AS INTEGER)
-                FROM events 
-                WHERE event_type IN ('memory_approved', 'memory_rejected')
-                AND json_extract(payload_json, '$.ref_event_id') IS NOT NULL
-            )
-            ORDER BY id DESC 
-            LIMIT ?
-        """, (limit,))
+        idx_rows = memory_service.query_index(thread_id=thread_id, limit=max(int(limit) * 10, 100))
+        event_ids = [str(r.get("event_id")) for r in idx_rows if r.get("event_id")]
+        event_rows = memory_service.load_events(event_ids)
+        by_id = {str(r.get("event_id")): r for r in event_rows}
 
-        
-        rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            try:
-                payload = json.loads(row["payload_json"])
-                results.append({
-                    "id": row["id"],
-                    "timestamp": row["timestamp"],
-                    "thread_id": row["thread_id"],
-                    "summary": payload.get("summary", "(No Summary)"),
-                    "details": payload,
-                    "confidence": payload.get("importance", 0.0)
-                })
-            except:
+        pending: dict[str, dict] = {}
+        resolved_ids: set[str] = set()
+        for eid in event_ids:
+            ev = by_id.get(eid)
+            if not ev:
                 continue
-        return results
+            et = str(ev.get("event_type") or "")
+            try:
+                payload = json.loads(ev.get("payload_json") or "{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            if et == "memory_pending":
+                pending[eid] = ev
+            elif et in {"memory_approved", "memory_rejected"}:
+                ref = payload.get("ref_event_id")
+                if ref is not None:
+                    resolved_ids.add(str(ref))
+
+        results: list[dict] = []
+        for eid, ev in pending.items():
+            if eid in resolved_ids:
+                continue
+            try:
+                payload = json.loads(ev.get("payload_json") or "{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            created_at = float(ev.get("created_at") or 0.0)
+            ts = datetime.fromtimestamp(created_at, tz=timezone.utc).isoformat() if created_at > 0 else ""
+            results.append({
+                "id": eid,
+                "timestamp": ts,
+                "thread_id": str(ev.get("thread_id") or thread_id),
+                "summary": payload.get("summary", "(No Summary)"),
+                "details": payload,
+                "confidence": float(payload.get("importance") or 0.0),
+            })
+        if results:
+            results.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+            return results[: int(limit)]
     except Exception as e:
-        print("ERROR in list_pending_memories:")
-        print(traceback.format_exc())
+        logger.exception("list_pending_memories failed thread_id=%s", thread_id)
         raise HTTPException(status_code=500, detail=f"Internal Error: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
+    return []
 
 @router.post("/approve")
 async def approve_memory(req: ReviewRequest):
@@ -80,19 +90,25 @@ async def approve_memory(req: ReviewRequest):
         raise HTTPException(status_code=400, detail="Confirmation needed (APPROVE)")
 
     # 1. 元のイベントを取得
-    conn = get_conn()
+    payload = {}
+    thread_id = "default_thread"
+    found = False
+
+    # New memory_events path first
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT payload_json, thread_id FROM events WHERE id = ?", (req.event_id,))
-        row = cursor.fetchone()
-    finally:
-        conn.close()
-    
-    if not row:
+        event_rows = memory_service.load_events([str(req.event_id)])
+        if event_rows:
+            ev = event_rows[0]
+            payload = json.loads(ev.get("payload_json") or "{}")
+            if not isinstance(payload, dict):
+                payload = {}
+            thread_id = str(ev.get("thread_id") or "default_thread")
+            found = True
+    except Exception:
+        found = False
+
+    if not found:
         raise HTTPException(status_code=404, detail="Event not found")
-        
-    payload = json.loads(row[0])
-    thread_id = row[1]
     
     summary = payload.get("summary")
     surprise = payload.get("surprise", 0.0)
@@ -114,6 +130,20 @@ async def approve_memory(req: ReviewRequest):
         "summary": summary,
         "note": req.note
     })
+    # New append-only event log (best-effort)
+    try:
+        memory_service.append_event(
+            thread_id=thread_id,
+            event_type="memory_approved",
+            payload={
+                "ref_event_id": str(req.event_id),
+                "summary": summary,
+                "note": req.note,
+                "scope": "review",
+            },
+        )
+    except Exception:
+        pass
     
     return {"ok": True}
 
@@ -123,19 +153,35 @@ async def reject_memory(req: ReviewRequest):
         raise HTTPException(status_code=400, detail="Confirmation needed (REJECT)")
         
     # 記録だけ残す
-    conn = get_conn()
+    thread_id = "unknown"
+    found = False
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT thread_id FROM events WHERE id = ?", (req.event_id,))
-        row = cursor.fetchone()
-    finally:
-        conn.close()
-    
-    thread_id = row[0] if row else "unknown"
+        event_rows = memory_service.load_events([str(req.event_id)])
+        if event_rows:
+            thread_id = str(event_rows[0].get("thread_id") or "unknown")
+            found = True
+    except Exception:
+        found = False
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Event not found")
 
     await telemetry.event(thread_id, "memory_rejected", {
         "ref_event_id": req.event_id,
         "note": req.note
     })
+    # New append-only event log (best-effort)
+    try:
+        memory_service.append_event(
+            thread_id=thread_id,
+            event_type="memory_rejected",
+            payload={
+                "ref_event_id": str(req.event_id),
+                "note": req.note,
+                "scope": "review",
+            },
+        )
+    except Exception:
+        pass
     
     return {"ok": True}
