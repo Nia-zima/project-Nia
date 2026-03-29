@@ -47,7 +47,10 @@ _FACT_CLAIM_PATTERNS = [
     re.compile(r"(?:あなた|ユーザー|君|きみ).{0,10}(?:は|って).{2,30}(?:だ[よね]?|でしょ|じゃん)"),
 ]
 
-from backend.core.agent_graph.nodes.text_guards import _looks_strong_conclusion
+def _looks_strong_conclusion(text: str) -> bool:
+    """Proxy to avoid circular import (guardrail → text_guards → __init__ → merge → guardrail)."""
+    from backend.core.agent_graph.nodes.text_guards import _looks_strong_conclusion as _impl
+    return _impl(text)
 
 
 def _extract_fact_claims(text: str) -> list[str]:
@@ -225,8 +228,14 @@ def check_citation_needed(say_candidate: str, memory_sections: dict) -> Guardrai
 def check_thin_retrieval(
     say_candidate: str,
     confidence_metrics: dict | None,
+    *,
+    turn_intent: str = "open_reflection",
 ) -> GuardrailAlert | None:
-    """G6: Low context coverage + assertive output → HOLD."""
+    """G6: Low context coverage + assertive output → HOLD.
+
+    Intent-aware: direct_answer / correction_response で短い stance-first 文なら
+    hold しない。ただしユーザー属性の断定は intent に関係なく止める。
+    """
     if not say_candidate:
         return None
 
@@ -236,6 +245,18 @@ def check_thin_retrieval(
     if coverage >= threshold:
         return None
 
+    # intent-aware: 直答/訂正で stance-first 短文なら hold しない
+    if turn_intent in ("direct_answer", "correction_response"):
+        sentence_count = len([s for s in re.split(r"[。！？]", say_candidate) if s.strip()])
+        char_count = len(say_candidate)
+        has_user_claim = bool(_extract_fact_claims(say_candidate))
+        if sentence_count <= 3 and char_count <= 150 and not has_user_claim:
+            logger.info(
+                "[Guardrail:G6] skip hold for %s intent, sentences=%d chars=%d",
+                turn_intent, sentence_count, char_count,
+            )
+            return None
+
     if not _looks_strong_conclusion(say_candidate):
         return None
 
@@ -243,7 +264,7 @@ def check_thin_retrieval(
         condition="G6_thin_retrieval",
         severity="hold",
         reason=f"Strong assertion with low context coverage ({coverage:.2f} < {threshold})",
-        details={"coverage": coverage, "threshold": threshold},
+        details={"coverage": coverage, "threshold": threshold, "turn_intent": turn_intent},
     )
 
 
@@ -262,6 +283,7 @@ def run_guardrails(
     thread_id: str,
     state: dict,
     memory_sections: dict | None = None,
+    turn_intent: str = "open_reflection",
 ) -> GuardrailResult:
     """Run all guardrail checks and return aggregated result."""
     if not getattr(settings, "GUARDRAIL_V2_ENABLED", False):
@@ -291,7 +313,7 @@ def run_guardrails(
         lambda: check_summary_mismatch(sections),
         lambda: check_working_stagnation(thread_id),
         lambda: check_citation_needed(say_candidate, sections),
-        lambda: check_thin_retrieval(say_candidate, confidence_metrics),
+        lambda: check_thin_retrieval(say_candidate, confidence_metrics, turn_intent=turn_intent),
     ]
 
     for check_fn in checks:

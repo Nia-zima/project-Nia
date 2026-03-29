@@ -65,7 +65,10 @@
       "Bash(ruff check backend/scripts/sleep_cycle/ backend/controllers/api/system_router.py backend/services/public_status.py)",
       "Bash(for f in *.json)",
       "Bash(do echo \"=== $f ===\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(for d:*)",
+      "Bash(do touch:*)",
+      "Bash(.venv/Scripts/pip.exe install:*)"
     ]
   }
 }

@@ -20,6 +20,7 @@ class AgentState(TypedDict, total=False):
     message_id: Optional[str]
     stream_id: Optional[str]
     trace_id: Optional[str]
+    test_mode: Optional[bool]  # Skip memory saving for model testing
 
     # ── Safety ───────────────────────────────────────────────────
     safety_route: Optional[str]
@@ -38,8 +39,11 @@ class AgentState(TypedDict, total=False):
     depth_action: Optional[str]  # "depth0", "depth1", "ask", "wait"
     depth_recommendation_reason: Optional[str]
     depth2_gate_met: Optional[bool]
+    depth2_mode: Optional[str]  # "risk" | "reflective" | None
     self_scope: Optional[bool]
     force_ab_followup: Optional[bool]
+    requires_direct_stance: Optional[bool]
+    turn_intent: Optional[str]  # "direct_answer" | "correction_response" | "open_reflection"
 
     # ── Confidence ───────────────────────────────────────────────
     confidence: Optional[float]  # 0.0-1.0
@@ -49,7 +53,9 @@ class AgentState(TypedDict, total=False):
     # ── Draft & Output ───────────────────────────────────────────
     draft: Optional[str]
     depth1_text: Optional[str]
+    depth1_contract_ok: Optional[bool]
     depth2_text: Optional[str]
+    depth2_fallback_used: Optional[bool]
     merge_mode: Optional[str]
     final_text: Optional[str]
 
@@ -101,5 +107,15 @@ class AgentState(TypedDict, total=False):
     # ── NiaCore: Shadow Inference ────────────────────────────────
     niacore_shadow: Optional[Dict[str, Any]]
 
+    # ── NiaCore vNext: Shadow Observation ─────────────────────────
+    niacore_vnext_shadow: Optional[Dict[str, Any]]
+
     # ── SkeletonCore: Conversation Skeleton ──────────────────────
     conversation_skeleton: Optional[Dict[str, Any]]
+    turn_role: Optional[str]
+    turn_role_source: Optional[str]
+
+    # ── Contract 1/2: RuntimeFacts & Atmosphere ────────────────
+    runtime_facts_text: Optional[str]
+    atmosphere_text: Optional[str]
+    nero_references_text: Optional[str]

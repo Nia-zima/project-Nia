@@ -48,7 +48,10 @@ def _base_state(**overrides) -> AgentState:
         "reason_codes": [],
         "draft": "",
         "depth1_text": "",
+        "depth1_contract_ok": None,
         "depth2_text": "",
+        "turn_role": None,
+        "turn_role_source": None,
         "merge_mode": None,
         "final_text": None,
         "hold_required": False,
@@ -622,20 +625,35 @@ class TestContract8_DepthPriority:
         assert need_depth1 is False
         assert dissonance_on is False
 
-    def test_depth2_forces_depth1_and_dissonance(self):
+    def test_depth2_risk_forces_depth1_and_dissonance(self):
         from backend.core.confidence import DepthAction
-        from backend.core.agent_graph.nodes.routing import _resolve_depth_decision
+        from backend.core.agent_graph.nodes.routing import _resolve_depth_decision, Depth2Mode
 
         _, _, need_depth1, dissonance_on, _ = _resolve_depth_decision(
             action=DepthAction.USE_DEPTH0,
             confidence=0.9,
-
             dissonance=0.1,
             reason_codes=[],
             need_depth2=True,
+            depth2_mode=Depth2Mode.RISK,
         )
         assert need_depth1 is True
         assert dissonance_on is True
+
+    def test_depth2_reflective_depth1_without_dissonance(self):
+        from backend.core.confidence import DepthAction
+        from backend.core.agent_graph.nodes.routing import _resolve_depth_decision, Depth2Mode
+
+        _, _, need_depth1, dissonance_on, _ = _resolve_depth_decision(
+            action=DepthAction.USE_DEPTH0,
+            confidence=0.9,
+            dissonance=0.1,
+            reason_codes=[],
+            need_depth2=True,
+            depth2_mode=Depth2Mode.REFLECTIVE,
+        )
+        assert need_depth1 is True
+        assert dissonance_on is False
 
     def test_user_request_forces_depth1(self):
         from backend.core.confidence import DepthAction
@@ -670,7 +688,8 @@ class TestContract8_DepthPriority:
 
 # =====================================================================
 # 契約 9: ターン初期化契約
-#   毎ターン draft, depth1_text, depth2_text を "" にリセット。
+#   毎ターン draft, depth1_text, depth2_text を "" にリセットし、
+#   depth1_contract_ok / turn_role / turn_role_source は None に戻す。
 # =====================================================================
 class TestContract9_TurnInit:
     """ターン初期化契約: チェックポイントの汚染を防止。"""
@@ -687,7 +706,14 @@ class TestContract9_TurnInit:
         }
         app = _CaptureStreamApp(
             events=[merge_event],
-            state_values={"draft": "旧draft", "depth1_text": "旧depth1", "depth2_text": "旧depth2"},
+            state_values={
+                "draft": "旧draft",
+                "depth1_text": "旧depth1",
+                "depth1_contract_ok": False,
+                "depth2_text": "旧depth2",
+                "turn_role": "mirror",
+                "turn_role_source": "skeleton_rule",
+            },
         )
         monkeypatch.setattr("backend.core.agent_stream.workflow.compile", lambda checkpointer: app)
         ports = {
@@ -707,7 +733,10 @@ class TestContract9_TurnInit:
         assert app.inputs is not None
         assert app.inputs["draft"] == ""
         assert app.inputs["depth1_text"] == ""
+        assert app.inputs["depth1_contract_ok"] is None
         assert app.inputs["depth2_text"] == ""
+        assert app.inputs["turn_role"] is None
+        assert app.inputs["turn_role_source"] is None
         assert isinstance(app.inputs["draft"], str)
         assert isinstance(app.inputs["depth1_text"], str)
         assert isinstance(app.inputs["depth2_text"], str)
@@ -738,7 +767,10 @@ class TestContract9_TurnInit:
         assert app.inputs is not None
         assert app.inputs["draft"] == ""
         assert app.inputs["depth1_text"] == ""
+        assert app.inputs["depth1_contract_ok"] is None
         assert app.inputs["depth2_text"] == ""
+        assert app.inputs["turn_role"] is None
+        assert app.inputs["turn_role_source"] is None
 
     @pytest.mark.asyncio
     async def test_non_stream_silence_still_resets_depth_fields(self, monkeypatch):
@@ -766,7 +798,10 @@ class TestContract9_TurnInit:
         assert app.inputs["has_user_text"] is False
         assert app.inputs["draft"] == ""
         assert app.inputs["depth1_text"] == ""
+        assert app.inputs["depth1_contract_ok"] is None
         assert app.inputs["depth2_text"] == ""
+        assert app.inputs["turn_role"] is None
+        assert app.inputs["turn_role_source"] is None
 
 
 # =====================================================================

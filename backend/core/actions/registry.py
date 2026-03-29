@@ -192,6 +192,16 @@ class ActionRegistry:
             requires_confirmation=True,
         ))
 
+        # 11. Drawing Language
+        self.register(Action(
+            id="render_drawing",
+            name="ドローイング生成",
+            category=ActionCategory.DISPLAY,
+            risk_level=RiskLevel.SAFE,
+            description="draw DSL から SVG を生成して trace を保存",
+            payload={},
+        ))
+
 
 # グローバルインスタンス
 action_registry = ActionRegistry()

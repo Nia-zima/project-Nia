@@ -66,6 +66,8 @@ class ActionExecutor:
             "mc_attack": self._handle_mc_action,
             # Twitter (X)
             "post_tweet": self._handle_post_tweet,
+            # Drawing Language
+            "render_drawing": self._handle_render_drawing,
         }
         return handlers.get(action_id)
 
@@ -263,6 +265,11 @@ class ActionExecutor:
             "char_count": len(result.get("tweet_text") or ""),
             "proposal_id": (result.get("proposal") or {}).get("proposal_id"),
         }
+
+    async def _handle_render_drawing(self, payload: Dict[str, Any]) -> Any:
+        """ドローイング生成: draw DSL → SVG + trace 保存"""
+        from backend.core.drawing.runtime import render_and_store_drawing
+        return await render_and_store_drawing(payload)
 
     async def _handle_mc_action(self, payload: Dict[str, Any]) -> Any:
         """Minecraft ゲームアクション共通ハンドラ"""

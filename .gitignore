@@ -123,3 +123,23 @@ nia_room/
 
 # Temporary split/debug scripts
 tmp_split_*.py
+tmp_*.py
+tmp/
+
+# Debug output
+debug_output.txt
+
+# Backups (local only)
+backups/
+
+# SQLite databases in backend
+backend/core/*.sqlite3
+
+# Room state (runtime)
+data/room_state.json
+
+# Training exports (runtime data)
+data/training_exports/
+
+# Sample / test output
+data/sample_drawing.svg

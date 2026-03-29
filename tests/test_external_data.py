@@ -482,6 +482,8 @@ def test_merge_output_emits_observation_record(monkeypatch):
         "reason_codes": [],
         "dissonance": 0.11,
         "selected_depth": 1,
+        "turn_role": "connect",
+        "turn_role_source": "skeleton_rule",
     }
     out = merge_output(state)
     assert out.get("final_text") == "最終応答"
@@ -491,6 +493,8 @@ def test_merge_output_emits_observation_record(monkeypatch):
     assert rec.get("turn_id") == "turn-1"
     assert rec.get("final_text") == "最終応答"
     assert rec.get("merge_mode") == "B"
+    assert rec.get("turn_role") == "connect"
+    assert rec.get("turn_role_source") == "skeleton_rule"
 
 
 def test_broker_google_search_success(monkeypatch):

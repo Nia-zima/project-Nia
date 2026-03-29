@@ -61,6 +61,26 @@ class TestSaveSkeleton:
         assert row[0] == "resolve_contradiction"
         assert row[1] == 0.3
 
+    def test_save_with_turn_role(self):
+        turn_id = uuid.uuid4().hex
+        session_id = f"sess_{uuid.uuid4().hex[:8]}"
+        skel = ConversationSkeleton(
+            focus=Focus.USER_GOAL,
+            response_intent=ResponseIntent.RECEIVE,
+            turn_role="connect",
+            turn_role_source="role_transition",
+        )
+        row_id = save_skeleton(turn_id=turn_id, session_id=session_id, skeleton=skel)
+        assert row_id is not None
+
+        with managed_conn() as conn:
+            row = conn.execute(
+                "SELECT turn_role, turn_role_source FROM conversation_skeletons WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        assert row[0] == "connect"
+        assert row[1] == "role_transition"
+
 
 class TestGetRecentSkeletons:
     def _save_n(self, session_id: str, n: int) -> list[str]:
@@ -126,3 +146,16 @@ class TestGetRecentSkeletons:
         save_skeleton(turn_id=uuid.uuid4().hex, session_id=sid, skeleton=skel)
         result = get_recent_skeletons(sid, limit=1)
         assert result[0].rule_trace == []
+
+    def test_turn_role_round_trip(self):
+        sid = f"sess_{uuid.uuid4().hex[:8]}"
+        skel = ConversationSkeleton(
+            focus=Focus.LINGERING_STATE,
+            response_intent=ResponseIntent.ORGANIZE,
+            turn_role="deepen",
+            turn_role_source="skeleton_rule",
+        )
+        save_skeleton(turn_id=uuid.uuid4().hex, session_id=sid, skeleton=skel)
+        result = get_recent_skeletons(sid, limit=1)
+        assert result[0].turn_role == "deepen"
+        assert result[0].turn_role_source == "skeleton_rule"

@@ -154,7 +154,7 @@ class Settings:
         self.RETENTION_LIGHT_LIMIT = max(1, min(500, self.RETENTION_LIGHT_LIMIT))
         self.RETENTION_BOOT_SINCE_H = max(1, min(24 * 30, self.RETENTION_BOOT_SINCE_H))
 
-        # OpenAI / LLM settings
+        # OpenAI / LLM settings (depth0/1 default)
         self.OPENAI_MODEL = _env_str("OPENAI_MODEL", "gpt-4o-mini")
         self.MODEL_FAMILY = _env_str("MODEL_FAMILY", "")  # 空=自動検出, qwen/gpt-oss/openai/generic
         self.OPENAI_API_KEY = _env_str("OPENAI_API_KEY", "")
@@ -162,6 +162,11 @@ class Settings:
         self.TEMPERATURE = _env_float("TEMPERATURE", 0.7)
         self.PRESENCE_PENALTY = _env_float("PRESENCE_PENALTY", 0.3)
         self.REPETITION_PENALTY = _env_float("REPETITION_PENALTY", 1.12)
+
+        # Depth2 provider routing
+        self.DEPTH2_PROVIDER = _env_str("DEPTH2_PROVIDER", "local").strip().lower()  # "local" or "anthropic"
+        self.ANTHROPIC_API_KEY = _env_str("ANTHROPIC_API_KEY", "")
+        self.ANTHROPIC_MODEL = _env_str("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
         # Vision / Ollama settings
         self.OLLAMA_BASE_URL = _env_str("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -318,6 +323,8 @@ class Settings:
         self.NIACORE_SHADOW_ENABLED = _env_bool("NIACORE_SHADOW_ENABLED", False)
         # NiaCore: Batch training during Sleep Cycle
         self.NIACORE_TRAINING_ENABLED = _env_bool("NIACORE_TRAINING_ENABLED", False)
+        # NiaCore vNext: Shadow observation (pseudo-teacher labels, no execution)
+        self.NIACORE_VNEXT_SHADOW_ENABLED = _env_bool("NIACORE_VNEXT_SHADOW_ENABLED", False)
 
         # Memory Governance: Phase 0 observability (governance_events recording)
         self.GOVERNANCE_OBSERVE_ENABLED = _env_bool("GOVERNANCE_OBSERVE_ENABLED", False)
@@ -333,6 +340,25 @@ class Settings:
         self.SKELETON_RECORD_ENABLED = _env_bool("SKELETON_RECORD_ENABLED", False)
         # SkeletonCore: 体感テキストの LLM コンテキスト注入
         self.SKELETON_SOMATIC_ENABLED = _env_bool("SKELETON_SOMATIC_ENABLED", False)
+
+        # Contract 1: RuntimeFacts (=== 今の場所と時間 === 注入)
+        self.RUNTIME_FACTS_ENABLED = _env_bool("RUNTIME_FACTS_ENABLED", False)
+        # Contract 2: Somatic Atmosphere (=== 場の空気 === 条件付き注入)
+        self.ATMOSPHERE_ENABLED = _env_bool("ATMOSPHERE_ENABLED", False)
+
+        # Expression Layer E0: utterance metadata recording (observation only)
+        self.EXPRESSION_RECORD_ENABLED = _env_bool("EXPRESSION_RECORD_ENABLED", False)
+
+        # Drawing Language: hang drawings on room wall after render
+        self.DRAWING_ROOM_ENABLED = _env_bool("DRAWING_ROOM_ENABLED", False)
+
+        # Conversation Adaptation: failure-to-policy / success-to-preference
+        # Phase A: DDL + writer only, no runtime connection
+        self.ADAPTATION_RECORD_ENABLED = _env_bool("ADAPTATION_RECORD_ENABLED", False)
+
+        # Metabolic Hardening: knot distillation in Sleep Cycle
+        # Phase 4.5: extract knots, compute signals, hardness transitions
+        self.METABOLIC_KNOT_ENABLED = _env_bool("METABOLIC_KNOT_ENABLED", False)
 
         # Phase R: Autonomous Reflection
         self.IDLE_DETECTION_ENABLED = _env_bool("IDLE_DETECTION_ENABLED", True)
@@ -364,6 +390,9 @@ class Settings:
         # Phase F: Orchestrator S5
         self.ORCHESTRATOR_S5_ENABLED = _env_bool("ORCHESTRATOR_S5_ENABLED", True)
         self.DEPTH2_MIN_TURNS = _env_int("DEPTH2_MIN_TURNS", 100)
+        self.DEPTH2_REFLECTIVE_MIN_COVERAGE = _env_float(
+            "DEPTH2_REFLECTIVE_MIN_COVERAGE", 0.45,
+        )
 
         # Episodic compression & archival
         self.EPISODIC_ARCHIVE_AFTER_DAYS = _env_int("EPISODIC_ARCHIVE_AFTER_DAYS", 7)
@@ -501,6 +530,23 @@ def _validate_feature_flags(s: Settings) -> None:
         )
         s.NIACORE_EXPERIENCE_ENABLED = True
 
+    # NIACORE_VNEXT_SHADOW requires NIACORE_EXPERIENCE
+    if s.NIACORE_VNEXT_SHADOW_ENABLED and not s.NIACORE_EXPERIENCE_ENABLED:
+        warnings.warn(
+            "NIACORE_VNEXT_SHADOW_ENABLED=true requires NIACORE_EXPERIENCE_ENABLED=true. "
+            "Forcing NIACORE_EXPERIENCE_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.NIACORE_EXPERIENCE_ENABLED = True
+
+    # NIACORE_VNEXT_SHADOW benefits from SKELETON_RECORD (soft warning, not forced)
+    if s.NIACORE_VNEXT_SHADOW_ENABLED and not s.SKELETON_RECORD_ENABLED:
+        warnings.warn(
+            "NIACORE_VNEXT_SHADOW_ENABLED=true without SKELETON_RECORD_ENABLED=true: "
+            "pseudo-teacher rules A3/C1/C2/C3 will have no skeleton input.",
+            stacklevel=2,
+        )
+
     # SOMATIC_ADAPTIVE requires SOMATIC
     if s.SOMATIC_ADAPTIVE_ENABLED and not s.SOMATIC_ENABLED:
         warnings.warn(
@@ -509,6 +555,15 @@ def _validate_feature_flags(s: Settings) -> None:
             stacklevel=2,
         )
         s.SOMATIC_ENABLED = True
+
+    # ATMOSPHERE requires RUNTIME_FACTS
+    if s.ATMOSPHERE_ENABLED and not s.RUNTIME_FACTS_ENABLED:
+        warnings.warn(
+            "ATMOSPHERE_ENABLED=true requires RUNTIME_FACTS_ENABLED=true. "
+            "Forcing RUNTIME_FACTS_ENABLED=true.",
+            stacklevel=2,
+        )
+        s.RUNTIME_FACTS_ENABLED = True
 
     # SOMATIC_FEEDBACK requires SOMATIC
     if s.SOMATIC_FEEDBACK_ENABLED and not s.SOMATIC_ENABLED:

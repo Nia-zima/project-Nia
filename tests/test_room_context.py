@@ -62,12 +62,12 @@ class TestBuildRoomContext:
             assert expected_text in result, f"Expected '{expected_text}' for {tod}"
 
     def test_pip_mood_text(self, monkeypatch):
-        """Pip mood maps to descriptive text."""
+        """Pip mood maps to descriptive text via shared visible-state mapper."""
         for mood, expected in [
             ("sleeping", "眠っている"),
             ("curious", "こちらを見ている"),
-            ("comfort", "寄り添って"),
-            ("empathy", "寄りかかって"),
+            ("comfort", "そばにいる"),    # PipVisible.NEAR
+            ("empathy", "そばにいる"),    # PipVisible.NEAR
         ]:
             monkeypatch.setattr(
                 "backend.services.room.room_context.load_room_state",

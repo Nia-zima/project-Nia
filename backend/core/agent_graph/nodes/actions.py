@@ -1,5 +1,6 @@
 """Action processing and S5 commit nodes."""
 import asyncio
+import re
 import time
 
 from backend.core.config import settings
@@ -14,11 +15,38 @@ from .commit_helpers import (
     _infer_emotional_state,
     _update_pip_interaction,
     _record_niacore_experience,
+    _record_niacore_vnext_shadow,
     _record_skeleton,
+    _record_expression_observation,
     _harvest_governance_candidates,
     _aggregate_governance_evidence,
     _record_fingerprint,
+    _broadcast_motion_events,
 )
+
+
+# =============================================================================
+# Draw block extraction
+# =============================================================================
+
+_DRAW_BLOCK_RE = re.compile(r"```draw\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_draw_blocks(text: str) -> list[str]:
+    """Extract draw DSL blocks from fenced code blocks."""
+    return [m.strip() for m in _DRAW_BLOCK_RE.findall(text or "") if m.strip()]
+
+
+def _make_drawing_id(state: AgentState, block_index: int) -> str | None:
+    """Deterministic drawing ID from message_id or stream_id.
+
+    Returns None when no provenance ID is available — caller must
+    pre-gate reject to avoid draw:unknown collisions.
+    """
+    key = state.get("message_id") or state.get("stream_id")
+    if not key:
+        return None
+    return f"draw:{key}:{block_index}"
 
 
 # =============================================================================
@@ -39,6 +67,16 @@ async def action_processing(state: AgentState) -> dict:
     confidence = state.get("confidence", 0.5)
     final_text = state.get("final_text", "")
 
+    if state.get("test_mode"):
+        logger.info("[ACTION_PROCESSING] skipped: test_mode=True (no side effects)")
+        return {
+            "proposed_actions": [],
+            "approved_actions": [],
+            "pending_actions": [],
+            "rejected_actions": [],
+            "action_results": [],
+        }
+
     if state.get("hold_required") or str(final_text).strip() == "WAIT":
         return {
             "proposed_actions": [],
@@ -50,6 +88,8 @@ async def action_processing(state: AgentState) -> dict:
 
     # Phase 5.1: アクション提案の抽出（簡易版）
     proposed_actions: list[dict] = []
+    # Preserve existing rejected_actions from state (cross-turn accumulation)
+    rejected_actions: list[dict] = list(state.get("rejected_actions") or [])
 
     if "記憶" in final_text and "保存" in final_text:
         proposed_actions.append({
@@ -93,19 +133,51 @@ async def action_processing(state: AgentState) -> dict:
         except Exception as exc:
             logger.warning("[ACTION] tweet generation failed: %s", exc, exc_info=True)
 
+    # Drawing Language: detect ```draw blocks in final_text
+    draw_blocks = _extract_draw_blocks(final_text)
+    if len(draw_blocks) > 1:
+        # Pre-gate rejection: multiple draw blocks are not allowed in v0
+        rejected_actions.append({
+            "action_id": "render_drawing",
+            "status": "REJECTED",
+            "reason": f"multiple_draw_blocks: found {len(draw_blocks)}, expected at most 1",
+        })
+        logger.warning(
+            "[ACTION_PROCESSING] multiple draw blocks (%d) rejected",
+            len(draw_blocks),
+        )
+    elif len(draw_blocks) == 1:
+        drawing_id = _make_drawing_id(state, 0)
+        if drawing_id is None:
+            rejected_actions.append({
+                "action_id": "render_drawing",
+                "status": "REJECTED",
+                "reason": "no_provenance_id: message_id and stream_id are both missing",
+            })
+            logger.warning("[ACTION_PROCESSING] draw block rejected: no provenance ID")
+        else:
+            proposed_actions.append({
+                "action_id": "render_drawing",
+                "payload": {
+                    "drawing_id": drawing_id,
+                    "dsl_code": draw_blocks[0],
+                    "thread_id": str(state.get("thread_id") or "default_thread"),
+                },
+            })
+
     if not proposed_actions:
         return {
             "proposed_actions": [],
             "approved_actions": [],
             "pending_actions": state.get("pending_actions") or [],
-            "rejected_actions": state.get("rejected_actions") or [],
+            "rejected_actions": rejected_actions,
             "action_results": [],
         }
 
     # Phase 5.2: ActionGateで判定
     approved_actions: list[dict] = []
     pending_actions: list[dict] = []
-    rejected_actions: list[dict] = []
+    # rejected_actions already initialized above (may contain pre-gate rejections)
 
     def _action_meta(action, payload: dict) -> dict:
         return {
@@ -175,9 +247,12 @@ async def action_processing(state: AgentState) -> dict:
                 raise ValueError(f"Unknown action: {action_id}")
             action_instance = dataclass_replace(action_obj, payload=action.get("payload", {}) or {})
             result = await action_executor.execute(action_instance)
+            # Executor wraps handler errors as {"status": "error"} without raising.
+            # Propagate the actual status instead of assuming success.
+            result_status = result.get("status", "success") if isinstance(result, dict) else "success"
             item = {
                 "action_id": action_id,
-                "status": "success",
+                "status": result_status,
                 "result": result,
                 "ts": time.time(),
             }
@@ -248,16 +323,29 @@ async def s5_commit(state: AgentState) -> dict:
 
     hold_required = bool(state.get("hold_required"))
     final_text = str(state.get("final_text") or "").strip()
+    thread_id = str(state.get("thread_id") or "default")
+    turn_id = _uuid.uuid4().hex
+
+    # Expression Layer E0: record observation BEFORE any early return.
+    # test_mode data is needed for E0.5 replay/eval (A/B model comparison).
+    # Non-speech events (WAIT, soft_close) are also recorded.
+    if getattr(settings, "EXPRESSION_RECORD_ENABLED", False):
+        try:
+            _record_expression_observation(state, thread_id, turn_id)
+        except Exception:
+            logger.debug("[S5_COMMIT] expression record failed", exc_info=True)
+
+    if state.get("test_mode"):
+        logger.info("[S5_COMMIT] skipped: test_mode=True (no memory save)")
+        return {"orchestrator_stage": "S5", "commit_result": {"skipped": True, "reason": "test_mode"}}
 
     if hold_required or final_text == "WAIT" or not final_text:
         logger.info("[S5_COMMIT] skipped: hold=%s wait=%s empty=%s",
                      hold_required, final_text == "WAIT", not final_text)
         return {"orchestrator_stage": "S5", "commit_result": {"skipped": True}}
 
-    thread_id = str(state.get("thread_id") or "default")
     user_text = str(state.get("user_text") or "")
     now = time.time()
-    turn_id = _uuid.uuid4().hex
 
     plan = CommitPlan()
 
@@ -405,7 +493,7 @@ async def s5_commit(state: AgentState) -> dict:
 
                 # N.4: Update metacog stats for state-driven triggers
                 try:
-                    _update_metacog_stats(state, now)
+                    _update_metacog_stats(state, now, thread_id=thread_id)
                 except Exception:
                     logger.debug("[S5_COMMIT] metacog stats update failed", exc_info=True)
 
@@ -429,6 +517,13 @@ async def s5_commit(state: AgentState) -> dict:
                         _record_niacore_experience(state, thread_id, turn_id, user_text, now)
                     except Exception:
                         logger.debug("[S5_COMMIT] niacore experience failed", exc_info=True)
+
+                # NiaCore vNext: Record shadow observation (pseudo-teacher labels)
+                if getattr(settings, "NIACORE_VNEXT_SHADOW_ENABLED", False):
+                    try:
+                        _record_niacore_vnext_shadow(state, thread_id, turn_id)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] niacore vnext shadow failed", exc_info=True)
 
                 # SkeletonCore: Record conversation skeleton labels
                 if getattr(settings, "SKELETON_RECORD_ENABLED", False):
@@ -459,6 +554,13 @@ async def s5_commit(state: AgentState) -> dict:
                     except Exception:
                         logger.debug("[S5_COMMIT] fingerprint record failed", exc_info=True)
 
+                # Contract 3: Broadcast motion events to Unity
+                if getattr(settings, "RUNTIME_FACTS_ENABLED", False):
+                    try:
+                        _broadcast_motion_events(state, thread_id)
+                    except Exception:
+                        logger.debug("[S5_COMMIT] motion broadcast failed", exc_info=True)
+
                 break
             if attempt < max_retries - 1:
                 logger.warning("[S5_COMMIT] attempt %d/%d failed: %s", attempt + 1, max_retries, result.errors)
@@ -472,6 +574,16 @@ async def s5_commit(state: AgentState) -> dict:
             else:
                 logger.exception("[S5_COMMIT] all %d attempts failed: %s", max_retries, e)
                 commit_summary = {"success": False, "errors": [str(e)]}
+
+    # Contract 3: Reset conversation state to IDLE after commit
+    if getattr(settings, "RUNTIME_FACTS_ENABLED", False):
+        try:
+            from backend.controllers.ws_room import room_manager
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(room_manager.broadcast_conversation_state("idle"))
+        except Exception:
+            pass
 
     logger.info("[S5_COMMIT] result=%s", commit_summary)
     result: dict = {

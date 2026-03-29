@@ -223,3 +223,46 @@ def test_all_senses_have_valid_intensity():
     for s in senses:
         assert 0.0 <= s.intensity <= 1.0, f"Invalid intensity: {s.intensity}"
         assert s.text, "Sense text should not be empty"
+
+
+# ── Variant determinism ─────────────────────────────────────────
+
+
+def test_variant_is_stable_across_calls():
+    """Same turn_id always produces the same template variant."""
+    metrics = InternalMetrics(retrieval_count=3, top_similarity=0.82)
+    cal = SomaticCalibration()
+    a = translate(metrics, cal, turn_id="turn_abc_123")
+    b = translate(metrics, cal, turn_id="turn_abc_123")
+    assert a[0].text == b[0].text
+
+
+def test_variant_differs_by_turn_id():
+    """Different turn_ids can produce different variants."""
+    metrics = InternalMetrics(retrieval_count=3, top_similarity=0.82)
+    cal = SomaticCalibration()
+    # Try many turn_ids; at least one should differ from the default (index 0)
+    texts = set()
+    for i in range(20):
+        senses = translate(metrics, cal, turn_id=f"turn_{i}")
+        texts.add(senses[0].text)
+    assert len(texts) >= 2, "Expected at least 2 distinct variants across 20 turn_ids"
+
+
+def test_variant_empty_turn_id_uses_first():
+    """turn_id='' always selects index 0 (backward compat)."""
+    metrics = InternalMetrics(retrieval_count=3, top_similarity=0.82)
+    cal = SomaticCalibration()
+    senses = translate(metrics, cal, turn_id="")
+    assert "はっきり覚えている" in senses[0].text
+
+
+def test_pick_variant_uses_stable_hash():
+    """_pick_variant uses zlib.crc32, not Python hash()."""
+    from backend.services.memory.somatic_translator import _pick_variant
+    variants = ("a", "b", "c")
+    # crc32 is process-stable — same input → same output always
+    result1 = _pick_variant(variants, "test_id")
+    result2 = _pick_variant(variants, "test_id")
+    assert result1 == result2
+    assert result1 in variants

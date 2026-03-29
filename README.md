@@ -3,6 +3,19 @@
 > AI VTuber「ニア (Nia)」の開発リポジトリ。LangGraph ベースの多層エージェントグラフ + Next.js フロントエンド。
 > ニアは「なりつつある存在」であり、完成形がない。結論を急がず、沈黙を選択肢とし、経験から自然に変化していく。
 
+## まず読む
+
+- `README.md`:
+  リポジトリ全体の概要とシステム構成の入口
+- `ABOUT_NIA.md`:
+  ニアがどういう存在として設計されているか、思想面の正本
+- `docs/nia_core_summary.md`:
+  ニアの core 系の詳細まとめ。runtime / memory / adaptation / metabolic hardening の全体像
+- `docs/session_handoff.md`:
+  いま何が実装済みで、次にどこへ進むかの最新メモ
+- `docs/assistant_context.md`:
+  別 AI や新しい作業セッション向けの復元入口
+
 ## 設計思想
 
 - **LLM は交換可能な言語モジュール。** 知性の本体は LangGraph グラフ構造 + 記憶システム + depth_selector + body_constitution
@@ -17,13 +30,20 @@
 
 ## 現在の実装ステージ
 
-このリポジトリの現在地は、`review_window` を含む会話制御の本線は稼働済みで、その上に `NiaCore` と `SkeletonCore` をシャドー/記録モードで重ねて観測している段階。
+このリポジトリの現在地は、`review_window` を含む会話制御の本線は稼働済みで、その上に `NiaCore` / `SkeletonCore` / Governance / Fingerprint を観測モードで重ね、さらに Pip・部屋・Temporal 系の Contract 1/2/3 を実装済みだが feature gate で段階投入している段階。
 
 - 会話の本線は `Safety -> Dissonance -> DepthSelector -> Depth0/1/2 -> Merge -> ActionProcessing -> S5Commit`
 - `review_window` は hold / approve / reject / token mismatch / new input cancel / SSE (`hold_request`, `hold_cancelled`, `final_result`) まで実装済み
 - `S5 Commit` はエピソディック保存に加えて、awareness / somatic feedback / reflection trigger / Pip / NiaCore experience / Skeleton record のフックを持つ
 - `NiaCore` は実装済みだが、本線の深度決定はまだ置き換えない。現在は shadow inference と experience 蓄積の段階
+- `NiaCore vNext` は Phase N0 実装済み。`StateVectorV2 + 擬似教師 + shadow writer` を観測専用で追加し、v1 shadow とは別 namespace で並走する
 - `SkeletonCore` は実装済みで、現在は record-only 段階。somatic 注入は feature gate で切り替える
+- Memory Governance は observe / candidate / evidence まで live。`raw_promotion_candidates` と `memory_evidence` が canary で蓄積中
+- Temporal Somatic Contrast は `TS.0` の fingerprint 記録が live。`TS.1-2` contrast と `TS.3` idle tick は設計済み
+- Depth2 は `risk / reflective` に分離済み。`reflective` は `dissonance_on` を強制しない
+- `RuntimeFacts / Atmosphere / Motion` は実装済み。現在は `RUNTIME_FACTS_ENABLED=true`、`ATMOSPHERE_ENABLED=false`、motion は WS snapshot / state / event 契約まで接続済み
+- 直近では Conversation Adaptation Phase A〜C と `open_reflection` の trigger-based 弱拡張まで完了している。履歴選別は `history_bias` を読める状態で、次は観測と Phase D / E 判断の段階
+- Metabolic Hardening は knot-first v0.2 で Step 0〜3 と Sleep Cycle Phase 4.5 統合まで完了。現在は `METABOLIC_KNOT_ENABLED=true` の canary 観測段階
 
 **このワークスペースの現在の `.env` 運用:**
 
@@ -33,6 +53,23 @@
 - `NIACORE_TRAINING_ENABLED=false`
 - `SKELETON_RECORD_ENABLED=true`
 - `SKELETON_SOMATIC_ENABLED=false`
+- `GOVERNANCE_OBSERVE_ENABLED=true`
+- `GOVERNANCE_CANDIDATE_ENABLED=true`
+- `GOVERNANCE_EVIDENCE_ENABLED=true`
+- `FINGERPRINT_RECORD_ENABLED=true`
+- `EXPRESSION_RECORD_ENABLED=true`
+- `ADAPTATION_RECORD_ENABLED=true`
+- `METABOLIC_KNOT_ENABLED=true`
+- `NIACORE_VNEXT_SHADOW_ENABLED=true`
+- `RUNTIME_FACTS_ENABLED=true`
+- `ATMOSPHERE_ENABLED=false`
+- `DEPTH2_PROVIDER=anthropic`
+
+**現在 off の主な実装済み feature gate:**
+
+- `NIACORE_TRAINING_ENABLED=false`
+- `SKELETON_SOMATIC_ENABLED=false`
+- `ATMOSPHERE_ENABLED=false`
 
 ---
 
@@ -57,7 +94,7 @@
 | 外部検索 | Google Custom Search API + Wikipedia API |
 | X (Twitter) 投稿 | tweepy (X API v2) |
 | 配信チャット | YouTube Live Chat API + Twitch IRC |
-| テスト | pytest (1200+ テスト, スナップショット + YAML Playbook) |
+| テスト | pytest (1590+ テスト, スナップショット + YAML Playbook) |
 
 ---
 
@@ -164,7 +201,7 @@ N.3 Self-Model の出力は `identity_proposals` テーブルに保存され、O
 
 ### ニアの部屋
 
-空の部屋から始まり、ニアが自分で家具を配置する Unity 空間（バックエンド側完了）。
+空の部屋から始まり、ニアが自分で家具を配置する部屋システム。バックエンド側の state / context / motion 契約は実装済みで、Unity renderer は別途接続する前提。
 
 | コンポーネント | ファイル | 内容 |
 |:---|:---|:---|
@@ -325,6 +362,18 @@ CfC (Closed-form Continuous-depth) ベースの LNN。LLM が「System 2（遅�
 
 詳細: `docs/niacore_lnn_design.md`
 
+### NiaCore vNext
+
+NiaCore を depth-only から `attention / intent / action / depth` の多ヘッド候補へ拡張する vNext 系列。  
+現在は **Phase N0 観測専用** で、`shadow_v1` を壊さずに別 shadow として並走している。
+
+- 実装済み: `StateVectorV2`, 擬似教師ルール `A1-A3 / C1-C3`, shadow orchestrator, fire-and-forget writer, `niacore_vnext_shadow` テーブル
+- 現在の役割: `attention_target` / `recommended_action` / `feature_availability` を記録し、vNext head の学習前に分布と配線状況を観測する
+- 設計上の注意: `confidence_history` は vNext pseudo-teacher 用に thread-scoped で保持するが、既存 N.4 trigger のため global aggregate も維持する
+- 現在のローカル運用: `NIACORE_VNEXT_SHADOW_ENABLED=true`
+
+詳細: `docs/niacore_vnext_design.md`
+
 ---
 
 ## SkeletonCore（会話骨格）
@@ -339,6 +388,20 @@ CfC (Closed-form Continuous-depth) ベースの LNN。LLM が「System 2（遅�
 - 設計原則: NiaCore と統合しない。命令ではなく体感として渡す
 
 詳細: `docs/skeletoncore_design.md`
+
+---
+
+## Expression Layer（発話メタデータ）
+
+LLM の文体に依存せず、Nia 固有の表現傾向を体験から抽出・保持する中間層。
+
+**現在地:** Phase E0 実装完了。観測専用でルールベースの発話メタデータ記録のみ。
+
+- 実装済み: 14構造特徴量抽出器, イベント種別判定 (spoken/wait_depth/wait_hold/soft_close/empty_abort), fire-and-forget DB writer, model strata 記録, depth2_fallback_used 追跡
+- 現在の役割: 各ターンの発話メタデータを `expression_observations` テーブルに記録し、E0.5 のパターン分析に備える
+- 現在のローカル運用: `EXPRESSION_RECORD_ENABLED=true`
+
+詳細: `docs/nia_expression_layer_design.md`
 
 ---
 
@@ -371,6 +434,7 @@ project-nia/
 │   │   ├── confidence/
 │   │   │   └── metrics.py             # 確信度エンジン (5メトリクス)
 │   │   ├── conversation_skeleton/     # SkeletonCore ルール / builder / store / somatic
+│   │   ├── expression/                # Expression Layer E0 (extractor / event_kind / writer)
 │   │   ├── constants/
 │   │   │   ├── nia_spine_v10.py       # Spine（全レイヤー共通の基本指示）
 │   │   │   ├── depth0_prompt_v11.py   # Depth0 プロンプト
@@ -476,6 +540,8 @@ project-nia/
 ├── docs/
 │   ├── nia_design_philosophy.md       # 設計思想
 │   ├── niacore_lnn_design.md          # NiaCore LNN 設計書
+│   ├── niacore_vnext_design.md        # NiaCore vNext 設計書
+│   ├── nia_expression_layer_design.md # Expression Layer 設計書
 │   ├── skeletoncore_design.md         # SkeletonCore 設計書
 │   ├── somatic_self_awareness_design.md # 体感ベース自己認識
 │   ├── nia_metacognition_design.md    # メタ認知 N.0〜N.5
@@ -698,7 +764,7 @@ pytest tests/test_playbook.py -v
 ruff check backend/ && pytest tests/
 ```
 
-現在のテストスイート: **1200+ テスト**
+現在のテストスイート: **1590+ テスト**
 
 ---
 
@@ -724,14 +790,20 @@ ruff check backend/ && pytest tests/
 | ドキュメント | 内容 |
 |:---|:---|
 | `docs/nia_design_philosophy.md` | 設計思想（全12セクション） |
-| `docs/niacore_lnn_design.md` | NiaCore LNN 設計書 v0.3 |
+| `docs/niacore_lnn_design.md` | NiaCore LNN 設計書 v0.4 |
+| `docs/niacore_vnext_design.md` | NiaCore vNext 設計書（Phase N0 実装済み） |
 | `docs/skeletoncore_design.md` | SkeletonCore 設計書 v0.3 |
 | `docs/skeletoncore_meeting_extension.md` | SkeletonCore の meeting 拡張メモ |
+| `docs/nia_curiosity_design.md` | 好奇心の inward / outward 二軸設計メモ |
 | `docs/somatic_self_awareness_design.md` | 体感ベース自己認識 |
 | `docs/nia_metacognition_design.md` | メタ認知 N.0〜N.5 |
 | `docs/pip_and_room_design.md` | Pip + 部屋の統合設計 |
+| `docs/pip_room_temporal_livestream_integration.md` | Pip / 部屋 / Temporal / 配信用 motion の接続仕様 |
+| `docs/unity_room_visual_direction.md` | Unity 部屋 / 配信ビジュアルの初期方針 |
 | `docs/memory_system_overview.md` | 記憶システム全体像 |
 | `docs/memory_retrieval_design.md` | Query-Aware Retrieval |
+| `docs/temporal_somatic_contrast_design.md` | Temporal Somatic Contrast + Idle Tick 設計書 |
+| `docs/data_store_map.md` | 全データストアの分類と目的 |
 | `docs/data_accuracy_2026-03.md` | 2026-03 のデータ精度改善まとめ |
 | `docs/governance_phase_a_status_2026-03-11.md` | Governance Phase A の現在地と probe 方針 |
 | `docs/body_constitution.md` | 身体憲章 |

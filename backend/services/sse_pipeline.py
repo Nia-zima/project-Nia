@@ -15,6 +15,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict
 
+import re as _re
+
 from backend.core.logger import logger
 from backend.core.model_adapter import THINK_RE as _THINK_RE
 from backend.core.constants.nia_spine_v10 import NIA_SPINE_V10_VERSION
@@ -48,6 +50,23 @@ def _ensure_str(chunk: Any) -> str:
     return str(chunk)
 
 
+# Orphan </think> pattern: matches the tag itself plus surrounding whitespace,
+# but NOT text before it (to avoid eating valid content).
+_ORPHAN_THINK_CLOSE_RE = _re.compile(r"\s*</think>\s*")
+
+
+def strip_think_leaks(text: str) -> str:
+    """Remove <think>...</think> blocks and orphan </think> tags from text.
+
+    Used in both SSE streaming path and collect_text helper.
+    """
+    # 1. Full <think>...</think> blocks
+    text = _THINK_RE.sub("", text)
+    # 2. Orphan </think> (closing tag without opener) + surrounding whitespace
+    text = _ORPHAN_THINK_CLOSE_RE.sub("", text)
+    return text.strip()
+
+
 def _sse_json(obj: Dict[str, Any]) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
@@ -67,6 +86,7 @@ class SSEContext:
     stream_id: str | None
     sse_min_interval_ms: int
     t0: int  # start timestamp for telemetry
+    test_mode: bool = False
     done_sent: bool = False
     done_pending: bool = False
     current_turn_id: int | None = None
@@ -151,7 +171,7 @@ async def _sse_emit_lint_log(
     text_len_after: int,
 ) -> None:
     """Emit output lint telemetry event (once per stream)."""
-    if sctx.output_lint_logged:
+    if sctx.output_lint_logged or sctx.test_mode:
         return
     payload = build_output_lint_log(
         violations=violations,
@@ -171,13 +191,14 @@ async def _sse_emit_lint_log(
         "gate": False,
     }
     d_lint = payload.get("dissonance_delta_lint") or 0.0
-    if isinstance(d_lint, (int, float)) and d_lint > 0:
+    if (not sctx.test_mode) and isinstance(d_lint, (int, float)) and d_lint > 0:
         await orchestrator._telemetry_event(
             sctx.thread_id,
             "telemetry_kv_add",
             {"key": f"dissonance_lint_total:{sctx.thread_id}", "delta": float(d_lint)},
         )
-    await orchestrator._telemetry_event(sctx.thread_id, "commit_log", payload)
+    if not sctx.test_mode:
+        await orchestrator._telemetry_event(sctx.thread_id, "commit_log", payload)
     sctx.output_lint_logged = True
 
 
@@ -193,9 +214,9 @@ async def _handle_sse_text(sctx: SSEContext, ev: dict, orchestrator) -> list[str
 
     raw_content = ev.get("content", "")
     chunk_content = "" if raw_content is None else str(raw_content)
-    # Safety net: strip residual <think>...</think> blocks
-    if "<think>" in chunk_content:
-        chunk_content = _THINK_RE.sub("", chunk_content).strip()
+    # Safety net: strip residual <think>...</think> blocks and orphan </think>
+    if "<think>" in chunk_content or "</think>" in chunk_content:
+        chunk_content = strip_think_leaks(chunk_content)
         if not chunk_content:
             return results
     sctx.last_raw_content_type = type(raw_content).__name__
@@ -214,9 +235,10 @@ async def _handle_sse_text(sctx: SSEContext, ev: dict, orchestrator) -> list[str
 
     if (not sctx.first_token_sent) and chunk_content:
         sctx.first_token_sent = True
-        await orchestrator._telemetry_event(sctx.thread_id, "stream_first_token", {
-            "ms_from_start": _ms() - sctx.t0
-        })
+        if not sctx.test_mode:
+            await orchestrator._telemetry_event(sctx.thread_id, "stream_first_token", {
+                "ms_from_start": _ms() - sctx.t0
+            })
 
     sctx.stream_buffer = str(sctx.stream_buffer) + chunk_content
 
@@ -235,10 +257,11 @@ async def _handle_sse_text(sctx: SSEContext, ev: dict, orchestrator) -> list[str
             leak_reasons = detect_internal_leak(line)
             if is_critical_leak(leak_reasons):
                 sctx.stream_error = "safety_block"
-                await orchestrator._telemetry_event(sctx.thread_id, "safety_block", {
-                    "scope": "stream_chat",
-                    "reasons": leak_reasons,
-                })
+                if not sctx.test_mode:
+                    await orchestrator._telemetry_event(sctx.thread_id, "safety_block", {
+                        "scope": "stream_chat",
+                        "reasons": leak_reasons,
+                    })
             else:
                 res = await _sse_text_append(sctx, line + "\n")
                 if res:
@@ -259,10 +282,11 @@ async def _handle_sse_text(sctx: SSEContext, ev: dict, orchestrator) -> list[str
         leak_reasons = detect_internal_leak(sctx.stream_buffer)
         if is_critical_leak(leak_reasons):
             sctx.stream_error = "safety_block"
-            await orchestrator._telemetry_event(sctx.thread_id, "safety_block", {
-                "scope": "stream_chat",
-                "reasons": leak_reasons,
-            })
+            if not sctx.test_mode:
+                await orchestrator._telemetry_event(sctx.thread_id, "safety_block", {
+                    "scope": "stream_chat",
+                    "reasons": leak_reasons,
+                })
         else:
             res = await _sse_text_append(sctx, sctx.stream_buffer)
             if res:
@@ -301,10 +325,11 @@ async def _handle_sse_done(sctx: SSEContext, ev: dict, orchestrator) -> list[str
             leak_reasons = detect_internal_leak(tail)
             if is_critical_leak(leak_reasons):
                 sctx.stream_error = "safety_block"
-                await orchestrator._telemetry_event(sctx.thread_id, "safety_block", {
-                    "scope": "stream_chat",
-                    "reasons": leak_reasons,
-                })
+                if not sctx.test_mode:
+                    await orchestrator._telemetry_event(sctx.thread_id, "safety_block", {
+                        "scope": "stream_chat",
+                        "reasons": leak_reasons,
+                    })
             else:
                 res = await _sse_text_append(sctx, tail)
                 if res:
@@ -354,13 +379,14 @@ async def _persist_stream_result(sctx: SSEContext, orchestrator) -> None:
                     "text": text_to_save,
                     "meta": {
                         "incomplete": not done_for_log,
-                        "error": bool(sctx.stream_error)
+                        "error": bool(sctx.stream_error),
+                        "test_mode": bool(sctx.test_mode),
                     }
                 },
                 attachments=[]
             )
 
-            if done_for_log:
+            if done_for_log and not sctx.test_mode:
                 await orchestrator._telemetry_event(sctx.thread_id, "chat_completed", {
                     "len": len(text_to_save),
                     "ms": _ms() - sctx.t0

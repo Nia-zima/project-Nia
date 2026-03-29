@@ -20,6 +20,7 @@ interface ChatInterfaceProps {
 }
 
 export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
+    const TEST_MODE_STORAGE_KEY = "chat_test_mode";
     const {
         messages, setMessages, addMessage, updateMessageContent, upsertMessage, clearMessages,
         input, setInput, appendInput,
@@ -47,12 +48,14 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
     const activeStreamIdRef = useRef<number>(0);
     const sseStreamIdRef = useRef<string | null>(null);
     const finalTextLockedRef = useRef<boolean>(false);
+    const drawOnlyTurnRef = useRef<boolean>(false);
     const turnStartedAtMsRef = useRef<number>(0);
     const abortControllerRef = useRef<AbortController | null>(null);
     const currentStateRef = useRef<string>("");
     const ttsEsRef = useRef<EventSource | null>(null);
     const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => { });
     const micVadRef = useRef<any>(null);
+    const [testMode, setTestMode] = React.useState(false);
 
     const {
         audioQueueRef,
@@ -131,6 +134,13 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
         const savedThreadId = "default_thread";
         setThreadId(savedThreadId);
 
+        try {
+            const savedTestMode = window.localStorage.getItem(TEST_MODE_STORAGE_KEY);
+            if (savedTestMode === "1") {
+                setTestMode(true);
+            }
+        } catch { }
+
         const loadHistory = async () => {
             if (isStreamingRef.current) return;
 
@@ -154,6 +164,16 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
         return () => {
             cleanupVoiceRuntime();
         };
+    }, []);
+
+    const toggleTestMode = React.useCallback(() => {
+        setTestMode((prev) => {
+            const next = !prev;
+            try {
+                window.localStorage.setItem(TEST_MODE_STORAGE_KEY, next ? "1" : "0");
+            } catch { }
+            return next;
+        });
     }, []);
 
     // Scroll is handled inside ChatMessages component
@@ -275,7 +295,9 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                 }
                 return;
             }
-            const text = extractSpeech(normalizeContent(last.content));
+            const rawText = extractSpeech(normalizeContent(last.content));
+            // Strip draw fences from backfilled text (DrawingCard handles display)
+            const text = rawText?.replace(/```draw\s*\n[\s\S]*?```/gi, "").trim();
             if (!text) {
                 if (attempt < 2) {
                     setTimeout(() => backfillLastAssistantMessage(attempt + 1), 250);
@@ -419,12 +441,19 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                 const ft = String(payload.final_text ?? "");
                 console.info("[SSE final_result] len=%d merge_mode=%s", ft.length, payload.merge_mode);
                 if (ft.trim() && ft.trim() !== "WAIT") {
-                    if (!aiMsgIdRef.current) {
-                        beginAiMessage();
+                    // Strip ```draw fences from display text (rendered as DrawingCard instead)
+                    const displayText = ft.replace(/```draw\s*\n[\s\S]*?```/gi, "").trim();
+                    if (displayText) {
+                        if (!aiMsgIdRef.current) {
+                            beginAiMessage();
+                        }
+                        const id = aiMsgIdRef.current;
+                        aiTextRef.current = displayText;
+                        if (id) updateMessageContent(id, displayText);
+                    } else {
+                        // draw-only response: DrawingCard handles display, skip backfill
+                        drawOnlyTurnRef.current = true;
                     }
-                    const id = aiMsgIdRef.current;
-                    aiTextRef.current = ft;
-                    if (id) updateMessageContent(id, ft);
                     finalTextLockedRef.current = true;
                 }
             } else if (msg.type === "event" && msg.name === "thinking_hint") {
@@ -436,7 +465,8 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                     msg.name === "hold_cancelled" ||
                     msg.name === "action_proposed" ||
                     msg.name === "action_approved" ||
-                    msg.name === "action_blocked"
+                    msg.name === "action_blocked" ||
+                    msg.name === "action_failed"
                 )
             ) {
                 if (typeof window !== "undefined") {
@@ -446,14 +476,45 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                         })
                     );
                 }
+                // Drawing: insert inline chat message for render_drawing results
+                // Uses upsertMessage for SSE replay / reconnection dedup
+                const p = msg.payload || {};
+                if (p.action_id === "render_drawing") {
+                    if (msg.name === "action_approved" && p.result?.result?.svg_artifact) {
+                        const r = p.result.result;
+                        upsertMessage({
+                            id: `drawing-${r.drawing_id || sseStreamIdRef.current || "unknown"}`,
+                            role: 'ai',
+                            content: r.svg_artifact,
+                            kind: 'drawing',
+                            meta: {
+                                drawing_id: r.drawing_id,
+                                element_count: r.element_count,
+                                because_tags: r.because_tags,
+                                replay: r.replay,
+                            },
+                        });
+                    } else if (msg.name === "action_failed") {
+                        const errMsg = p.result?.message || p.reason || "描画に失敗しました";
+                        const failId = `drawing-err-${p.action_id}-${sseStreamIdRef.current || p.message_id || "unknown"}`;
+                        upsertMessage({
+                            id: failId,
+                            role: 'ai',
+                            content: errMsg,
+                            kind: 'drawing_error',
+                            meta: { action_id: "render_drawing" },
+                        });
+                    }
+                }
             } else if (msg.type === "done") {
                 if (isThinkingRef.current) {
                     syncThinking(false);
                 }
-                if (!aiTextRef.current.trim()) {
+                if (!aiTextRef.current.trim() && !drawOnlyTurnRef.current) {
                     console.warn("[SSE done] aiText is empty — triggering backfill. finalTextLocked=", finalTextLockedRef.current);
                     backfillLastAssistantMessage();
                 }
+                drawOnlyTurnRef.current = false;
             } else {
                 console.warn("[SSE NOTICE] unknown event type", msg?.type, msg);
             }
@@ -540,6 +601,7 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
         syncThinking(false);
         setThinkingHint(null);
         finalTextLockedRef.current = false;
+        drawOnlyTurnRef.current = false;
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
         }
@@ -580,6 +642,7 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                 mode: agentMode,
                 streamId: String(streamId),
                 messageId: userMsg.id,
+                testMode,
             }, controller.signal);
 
             if (!response.body) throw new Error("No response body");
@@ -674,6 +737,18 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
             <div className="flex items-center justify-between mb-2 px-1">
                 <div className="flex items-center gap-2">
                     <div className="text-xs text-gray-500">Chat</div>
+                    <button
+                        type="button"
+                        onClick={toggleTestMode}
+                        className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                            testMode
+                                ? "border-amber-500/40 bg-amber-900/30 text-amber-200"
+                                : "border-white/10 bg-white/5 text-gray-400 hover:bg-white/10"
+                        }`}
+                        title="モデル検証用。会話履歴は残るが、記憶・観測・副作用は保存しない"
+                    >
+                        {testMode ? "TEST ON" : "TEST OFF"}
+                    </button>
                     {thinkingHint && (
                         <div
                             className="text-[11px] px-2 py-0.5 rounded-full border border-amber-500/30 text-amber-200/80 bg-amber-900/20"

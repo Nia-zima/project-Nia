@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from backend.core.logger import logger
 from backend.services.room.room_state import load_room_state
+from backend.services.room.runtime_facts import mood_to_visible, _VISIBLE_LABELS
 
 
 def build_room_context() -> str:
@@ -32,10 +33,12 @@ def build_room_context() -> str:
         parts.append(tod_text)
 
     # 2. Pip mood (text only — no bond value)
+    # Uses shared visible-state mapper (mood → PipVisible → label).
     pip = room.pip_state or {}
-    pip_text = _PIP_MOOD_TEXT.get(pip.get("mood", ""), "")
+    pip_vis = mood_to_visible(pip.get("mood", "idle"))
+    pip_text = _VISIBLE_LABELS.get(pip_vis, "")
     if pip_text:
-        parts.append(pip_text)
+        parts.append(f"Pipは{pip_text}")
 
     # 3. Objects summary
     objects = room.objects or []
@@ -77,16 +80,9 @@ _TIME_DESCRIPTIONS = {
     "late_night": "深夜。部屋はほとんど暗い",
 }
 
-_PIP_MOOD_TEXT = {
-    "idle": "Pipは静かにしている",
-    "curious": "Pipがこちらを見ている",
-    "playful": "Pipが楽しそうにしている",
-    "sleepy": "Pipが眠そうにしている",
-    "sleeping": "Pipは眠っている",
-    "alert": "Pipが起きたばかりで周りを見ている",
-    "comfort": "Pipがそばに寄り添ってきている",
-    "empathy": "Pipがそっと寄りかかってきている",
-}
+
+# _PIP_MOOD_TEXT は runtime_facts.py の shared mapper に統合済み。
+# mood_to_visible() + _VISIBLE_LABELS を使用する。
 
 _POSITION_NAMES = {
     "corner": "隅っこ",

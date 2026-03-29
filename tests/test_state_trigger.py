@@ -333,3 +333,18 @@ class TestUpdateMetacogStats:
             assert _read_kv(conn, "topic_shift_count") == "1"
         finally:
             conn.close()
+
+    def test_thread_scoped_confidence_keeps_global_aggregate(self):
+        from backend.core.agent_graph.nodes.actions import _update_metacog_stats
+
+        now = time.time()
+        _update_metacog_stats({"confidence": 0.8}, now, thread_id="thread_a")
+
+        conn = get_conn()
+        try:
+            global_history = json.loads(_read_kv(conn, "confidence_history"))
+            thread_history = json.loads(_read_kv(conn, "confidence_history:thread_a"))
+            assert global_history == [0.8]
+            assert thread_history == [0.8]
+        finally:
+            conn.close()

@@ -61,6 +61,9 @@ def log_turn_observation(entry: dict[str, Any]) -> None:
         "contradiction_flag": entry.get("contradiction_flag"),
         "merge_mode": str(entry.get("merge_mode") or ""),
         "hold_required": bool(entry.get("hold_required", False)),
+        "depth2_mode": entry.get("depth2_mode"),
+        "turn_role": entry.get("turn_role"),
+        "turn_role_source": entry.get("turn_role_source"),
         "reason_codes": list(entry.get("reason_codes") or []),
         "final_text_hash": _final_text_hash(str(entry.get("final_text") or "")),
     }
@@ -69,4 +72,3 @@ def log_turn_observation(entry: dict[str, Any]) -> None:
     except Exception as e:
         # Logging failure should never break response path.
         logger.warning("[observability] Failed to write turn observation: %s", e)
-

@@ -5,7 +5,7 @@ import asyncio
 import json
 import time as _time_mod
 from dataclasses import dataclass, field
-from datetime import date as _date
+from datetime import date as _date, datetime, timezone
 
 from backend.core.config import settings
 from backend.core.db import managed_conn
@@ -39,6 +39,8 @@ class SleepCycleResult:
     self_model_generated: bool = False
     confirmed_count: int = 0
     archived_count: int = 0
+    knots_distilled: int = 0
+    knot_transitions: int = 0
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -291,6 +293,38 @@ async def _integrated_sleep_cycle_inner() -> SleepCycleResult:
             except Exception:
                 logger.exception("[SleepCycle] somatic calibration update failed")
 
+        # Phase B: Conversation Adaptation — failure-to-policy / success-to-preference
+        # Scope matches daily_reflections / self_model: default_thread + nero_meeting_*
+        if getattr(settings, "ADAPTATION_RECORD_ENABLED", False):
+            try:
+                from backend.services.adaptation.proposal_generator import generate_proposals
+                from backend.services.adaptation.writer import record_proposal
+
+                _phase_b_threads = ["default_thread"]
+                with managed_conn() as _pb_conn:
+                    _nero_rows = _pb_conn.execute(
+                        """SELECT DISTINCT thread_id FROM memory_events
+                           WHERE thread_id LIKE 'nero_meeting_%'
+                             AND created_at >= (strftime('%s', 'now') - 86400)"""
+                    ).fetchall()
+                    _phase_b_threads.extend(r[0] for r in _nero_rows)
+
+                adaptation_proposals = []
+                for _pb_tid in _phase_b_threads:
+                    adaptation_proposals.extend(generate_proposals(_pb_tid))
+
+                saved = 0
+                for proposal in adaptation_proposals:
+                    if record_proposal(proposal):
+                        saved += 1
+                if saved:
+                    logger.info(
+                        "[SleepCycle] Phase B: %d/%d adaptation proposals saved (threads=%d)",
+                        saved, len(adaptation_proposals), len(_phase_b_threads),
+                    )
+            except Exception:
+                logger.exception("[SleepCycle] Phase B adaptation proposal generation failed")
+
         # Semantic Memory: confirm inferred (24h+) & orphan scan
         try:
             from backend.services.memory import semantic_store
@@ -320,6 +354,106 @@ async def _integrated_sleep_cycle_inner() -> SleepCycleResult:
             result.errors.append("semantic_maintenance_failed")
     else:
         logger.warning("[SleepCycle] Skipping contradiction/self-model/confirm (semantic extraction failed)")
+
+    # Phase 4.5: Metabolic Knot Distillation
+    # Independent of semantic extraction — reads from expression/skeleton/niacore traces directly.
+    if getattr(settings, "METABOLIC_KNOT_ENABLED", False):
+        try:
+            from backend.services.identity.knot_store import (
+                ensure_metabolic_knot_schema,
+                get_relations_for_knot,
+                list_active_knots,
+                save_knot,
+                save_signal_snapshot,
+                summarize_knot,
+            )
+            from backend.services.identity.knot_extractor import run_knot_distillation
+            from backend.services.identity.hardness_engine import (
+                apply_signals_and_transition,
+            )
+            from backend.services.identity.schema import KnotSignalSnapshot
+
+            with managed_conn() as _mk_conn:
+                ensure_metabolic_knot_schema(_mk_conn)
+
+                # Step 1: Extract/update knots from traces
+                distill_result = run_knot_distillation(_mk_conn)
+                result.knots_distilled = distill_result["knots_upserted"]
+                logger.info(
+                    "[SleepCycle] Phase 4.5 distillation: baseline=%s knots=%d errors=%d",
+                    distill_result["baseline_version"],
+                    distill_result["knots_upserted"],
+                    len(distill_result["errors"]),
+                )
+
+                # Step 2: Compute signals + hardness transitions for all active knots
+                active_knots = list_active_knots(_mk_conn)
+                transitions = []
+                _now_ts = datetime.now(timezone.utc).isoformat()
+                for knot in active_knots:
+                    rels = get_relations_for_knot(_mk_conn, knot.knot_id)
+                    sibling_count = sum(1 for r in rels if r.relation_type == "sibling")
+                    signals, transition = apply_signals_and_transition(knot, sibling_count=sibling_count)
+                    knot.updated_at = _now_ts
+                    save_knot(_mk_conn, knot)
+                    save_signal_snapshot(_mk_conn, KnotSignalSnapshot(
+                        knot_id=knot.knot_id,
+                        sleep_date=_today_str,
+                        reproducibility=signals.reproducibility,
+                        damage_sensitivity=signals.damage_sensitivity,
+                        redundancy=signals.redundancy,
+                        temporal_stability=signals.temporal_stability,
+                        protection_score=knot.protection_score,
+                        hardness_level=knot.hardness_level,
+                    ))
+                    if transition.changed:
+                        transitions.append(transition)
+                    logger.info(
+                        "[SleepCycle] Knot: %s | %s",
+                        summarize_knot(knot), transition.reason,
+                    )
+
+                result.knot_transitions = len(transitions)
+                if transitions:
+                    logger.info(
+                        "[SleepCycle] Phase 4.5: %d knot(s) changed hardness level",
+                        len(transitions),
+                    )
+        except Exception:
+            logger.exception("[SleepCycle] Phase 4.5 knot distillation failed")
+            result.errors.append("knot_distillation_failed")
+
+    # Phase 4.6: Contradiction Hold — detect and review
+    if getattr(settings, "METABOLIC_KNOT_ENABLED", False):
+        try:
+            from backend.services.identity.contradiction_hold import (
+                detect_contradictions,
+                review_holds,
+            )
+            from backend.services.identity.knot_store import (
+                ensure_metabolic_knot_schema,
+                get_latest_baseline_version,
+            )
+
+            with managed_conn() as _ch_conn:
+                ensure_metabolic_knot_schema(_ch_conn)
+                bv = get_latest_baseline_version(_ch_conn)
+                if bv:
+                    _sleep_start_ts = datetime.now(timezone.utc).isoformat()
+                    new_holds = detect_contradictions(_ch_conn, bv)
+                    review_result = review_holds(_ch_conn, bv, sleep_started_at=_sleep_start_ts)
+                    if new_holds or review_result.get("reviewed", 0):
+                        logger.info(
+                            "[SleepCycle] Phase 4.6: new_holds=%d reviewed=%d absorbed=%d rejected=%d split=%d",
+                            new_holds,
+                            review_result.get("reviewed", 0),
+                            review_result.get("absorbed", 0),
+                            review_result.get("rejected", 0),
+                            review_result.get("split", 0),
+                        )
+        except Exception:
+            logger.exception("[SleepCycle] Phase 4.6 contradiction hold failed")
+            result.errors.append("contradiction_hold_failed")
 
     # Record sleep completion timestamp
     _set_telemetry_kv("last_sleep_completed_at", str(_time_mod.time()))

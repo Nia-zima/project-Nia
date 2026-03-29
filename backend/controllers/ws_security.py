@@ -15,12 +15,16 @@ def allowed_ws_origins() -> set[str]:
 
 
 def is_ws_origin_allowed(origin: str | None) -> bool:
-    """Return True only if origin is present AND in the allow-list."""
-    if not origin:
-        return False
+    """Return True only if origin is present AND in the allow-list.
+
+    When allowed origins include '*', any origin (including absent) is accepted.
+    This is needed for Unity WS clients which don't send an Origin header.
+    """
     allowed = allowed_ws_origins()
     if "*" in allowed:
         return True
+    if not origin:
+        return False
     return origin.strip().lower() in allowed
 
 

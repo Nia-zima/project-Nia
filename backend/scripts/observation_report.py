@@ -192,6 +192,16 @@ def generate_report_data(records: list[dict[str, Any]]) -> dict[str, Any]:
         for d, c in sorted(depth_counts.items())
     ]
 
+    # Depth2 mode distribution
+    d2_modes_data: dict[str, int] = {}
+    for r in records:
+        m = r.get("depth2_mode")
+        if m:
+            d2_modes_data[m] = d2_modes_data.get(m, 0) + 1
+    depth2_mode_distribution = [
+        {"mode": m, "count": c} for m, c in sorted(d2_modes_data.items())
+    ]
+
     # Score distributions
     diss = [float(r.get("dissonance") or 0) for r in records]
     surp = [float(r.get("surprise_score") or 0) for r in records]
@@ -242,6 +252,7 @@ def generate_report_data(records: list[dict[str, Any]]) -> dict[str, Any]:
         "total_turns": n,
         "period": {"start": first_ts, "end": last_ts},
         "depth_distribution": depth_distribution,
+        "depth2_mode_distribution": depth2_mode_distribution,
         "dissonance": _score_summary(diss),
         "surprise": _score_summary(surp),
         "correlation": {"r": round(corr, 4), "status": "ok" if abs(corr) < 0.5 else "warning"},
@@ -285,6 +296,19 @@ def generate_report(records: list[dict[str, Any]]) -> str:
         c = depth_counts[d]
         lines.append(f"  depth={d}: {c:>5} ({c / n * 100:5.1f}%) {_bar(c, n)}")
     lines.append("")
+
+    # --- Depth2 Mode (risk / reflective) ---
+    d2_records = [r for r in records if r.get("depth2_mode")]
+    if d2_records:
+        d2_modes: dict[str, int] = {}
+        for r in d2_records:
+            m = str(r["depth2_mode"])
+            d2_modes[m] = d2_modes.get(m, 0) + 1
+        lines.append("--- Depth2 Mode ---")
+        for m in sorted(d2_modes, key=d2_modes.get, reverse=True):  # type: ignore[arg-type]
+            c = d2_modes[m]
+            lines.append(f"  {m:>12}: {c:>5}")
+        lines.append("")
 
     # --- Dissonance ---
     diss = [float(r.get("dissonance") or 0) for r in records]

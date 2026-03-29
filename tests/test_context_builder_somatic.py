@@ -22,10 +22,10 @@ def test_build_self_sense_returns_section():
     assert "=== 今の感覚 ===" in result
     assert "はっきり覚えている気がする" in result
     assert "考えがまとまりやすい" in result
-    assert "感じるままに" in result  # header
+    assert "今この瞬間の感覚" in result  # header
 
 
-def test_build_self_sense_max_three():
+def test_build_self_sense_max_two_with_intensity_filter():
     senses = [
         {"text": "sense1", "intensity": 0.9},
         {"text": "sense2", "intensity": 0.8},
@@ -35,8 +35,20 @@ def test_build_self_sense_max_three():
     result = _build_self_sense(senses)
     assert "sense1" in result
     assert "sense2" in result
-    assert "sense3" in result
+    assert "sense3" not in result  # top 2 only
     assert "sense4" not in result
+
+
+def test_build_self_sense_filters_low_intensity():
+    senses = [
+        {"text": "strong", "intensity": 0.9},
+        {"text": "weak", "intensity": 0.4},
+        {"text": "medium", "intensity": 0.6},
+    ]
+    result = _build_self_sense(senses)
+    assert "strong" in result
+    assert "medium" in result
+    assert "weak" not in result  # intensity < 0.5 filtered
 
 
 def test_build_self_sense_empty_returns_empty():
@@ -113,6 +125,42 @@ def test_somatic_injected_via_build_context_suffix():
     tone_pos = suffix.index("=== TONE ===")
     somatic_pos = suffix.index("=== 今の感覚 ===")
     assert tone_pos < somatic_pos
+
+
+# ── turn_intent somatic shortening (Step 3) ────────────────────
+
+
+def test_direct_answer_limits_to_one_sense():
+    """direct_answer → somatic が最強の1項目のみ"""
+    senses = [
+        {"text": "sense1", "intensity": 0.9},
+        {"text": "sense2", "intensity": 0.8},
+    ]
+    result = _build_self_sense(senses, turn_intent="direct_answer")
+    assert "sense1" in result
+    assert "sense2" not in result
+
+
+def test_correction_response_limits_to_one_sense():
+    """correction_response → somatic が最強の1項目のみ"""
+    senses = [
+        {"text": "sense1", "intensity": 0.9},
+        {"text": "sense2", "intensity": 0.8},
+    ]
+    result = _build_self_sense(senses, turn_intent="correction_response")
+    assert "sense1" in result
+    assert "sense2" not in result
+
+
+def test_open_reflection_keeps_two_senses():
+    """open_reflection → somatic が2項目（既存動作維持）"""
+    senses = [
+        {"text": "sense1", "intensity": 0.9},
+        {"text": "sense2", "intensity": 0.8},
+    ]
+    result = _build_self_sense(senses, turn_intent="open_reflection")
+    assert "sense1" in result
+    assert "sense2" in result
 
 
 def test_backward_compatible_without_somatic_key():

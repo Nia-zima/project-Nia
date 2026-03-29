@@ -32,6 +32,37 @@ class ThinkMode(Enum):
     DEFAULT = "default"     # ディレクティブなし
 
 
+class ModelProfile(Enum):
+    """LLM 呼び出しプロファイル.
+
+    depth + mode の組み合わせを定数化。typo 事故防止。
+    provider 解決は get_provider_for_profile() に一元化。
+    """
+    DEFAULT = "default"                   # depth0, depth1, batch utilities
+    DEPTH2_REFLECTIVE = "depth2_reflective"  # 深い内省 → Claude 候補
+    DEPTH2_RISK = "depth2_risk"            # リスク検出 → 現状 local
+
+
+class ModelProvider(Enum):
+    """LLM プロバイダー."""
+    LOCAL = "local"         # LM Studio / OpenAI 互換
+    ANTHROPIC = "anthropic"  # Claude API
+
+
+def get_provider_for_profile(profile: ModelProfile) -> ModelProvider:
+    """Profile から provider を1か所で解決する.
+
+    DEPTH2_PROVIDER=anthropic のとき depth2_reflective だけ Claude に振る。
+    それ以外はすべて local。
+    """
+    if (
+        profile == ModelProfile.DEPTH2_REFLECTIVE
+        and getattr(settings, "DEPTH2_PROVIDER", "local") == "anthropic"
+    ):
+        return ModelProvider.ANTHROPIC
+    return ModelProvider.LOCAL
+
+
 _cached_family: ModelFamily | None = None
 _cached_model_name: str = ""
 
@@ -90,13 +121,21 @@ def is_model_family(family: ModelFamily) -> bool:
 # 1. prompt_suffix — モデル固有ディレクティブ
 # ═══════════════════════════════════════════════════════════════
 
-def prompt_suffix(mode: ThinkMode = ThinkMode.NO_THINK) -> str:
+def prompt_suffix(
+    mode: ThinkMode = ThinkMode.NO_THINK,
+    profile: ModelProfile = ModelProfile.DEFAULT,
+) -> str:
     """モデル固有のプロンプト末尾ディレクティブを返す.
 
-    Qwen: /no_think または /think
+    Qwen (local): /no_think または /think
     GPT-OSS: reasoning_effort は extra_body 側で制御（プロンプト不要）
-    Others: 空文字列
+    Anthropic: ディレクティブ不要（API 側で推論制御）
     """
+    # Anthropic provider ではプロンプトディレクティブは無意味
+    provider = get_provider_for_profile(profile)
+    if provider == ModelProvider.ANTHROPIC:
+        return ""
+
     family = get_family()
     if family == ModelFamily.QWEN:
         if mode == ThinkMode.NO_THINK:

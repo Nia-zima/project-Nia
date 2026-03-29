@@ -31,6 +31,7 @@ class RoomAction:
     position: str = ""          # Target position
     color: str = ""             # New color for color action
     art_image: str = ""         # Image path for hang_art
+    memory_link: str = ""       # drawing_id or other trace reference for hang_art
     name: str = ""              # Custom name for object
 
 
@@ -156,7 +157,7 @@ def _handle_hang_art(room: RoomState, action: RoomAction) -> None:
         "id": uuid.uuid4().hex[:8],
         "image_path": action.art_image,
         "frame_id": action.target_id or "",
-        "memory_link": "",
+        "memory_link": action.memory_link or "",
         "created_at": time.time(),
         "description": action.name or "",
     }

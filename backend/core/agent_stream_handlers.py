@@ -344,11 +344,13 @@ async def _handle_action_end(ctx, data: dict) -> None:
         await _emit_decision_telemetry(ctx, payload)
 
     for item in results:
+        result_status = str(item.get("status") or "success")
+        is_error = result_status == "error"
         payload = build_decision_event_payload(
             source="phase5",
             entity_kind="action",
-            decision="approve",
-            status=str(item.get("status") or "success"),
+            decision="reject" if is_error else "approve",
+            status=result_status,
             thread_id=getattr(ctx, "thread_id", None),
             actor="gate",
             turn_id=getattr(ctx, "turn_id", None),
@@ -359,7 +361,8 @@ async def _handle_action_end(ctx, data: dict) -> None:
             approved_by=item.get("approved_by") or "gate",
             result=item.get("result"),
         )
-        await ctx.output_queue.put({"type": "event", "name": "action_approved", "payload": payload})
+        event_name = "action_failed" if is_error else "action_approved"
+        await ctx.output_queue.put({"type": "event", "name": event_name, "payload": payload})
         await _emit_decision_telemetry(ctx, payload)
 
     for item in pending:

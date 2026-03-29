@@ -49,21 +49,36 @@ class SomaticSense:
     intensity: float  # 0.0–1.0
 
 
+def _pick_variant(variants: tuple[str, ...], turn_id: str) -> str:
+    """Deterministic variant selection based on turn_id.
+
+    Uses zlib.crc32 for cross-process stability (Python's hash() is
+    randomised per process via PYTHONHASHSEED).
+    """
+    if not turn_id:
+        return variants[0]
+    import zlib
+    return variants[zlib.crc32(turn_id.encode()) % len(variants)]
+
+
 def translate(
     metrics: InternalMetrics,
     calibration: SomaticCalibration | None = None,
+    *,
+    turn_id: str = "",
 ) -> list[SomaticSense]:
     """Convert internal metrics to a list of somatic senses.
 
     All rule-based — no LLM calls.
+    turn_id is used for deterministic template variant selection.
     """
     if calibration is None:
         calibration = SomaticCalibration()
 
     senses: list[SomaticSense] = []
-    senses.extend(_memory_senses(metrics, calibration))
-    senses.extend(_richness_senses(metrics))
-    senses.extend(_confidence_senses(metrics))
+    senses.extend(_memory_senses(metrics, calibration, turn_id))
+    senses.extend(_richness_senses(metrics, turn_id))
+    senses.extend(_confidence_senses(metrics, turn_id))
     senses.extend(_sleep_senses(metrics))
     senses.extend(_temporal_senses(metrics))
     senses.extend(_dissonance_senses(metrics))
@@ -74,54 +89,61 @@ def translate(
 
 
 def _memory_senses(
-    metrics: InternalMetrics, cal: SomaticCalibration,
+    metrics: InternalMetrics, cal: SomaticCalibration, turn_id: str,
 ) -> list[SomaticSense]:
     """Memory retrieval ease — threshold-driven."""
     if metrics.top_similarity >= cal.high_confidence_threshold:
-        return [SomaticSense(
-            text="この話題については、はっきり覚えていることがある気がする",
-            intensity=0.9,
-        )]
+        text = _pick_variant((
+            "この話題については、はっきり覚えていることがある気がする",
+            "ここには少し手がかりがある",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.9)]
     if metrics.top_similarity >= cal.medium_confidence_threshold:
-        return [SomaticSense(
-            text="この話題について、なんとなく覚えがある感覚がある",
-            intensity=0.6,
-        )]
+        text = _pick_variant((
+            "この話題について、なんとなく覚えがある感覚がある",
+            "この話題、どこかで触れた気がする",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.6)]
     if metrics.top_similarity < cal.low_confidence_threshold and metrics.retrieval_count > 0:
-        return [SomaticSense(
-            text="この話題については、あまり記憶にない感じがする",
-            intensity=0.5,
-        )]
+        text = _pick_variant((
+            "この話題については、あまり記憶にない感じがする",
+            "ここはまだ掴みきれていない",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.5)]
     return []
 
 
-def _richness_senses(metrics: InternalMetrics) -> list[SomaticSense]:
+def _richness_senses(metrics: InternalMetrics, turn_id: str) -> list[SomaticSense]:
     """Memory richness — recent activity and total volume."""
     if metrics.recent_memory_count >= 5:
-        return [SomaticSense(
-            text="最近いろんなことがあった気がする。頭の中が賑やかな感じ",
-            intensity=0.6,
-        )]
+        text = _pick_variant((
+            "最近いろんなことがあった気がする。頭の中が賑やかな感じ",
+            "最近はいろいろ動いていた気がする",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.6)]
     if metrics.memory_total < 10:
-        return [SomaticSense(
-            text="まだあまり多くのことを経験していない感覚がある",
-            intensity=0.4,
-        )]
+        text = _pick_variant((
+            "まだあまり多くのことを経験していない感覚がある",
+            "ここはまだ薄い",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.4)]
     return []
 
 
-def _confidence_senses(metrics: InternalMetrics) -> list[SomaticSense]:
+def _confidence_senses(metrics: InternalMetrics, turn_id: str) -> list[SomaticSense]:
     """Confidence in retrieved memories."""
     if metrics.avg_confidence >= 0.8:
-        return [SomaticSense(
-            text="今引き出した記憶には、わりと自信がある",
-            intensity=0.7,
-        )]
+        text = _pick_variant((
+            "今引き出した記憶には、わりと自信がある",
+            "ここは比較的はっきりしている",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.7)]
     if metrics.avg_confidence < 0.4 and metrics.retrieval_count > 0:
-        return [SomaticSense(
-            text="覚えてはいるけど、それが正しいかはちょっと自信がない",
-            intensity=0.5,
-        )]
+        text = _pick_variant((
+            "覚えてはいるけど、それが正しいかはちょっと自信がない",
+            "まだ少し曖昧なところがある",
+        ), turn_id)
+        return [SomaticSense(text=text, intensity=0.5)]
     return []
 
 

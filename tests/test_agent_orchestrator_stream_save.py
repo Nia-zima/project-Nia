@@ -22,6 +22,8 @@ class _FailingStreamOrchestrator(DefaultAgentOrchestrator):
         mode: str,
         stream_id: str | None,
         message_id: str | None,
+        turn_id: str | None = None,
+        test_mode: bool = False,
     ):
         yield {"type": "text", "content": "これは保存されるべき応答"}
         raise RuntimeError("client disconnected")

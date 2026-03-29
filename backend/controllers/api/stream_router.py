@@ -24,6 +24,7 @@ class StreamChatRequest(BaseModel):
     mode: Optional[str] = Field("normal", max_length=50)
     stream_id: Optional[str] = Field(None, max_length=128)
     message_id: Optional[str] = Field(None, max_length=128)
+    test_mode: Optional[bool] = Field(False, description="Skip memory saving for model testing")
 
 
 class LivestreamChatRequest(BaseModel):
@@ -76,6 +77,7 @@ async def _safe_stream_generator(
     mode: str = "normal",
     stream_id: Optional[str] = None,
     message_id: Optional[str] = None,
+    test_mode: bool = False,
 ):
     """
     SSE整形は Orchestrator に委譲する。
@@ -93,6 +95,7 @@ async def _safe_stream_generator(
             mode=mode,
             stream_id=stream_id,
             message_id=message_id,
+            test_mode=test_mode,
         ):
             yield sse
     except Exception as e:
@@ -138,6 +141,7 @@ async def stream_chat(req: StreamChatRequest, request: Request):
             mode=req.mode,
             stream_id=stream_id,
             message_id=message_id,
+            test_mode=bool(req.test_mode),
         ),
         media_type="text/event-stream",
         headers={

@@ -11,6 +11,7 @@ from backend.core.auth import verify_system_token
 from backend.core.db import managed_conn
 from backend.core.logger import logger
 from backend.services.identity_manager import identity_manager
+from backend.services.memory.self_model import _mark_identity_updated
 from backend.scripts.sleep_cycle import (
     extract_section_content,
     replace_section_content,
@@ -99,6 +100,8 @@ async def approve_proposal(proposal_id: str, req: ProposalDecisionRequest):
                WHERE id = ?""",
             (req.review_note, now, proposal_id),
         )
+        # Keep telemetry_kv and identity_proposals in the same DB transaction.
+        _mark_identity_updated(conn)
         conn.commit()
     logger.info("[IDENTITY] Proposal %s approved and applied", proposal_id)
     return {"ok": True, "applied": True}

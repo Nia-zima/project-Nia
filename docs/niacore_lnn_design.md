@@ -1,8 +1,8 @@
-# NiaCore — Liquid Neural Network 設計書 v0.3
+# NiaCore — Liquid Neural Network 設計書 v0.4
 
-> **ステータス:** Phase 1 実装完了・シャドーモード準備中
+> **ステータス:** Phase 1 実装完了・vNext Phase N0 実装追記
 > **作成日:** 2026-03-05
-> **最終更新:** 2026-03-06 (v0.3 — CfC モデル + シャドー + 学習 + 安全系 実装完了)
+> **最終更新:** 2026-03-17 (v0.4 — runtime 現在地に合わせた vNext alignment 追記)
 > **関係者:** Origin (ジュン), Claude Code, Gemini (レビュー), Claude (壁打ち)
 
 ---
@@ -19,6 +19,7 @@ NiaCore は、ニアの LangGraph パイプラインに組み込む **CfC (Close
 - **壊れても今と同じ。** NiaCore が無効化されても、ニアは現在のルールベースで動く
 - **Body Constitution は不可侵。** NiaCore は「提案」を出すだけで、最終決定権は既存システムにある
 - **記憶は情報であって命令ではない。** NiaCore の学習データもこの原則に従う
+- **vNext は現行 shadow を壊さず別 shadow で並走させる。** 既存の卒業条件と比較軸を維持するため
 
 ---
 
@@ -71,6 +72,26 @@ NiaCore は以下の **推薦値** を出力する。いずれも最終決定権
 
 初期は `depth_preference` のみで開始し、シャドーモードで安定を確認してから次のヘッドを有効化する。
 
+### 2.2.1 vNext 出力契約メモ
+
+現行 runtime では `Depth2` が単一クラスではなく、
+
+- `risk_depth2`
+- `reflective_depth2`
+
+の 2 モードに分かれている。
+
+したがって vNext では、少なくとも以下のどちらかが必要になる。
+
+1. `depth_preference` は従来どおり `[D0, D1, D2, WAIT]` を維持しつつ、`depth2_mode` を別フィールドで保持する
+2. もしくは将来的に `D2_RISK / D2_REFLECTIVE` を別クラスへ分離する
+
+また、`WAIT` は Body Constitution 側の hard clamp と性質が近く、Experience Buffer に記録されない設計と相性が悪い。
+vNext では以下のどちらかに寄せる。
+
+1. `WAIT` を learned head の主対象から外し、ハードルールとして扱う
+2. `WAIT` を残す場合でも shadow rows は記録し、教師データ欠落を防ぐ
+
 ### 2.3 NiaCore の入力（State ベクトル）
 
 **LLM 非依存の環境変数のみ。** LLM の出力テキストの特徴量は一切含めない。
@@ -97,8 +118,39 @@ State ベクトル:
 **なぜ LLM 出力を含めないか:**
 LNN が特定の LLM の癖に過剰適合（Overfitting）すると、LLM 交換時に NiaCore が崩壊する。State を LLM 非依存にすることで「モデルを変えても経験が残る」を保証する。
 
+ただしこれは **raw output を特徴量に入れない** という意味であり、confidence metric や retrieval 分布まで完全にモデル非依存になることは意味しない。
+モデル分離（例: `depth0/1=local`, `depth2_reflective=Claude`）を行う場合、vNext では `model_profile / provider / model_name` を Experience Buffer に記録し、後から分布差を切り分けられるようにする。
+
 **surprise バージョニング:**
 surprise の算出ロジックを変更した場合、`surprise_v` を上げる。学習データに surprise_v を含めることで、算出仕様が変わっても過去データの整合性を保てる。surprise は **報酬ではなく状態** として扱うため、正規化の安定性が特に重要。
+
+### 2.3.1 StateVectorV2 と次元数監視
+
+v0.3 の StateVector は 34 次元で固定され、実装も `CFC_UNITS=64` 前提で作られている。
+一方、vNext では以下の特徴群を追加したくなる可能性が高い。
+
+- spatial context（room / position / time shift）
+- relational context（pip proximity / visible state / nearness）
+- memory-oriented context（returning / lingering / recent retrieval pattern）
+
+この追加をそのまま行うと、StateVector は 50-60 次元帯へ膨らむ可能性がある。
+
+そのため vNext Phase N0 では、まず `StateVectorV2` を別バージョンとして導入し、学習前に以下を観測する。
+
+- 実次元数
+- feature group ごとの非ゼロ率
+- shadow agreement / entropy の変化
+- 速度劣化の有無
+
+判断ポイントの目安:
+
+| 実次元数 | 初期方針 |
+|---------|---------|
+| `<= 48` | まず `CFC_UNITS=64` のまま観測 |
+| `49 - 64` | `CFC_UNITS=96` への増強を検討 |
+| `> 64` | `CFC_UNITS=128` を検討 |
+
+重要なのはユニット数の増強そのものより、`state_vector_version` を明示して v0.3 の 34 次元契約を壊さないこと。
 
 ### 2.4 NiaCore が触れない領域（ハードクランプ）
 
@@ -144,6 +196,28 @@ surprise の算出ロジックを変更した場合、`surprise_v` を上げる�
 - 「フィードバックがない（普通の会話）= ルールベースと同じ = 0.0」でスパース報酬問題が消える
 - 「逸脱 + 結果不明 = 0.0」で「逸脱しない」という別の局所最適解への収束も防ぐ
 - NiaCore は「勝算がある時に探索し、怒られなければ損しない」というインセンティブを持つ
+
+**vNext 補足: stagnation-aware reward**
+
+recent meeting では、「訂正も却下もないが reassurance loop で停滞している」ケースが確認されている。
+この状態を `conversation_continued` の正報酬として拾うと、停滞を強化してしまう。
+
+そのため vNext では、少なくとも以下の条件が立っている turn は `conversation_continued` を正報酬から除外する。
+
+- `reassurance_loop`
+- `semantic_variety_declining`
+- `allow_early_soft_close`
+
+式で書くと:
+
+```python
+continued_positive := (
+    conversation_continued
+    and not review_rejected
+    and not user_correction
+    and not stagnation_detected
+)
+```
 
 **報酬ソース（現行システムから取得）:**
 
@@ -193,15 +267,21 @@ Sleep Cycle のバッチ学習で使用するデータストア。
 | session_id | TEXT | セッション識別子 |
 | timestamp | REAL | Unix timestamp |
 | state_vector | BLOB | 入力 State（struct.pack バイナリ, 34 floats = 136 bytes） |
+| state_vector_version | INTEGER | StateVector のバージョン（v0.3=1, vNext=2） |
 | niacore_selected | TEXT | NiaCore の最終選択（argmax） |
 | niacore_logits | TEXT | NiaCore の生の確率分布（JSON: [D0, D1, D2, WAIT]） |
 | rule_based_depth | TEXT | ルールベースの判断 |
+| depth2_mode | TEXT nullable | `risk` / `reflective` / null |
 | is_deviation | BOOLEAN | niacore_selected != rule_based_depth |
 | review_rejected | BOOLEAN | review_window で却下されたか |
 | user_correction | BOOLEAN | ユーザー訂正（strong）が検出されたか |
 | review_checked | BOOLEAN | review window の観測が完了したか |
 | correction_window_closed | BOOLEAN | correction の観測期間が閉じたか |
 | conversation_continued | BOOLEAN | 次ターンが来た AND correction=False AND review_rejected=False |
+| stagnation_flags | TEXT nullable | reassurance loop 等の停滞フラグ（JSON 配列） |
+| model_profile | TEXT nullable | `default` / `depth2_reflective` / `depth2_risk` |
+| model_provider | TEXT nullable | `local` / `anthropic` |
+| model_name | TEXT nullable | 実際に使用したモデル名 |
 | surprise_v | INTEGER | surprise 算出バージョン |
 | reward | REAL | 計算済み報酬（Sleep 時に算出） |
 | used_in_training | BOOLEAN | 学習に使用済みか |
@@ -214,8 +294,14 @@ outcome_known := review_checked = true AND correction_window_closed = true
 ```
 「イベントが起きたか」ではなく「観測期間が閉じたか」で判定する。これにより NULL の曖昧さ（起きなかった vs まだ確定していない）が消える。
 
-**WAIT ターンは記録されない:**
-s5_commit は `final_text == "WAIT"` のとき処理をスキップするため、WAIT（判断保留）は Experience Buffer に行を作らない。WAIT は depth 選択の結果ではなく「判断しなかった」ことの表明であり、これは設計上正しい。
+**WAIT ターンは記録されない（v0.3 現状）:**
+s5_commit は `final_text == "WAIT"` のとき処理をスキップするため、WAIT（判断保留）は Experience Buffer に行を作らない。
+
+ただし vNext では、この仕様のまま `WAIT` を learned head に含めると教師データが欠落する。
+したがって今後は以下のどちらかへ寄せる。
+
+1. `WAIT` を learned head から外す
+2. もしくは WAIT 専用の shadow row を保存する
 
 ---
 
@@ -229,6 +315,9 @@ s5_commit は `final_text == "WAIT"` のとき処理をスキップするため�
 | curiosity_index | `deviation_success - correction_strong` の観測指標 | v0.3 |
 | Δ特徴量 | state_vector に `Δmemory_hit_rate`, `Δconfidence` 等の変化量を追加 | v0.3 |
 | シャドー分析自動化 | deviation/failure/correction のクラスタ自動抽出 | v0.3 |
+| state_vector_versioning | v0.3 の 34 次元契約を壊さず、vNext 特徴量を別ベクトルで観測 | vNext Phase N0 |
+| stagnation-aware reward | reassurance loop を正報酬から除外 | vNext Phase N0 |
+| depth2_mode logging | `risk / reflective` を Buffer に保持 | vNext Phase N0 |
 
 ---
 
@@ -342,6 +431,27 @@ def clamp_weights(weights, default_weights, max_drift=0.3):
 シャドー:  State → NiaCore → ログ記録のみ（実行しない）
 ```
 
+### 5.1.1 vNext は別 shadow として並走させる
+
+vNext は、現行の `depth_preference` shadow に head を足してそのまま置き換えるのではなく、まず **別 shadow** として並走させる。
+
+理由:
+
+- v0.3 の卒業条件と比較軸を壊さない
+- `StateVectorV2` と `StateVectorV1` を混ぜない
+- `risk / reflective` を含む新しい観測を、既存 shadow の agreement 指標と切り分けられる
+
+初期方針:
+
+- `shadow_v1`: 現行の depth_preference shadow を維持
+- `shadow_vnext`: vNext の attention / exploratory / multi-head 候補を別 namespace で記録
+- checkpoint も別 namespace にする
+  - 例: `data/niacore/checkpoints/v1/...`
+  - 例: `data/niacore/checkpoints/vnext/...`
+
+いきなり shared backbone + multi-head に寄せるのは後段でよい。
+まずは別 shadow で観測し、意味のある signal が取れているかを先に見る。
+
 ### 5.2 卒業条件（全て同時に満たす）
 
 | 条件 | 閾値 | 理由 |
@@ -392,6 +502,51 @@ good                := review_rejected = 0 AND user_correction = 0
 ## 6. 前提実装（NiaCore 実装前に必要）— **全完了**
 
 NiaCore の学習に必要なデータを蓄積するための下ごしらえ。全 Step 実装完了済み。
+
+### 6.1 vNext 擬似教師ルール（Phase N0）
+
+vNext では、depth 以外の head をいきなり end-to-end で学習させるのではなく、まず **擬似教師（pseudo-teacher）** を置いて観測する。
+SkeletonCore の `R1-R8 / I1-I9` と同様に、ルール表を先に固定してから shadow に流す。
+
+最小ルールセットは以下で始める。
+
+| ID | 条件 | 擬似教師ラベル |
+|----|------|----------------|
+| `A1` | `pip_position_near=true` かつ `somatic_warmth↑` | `attention_target=pip` |
+| `A2` | `room_change != none` | `attention_target=room` |
+| `A3` | `returning_theme` かつ `retrieval_hit=true` | `attention_target=memory_trace` |
+| `C1` | `reassurance_loop` かつ `confidence_down` | `recommended_action=soft_close` |
+| `C2` | `lingering_state` が続く かつ `no_progress` | `recommended_action=retrieve_alt_memory` |
+| `C3` | `fragile_self_observation` が続く | `recommended_action=hold_support` |
+
+最初の head 候補:
+
+- `attention_target`
+- `recommended_action`
+- `closer_hint`
+
+ここで大事なのは、好奇心や relational awareness を最初から報酬化しないこと。
+Phase N0 では「どの擬似教師ルールがどれだけ自然に当たるか」を観測する。
+
+#### vNext Phase N0 の実装現在地
+
+Phase N0 は設計メモではなく、現在は観測専用 shadow として実装済みである。
+
+- `backend/core/niacore/vnext/state_vector_v2.py`
+  - `StateVectorV2` を 50 次元で構築
+- `backend/core/niacore/vnext/pseudo_teacher.py`
+  - `A1-A3`, `C1-C3`
+- `backend/core/niacore/vnext/shadow_vnext.py`
+  - shadow 推論と `feature_availability` 記録
+- `backend/core/niacore/vnext/writer.py`
+  - `niacore_vnext_shadow` への fire-and-forget 書き込み
+
+観測品質のため、vNext 用の `confidence_history` は thread-scoped に保持する。
+ただし既存の `N.4 state-trigger reflection` を壊さないよう、global aggregate も引き続き更新する。
+
+また `feature_availability` は、StateVector の値がゼロだったかどうかではなく、
+その信号源が **live path で配線されていたか** を記録する availability mask として扱う。
+Phase N0 の次元数監視は、この mask を前提に読まなければならない。
 
 ### 実装順序: 3 → 2 → 1
 
@@ -463,6 +618,7 @@ NiaCore の学習に必要なデータを蓄積するための下ごしらえ。
 | `backend/core/agent_graph/nodes/actions.py` | shadow データ取得 + experience_writer 呼び出し |
 | `backend/scripts/sleep_cycle/orchestrator.py` | NiaCore 学習フェーズ追加（train→health→regression→checkpoint） |
 | `backend/services/memory/somatic_feedback.py` | `detect_correction_level()` — strong/weak/none |
+| `backend/core/niacore/* (vnext)` | `StateVectorV2`, pseudo-teacher, shadow_vnext, checkpoint namespace 分離 | **planned** |
 
 ### テスト
 
@@ -483,6 +639,7 @@ NiaCore の学習に必要なデータを蓄積するための下ごしらえ。
 |------|------|
 | CfC（ODE ソルバーなし） | < 1ms の推論。LLM のレイテンシに影響しない |
 | State に LLM 出力を含めない | LLM 交換可能性の保証。過剰適合防止 |
+| `model_profile / provider / model_name` は別ログで保持する | raw text は入れないが、分布差の観測は必要 |
 | ターンごとの学習を禁止 | 破局的忘却の防止。Sleep Cycle バッチ学習のみ |
 | Imitation Learning ベースライン | 方策崩壊の防止。ルールベースを教師にする |
 | 逸脱 + 結果不明 = 0.0 | 「逸脱しない」局所最適解への収束を防ぐ |
@@ -498,6 +655,10 @@ NiaCore の学習に必要なデータを蓄積するための下ごしらえ。
 | selected_depth と policy_logits を分離記録 | 確率分布の解析と逸脱判定の再現性 |
 | Credit Assignment をイベント種別で分離 | 因果の近さがイベントごとに異なる |
 | surprise 算出にバージョン番号 | 仕様変更時の学習データ整合性 |
+| StateVector は version を持つ | 34 次元契約を silent break させないため |
+| WAIT は hard clamp 寄りに扱う | head に残すなら shadow row を保存する必要があるため |
+| reassurance loop は正報酬から除外する | 停滞を「会話継続」と誤学習しないため |
+| `depth2_mode` を明示記録する | `risk / reflective` を単一 D2 に畳まないため |
 | 暴走検出に多層ウィンドウ（短期/中期/長期） | Level 2 ロールバックの暴発防止 |
 | correction を strong/weak に分離 | 誤検知が報酬を汚染するのを防ぐ（学習毒の排除） |
 | 報酬に使うのは correction_strong のみ | weak は雑談・割り込みでも発火する。ログ観測のみ |
@@ -518,6 +679,8 @@ NiaCore の学習に必要なデータを蓄積するための下ごしらえ。
 3. **回帰テスト:** Level 0/1/2 の回帰が正しく動作するか
 4. **崩壊検知テスト:** 意図的に偏った報酬を与えて卒業条件でブロックされるか
 5. **LLM 交換テスト:** モデル変更後に NiaCore の判断が維持されるか
+6. **Phase N0 次元数監視:** `StateVectorV2` の実次元数・非ゼロ率・速度劣化を記録し、`CFC_UNITS=64` のままで足りるかを判断する
+7. **v1/vnext shadow 比較:** 現行 shadow と vNext shadow を並走させ、agreement / entropy / stagnation 耐性の差を見る
 6. **回帰テスト（既存機能）:** NiaCore 導入後に既存パイプラインが壊れていないか
 
 ---

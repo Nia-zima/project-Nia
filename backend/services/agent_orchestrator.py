@@ -8,7 +8,6 @@ from typing import Optional, Iterable
 from backend.core.ports import MemoryGateway, ThoughtGateway, TelemetrySink, TTSGateway, VisionGateway, HistoryGateway, InnerMonologueLogger, ToolRegistry, CheckpointerGateway, MemoryCaptureGateway, VectorGateway, CaptureBuilderGateway
 from backend.core.logger import logger
 from backend.core.config import settings
-from backend.core.model_adapter import THINK_RE as _THINK_RE
 from backend.services.sse_pipeline import (
     SSEContext,
     _ms,
@@ -18,6 +17,7 @@ from backend.services.sse_pipeline import (
     _handle_sse_text,
     _handle_sse_done,
     _persist_stream_result,
+    strip_think_leaks,
 )
 
 
@@ -67,6 +67,16 @@ class DefaultAgentOrchestrator:
         except Exception:
             pass
 
+    async def _broadcast_conversation_state(self, state: str) -> None:
+        """Contract 3: Broadcast conversation state transition to Unity WS clients."""
+        if not getattr(settings, "RUNTIME_FACTS_ENABLED", False):
+            return
+        try:
+            from backend.controllers.ws_room import room_manager
+            await room_manager.broadcast_conversation_state(state)
+        except Exception:
+            logger.debug("[ORCHESTRATOR] conversation_state broadcast failed", exc_info=True)
+
     def _build_ports(self) -> dict:
         """Build ports dict for run_agent_stream / run_agent_non_stream."""
         return {
@@ -95,11 +105,12 @@ class DefaultAgentOrchestrator:
         stream_id: Optional[str],
         message_id: Optional[str],
         turn_id: Optional[str] = None,
+        test_mode: bool = False,
     ) -> Iterable[dict]:
         """Pass-through to core agent stream."""
         from backend.core.agent import run_agent_stream
 
-        logger.debug("[Orchestrator] stream_chat passthrough thread=%s mode=%s", thread_id, mode)
+        logger.debug("[Orchestrator] stream_chat passthrough thread=%s mode=%s test_mode=%s", thread_id, mode, test_mode)
         async for ev in run_agent_stream(
             input_text=input_text,
             thread_id=thread_id,
@@ -111,6 +122,7 @@ class DefaultAgentOrchestrator:
                 "turn_id": turn_id,
                 "message_id": message_id,
                 "stream_id": stream_id,
+                "test_mode": test_mode,
             },
             ports=self._build_ports(),
         ):
@@ -126,6 +138,7 @@ class DefaultAgentOrchestrator:
         mode: str,
         stream_id: Optional[str],
         message_id: Optional[str],
+        test_mode: bool = False,
     ) -> Iterable[str]:
         """SSE-safe stream generator (moved from controller)."""
         sctx = SSEContext(
@@ -133,6 +146,7 @@ class DefaultAgentOrchestrator:
             stream_id=stream_id,
             sse_min_interval_ms=int(getattr(settings, "SSE_MIN_INTERVAL_MS", 0) or 0),
             t0=_ms(),
+            test_mode=bool(test_mode),
         )
 
         def emit(event: dict) -> str:
@@ -141,10 +155,11 @@ class DefaultAgentOrchestrator:
         try:
             from backend.services.chat_history_store import chat_history_store
 
-            await self._telemetry_event(thread_id, "chat_received", {
-                "user_len": len(input_text or ""),
-                "has_image": bool(image_data),
-            })
+            if not test_mode:
+                await self._telemetry_event(thread_id, "chat_received", {
+                    "user_len": len(input_text or ""),
+                    "has_image": bool(image_data),
+                })
 
             # --- 画像をURL化（履歴保存用）---
             image_url = None
@@ -166,6 +181,8 @@ class DefaultAgentOrchestrator:
                 ]
             else:
                 user_content = {"text": input_text}
+                if test_mode:
+                    user_content["meta"] = {"test_mode": True}
 
             user_message_id = await chat_history_store.append_message(
                 thread_id=thread_id,
@@ -176,25 +193,33 @@ class DefaultAgentOrchestrator:
             )
             sctx.lint_message_id = str(message_id or user_message_id)
 
-            await self._telemetry_event(thread_id, "stream_started", {
-                "mode": "stream_chat",
-            })
+            if not test_mode:
+                await self._telemetry_event(thread_id, "stream_started", {
+                    "mode": "stream_chat",
+                })
 
             # --- 夢配信（SSE開始直後、本編の前に1回だけ）---
-            try:
-                from backend.services.dream_store import claim_unread_dream
-                dream = claim_unread_dream()
-                if dream:
-                    logger.info(f"[API] Delivering dream: {dream.id}")
-                    yield emit({
-                        "type": "dream",
-                        "text": dream.dream_text,
-                        "mood": dream.mood,
-                        "dream_id": dream.id,
-                        "created_at": dream.created_at,
-                    })
-            except Exception as e:
-                logger.warning(f"[API] Dream delivery failed: {e}")
+            if not test_mode:
+                try:
+                    from backend.services.dream_store import claim_unread_dream
+                    dream = claim_unread_dream()
+                    if dream:
+                        logger.info(f"[API] Delivering dream: {dream.id}")
+                        yield emit({
+                            "type": "dream",
+                            "text": dream.dream_text,
+                            "mood": dream.mood,
+                            "dream_id": dream.id,
+                            "created_at": dream.created_at,
+                        })
+                except Exception as e:
+                    logger.warning(f"[API] Dream delivery failed: {e}")
+
+            # Contract 3: Broadcast conversation state transitions
+            await self._broadcast_conversation_state("listening")
+
+            # Contract 3: LISTENING → THINKING when LLM processing begins
+            await self._broadcast_conversation_state("thinking")
 
             # ── Main event loop (dispatch to handlers) ──
             async for ev in self.stream_chat(
@@ -206,6 +231,7 @@ class DefaultAgentOrchestrator:
                 stream_id=stream_id,
                 message_id=message_id or user_message_id,
                 turn_id=str(sctx.current_turn_id) if sctx.current_turn_id is not None else None,
+                test_mode=test_mode,
             ):
                 sctx.last_event = ev if isinstance(ev, dict) else {"type": "non_dict", "value": str(ev)}
                 if not isinstance(ev, dict):
@@ -217,12 +243,14 @@ class DefaultAgentOrchestrator:
                 sctx.last_event_type = str(msg_type)
 
                 if msg_type == "event" and ev.get("name") == "final_result":
+                    # Contract 3: THINKING → SPEAKING when response is ready
+                    await self._broadcast_conversation_state("speaking")
                     payload = ev.get("payload") or {}
                     if isinstance(payload, dict):
                         ft = payload.get("final_text")
                         if isinstance(ft, str) and ft.strip():
-                            # Safety net: strip <think> blocks from final_text
-                            ft = _THINK_RE.sub("", ft).strip()
+                            # Safety net: strip <think> blocks + orphan </think>
+                            ft = strip_think_leaks(ft)
                             payload["final_text"] = ft
                             sctx.final_text = ft
                     yield emit(ev)
@@ -315,7 +343,10 @@ class DefaultAgentOrchestrator:
         except Exception as e:
             logger.error(f"collect_text_from_agent_stream failed: {e}")
 
-        return final_text or streaming_text
+        result = final_text or streaming_text
+        # Strip <think>...</think> blocks and orphan </think>
+        result = strip_think_leaks(result)
+        return result
 
     async def run_non_stream(
         self,

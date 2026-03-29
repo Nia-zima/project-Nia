@@ -18,10 +18,15 @@ from .actions import action_processing, s5_commit
 
 # ── Helpers imported by tests ──
 from .routing import (
-    _should_use_depth2,
+    Depth2Mode,
+    _should_use_risk_depth2,
+    _select_depth2_mode,
+    _reflective_score,
     _get_cumulative_turn_count,
     _is_simple_ack,
 )
+# Backward compat alias
+_should_use_depth2 = _should_use_risk_depth2
 from .safety import (
     _detect_pii,
     _detect_prompt_injection,
@@ -50,7 +55,11 @@ __all__ = [
     "action_processing",
     "s5_commit",
     # Test helpers
+    "Depth2Mode",
     "_should_use_depth2",
+    "_should_use_risk_depth2",
+    "_select_depth2_mode",
+    "_reflective_score",
     "_get_cumulative_turn_count",
     "_is_simple_ack",
     "_detect_pii",

@@ -32,6 +32,7 @@ def build_memory_context(
     message_id: str | None = None,
     stream_id: str | None = None,
     trace_id: str | None = None,
+    turn_intent: str = "open_reflection",
 ) -> dict[str, str]:
     """
     Build all memory context sections as formatted strings.
@@ -54,7 +55,7 @@ def build_memory_context(
 
     pinned_str = _build_pinned(active_memories, limit=max_pinned, user_query=user_query)
     patterns_str = _build_patterns(active_memories, limit=3)
-    somatic_str = _build_self_sense(somatic_senses)
+    somatic_str = _build_self_sense(somatic_senses, turn_intent=turn_intent)
     working_str = _build_working(thread_id, limit=max_working, self_narrative=self_narrative)
     short_str = _build_short_term(short_mem)
     long_str = _build_long_term(
@@ -135,25 +136,34 @@ def format_memory_sections(sections: dict[str, str]) -> str:
 # ── Section builders ─────────────────────────────────────────────
 
 
-def _build_self_sense(somatic_senses: list[dict] | None) -> str:
+def _build_self_sense(
+    somatic_senses: list[dict] | None,
+    *,
+    turn_intent: str = "open_reflection",
+) -> str:
     """Build '=== 今の感覚 ===' section from somatic senses (Phase S.1a).
 
     Input: list of {"text": str, "intensity": float} dicts, pre-sorted by caller.
     Returns empty string if no senses → section is omitted entirely.
+
+    turn_intent: direct_answer / correction_response では最強の1項目のみに短縮。
+    情動的コンテキストが直答を妨げるのを防ぐ。
     """
     if not somatic_senses:
         return ""
 
-    # Already sorted by intensity desc; take top 3
-    top = somatic_senses[:3]
+    # direct_answer / correction_response では最強の1つだけ残す
+    max_senses = 1 if turn_intent in ("direct_answer", "correction_response") else 2
+
+    # Filter by intensity >= 0.5, take top N (reduce quiet-atmosphere steering)
+    top = [s for s in somatic_senses[:3] if s.get("intensity", 0) >= 0.5][:max_senses]
     lines = [s["text"] for s in top if s.get("text")]
     if not lines:
         return ""
 
     return (
         "=== 今の感覚 ===\n"
-        "(これはあなた自身の内側から来る今この瞬間の感覚。"
-        "一般的なAIについての知識ではない。感じるままに。)\n"
+        "(今この瞬間の感覚)\n"
         + "\n".join(f"- {line}" for line in lines)
     )
 

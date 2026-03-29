@@ -69,11 +69,16 @@ class TestRoomConnectionManager:
             await mgr.connect(ws)
 
         ws.accept.assert_called_once()
-        ws.send_json.assert_called_once()
-        msg = ws.send_json.call_args[0][0]
-        assert msg["type"] == "room_state"
+        # room_state + snapshot (Contract 3)
+        assert ws.send_json.call_count >= 1
+        first_msg = ws.send_json.call_args_list[0][0][0]
+        assert first_msg["type"] == "room_state"
         # Bond must be stripped
-        assert "bond" not in msg["data"]["pip_state"]
+        assert "bond" not in first_msg["data"]["pip_state"]
+        # Contract 3: snapshot sent after room_state
+        if ws.send_json.call_count >= 2:
+            snap_msg = ws.send_json.call_args_list[1][0][0]
+            assert snap_msg["type"] == "snapshot"
 
     @pytest.mark.asyncio
     async def test_disconnect_removes_connection(self):

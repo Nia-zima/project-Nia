@@ -294,6 +294,20 @@ class TestStalenessTracking:
         _mark_identity_updated()
         assert _is_identity_stale(3) is False
 
+    def test_mark_identity_updated_with_existing_connection(self):
+        """Can write into telemetry_kv using caller-owned DB transaction."""
+        from backend.core.db import managed_conn
+
+        with managed_conn() as conn:
+            conn.execute(
+                "DELETE FROM telemetry_kv WHERE k = 'self_model_last_identity_update'"
+            )
+            _mark_identity_updated(conn)
+            row = conn.execute(
+                "SELECT v FROM telemetry_kv WHERE k = 'self_model_last_identity_update'"
+            ).fetchone()
+        assert row is not None
+
     def test_stale_after_max_days(self):
         """Old timestamp → stale."""
         from backend.core.db import managed_conn

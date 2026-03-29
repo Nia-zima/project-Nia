@@ -16,6 +16,7 @@ dependencies = [
     "aiosqlite",
     "langchain",
     "langchain-openai",
+    "langchain-anthropic",
     "langchain-community",
     "langchain-ollama",
     "langgraph",

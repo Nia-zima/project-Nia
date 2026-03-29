@@ -30,23 +30,47 @@ def save_skeleton(
         row_id = uuid.uuid4().hex
         now = time.time()
         with managed_conn() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_skeletons)").fetchall()}
+            has_turn_role = "turn_role" in columns
+            has_turn_role_source = "turn_role_source" in columns
+
+            insert_columns = [
+                "id",
+                "turn_id",
+                "session_id",
+                "focus",
+                "response_intent",
+                "question_intent",
+                "source",
+                "confidence",
+                "rule_trace",
+            ]
+            values = [
+                row_id,
+                turn_id,
+                session_id,
+                skeleton.focus.value,
+                skeleton.response_intent.value,
+                skeleton.question_intent.value if skeleton.question_intent else None,
+                skeleton.source,
+                skeleton.confidence,
+                ",".join(skeleton.rule_trace),
+            ]
+            if has_turn_role:
+                insert_columns.append("turn_role")
+                values.append(skeleton.turn_role)
+            if has_turn_role_source:
+                insert_columns.append("turn_role_source")
+                values.append(skeleton.turn_role_source)
+            insert_columns.append("created_at")
+            values.append(now)
+
+            placeholders = ", ".join("?" for _ in insert_columns)
             conn.execute(
-                """INSERT INTO conversation_skeletons
-                   (id, turn_id, session_id, focus, response_intent,
-                    question_intent, source, confidence, rule_trace, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    row_id,
-                    turn_id,
-                    session_id,
-                    skeleton.focus.value,
-                    skeleton.response_intent.value,
-                    skeleton.question_intent.value if skeleton.question_intent else None,
-                    skeleton.source,
-                    skeleton.confidence,
-                    ",".join(skeleton.rule_trace),
-                    now,
-                ),
+                f"""INSERT INTO conversation_skeletons
+                    ({", ".join(insert_columns)})
+                    VALUES ({placeholders})""",
+                tuple(values),
             )
         return row_id
     except Exception:
@@ -62,9 +86,15 @@ def get_recent_skeletons(
     """直近 N 件の skeleton を取得（oldest-first で返す）。"""
     try:
         with managed_conn() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_skeletons)").fetchall()}
+            turn_role_expr = "turn_role" if "turn_role" in columns else "NULL AS turn_role"
+            turn_role_source_expr = (
+                "turn_role_source" if "turn_role_source" in columns else "NULL AS turn_role_source"
+            )
             rows = conn.execute(
-                """SELECT focus, response_intent, question_intent,
-                          source, confidence, rule_trace
+                f"""SELECT focus, response_intent, question_intent,
+                          source, confidence, rule_trace,
+                          {turn_role_expr}, {turn_role_source_expr}
                    FROM conversation_skeletons
                    WHERE session_id = ?
                    ORDER BY created_at DESC
@@ -82,6 +112,8 @@ def get_recent_skeletons(
                     source=row[3] or "nia_internal",
                     confidence=row[4] or 0.5,
                     rule_trace=(row[5] or "").split(",") if row[5] else [],
+                    turn_role=row[6],
+                    turn_role_source=row[7],
                 )
             )
         return result

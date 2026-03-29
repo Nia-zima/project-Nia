@@ -5,6 +5,12 @@ import time
 from contextlib import contextmanager
 from typing import Dict, Any, Generator
 from backend.core.config import ensure_dirs, settings
+from backend.core.db_migrations import (
+    ensure_conversation_skeleton_schema,
+    ensure_expression_observations_schema,
+    ensure_llm_usage_records_schema,
+    ensure_niacore_vnext_shadow_schema,
+)
 from backend.core.logger import logger
 
 
@@ -559,22 +565,7 @@ def _init_schema_inner(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nce_training ON niacore_experience(used_in_training, created_at);")
 
         # 23. Conversation Skeletons (SkeletonCore)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS conversation_skeletons (
-            id TEXT PRIMARY KEY,
-            turn_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            focus TEXT NOT NULL,
-            response_intent TEXT NOT NULL,
-            question_intent TEXT,
-            source TEXT,
-            confidence REAL,
-            rule_trace TEXT,
-            created_at REAL NOT NULL
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_cs_session ON conversation_skeletons(session_id, created_at DESC);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_cs_turn ON conversation_skeletons(turn_id);")
+        ensure_conversation_skeleton_schema(conn)
 
         # 24. Governance Events (Memory Governance source of truth)
         conn.execute("""
@@ -816,11 +807,74 @@ def _init_schema_inner(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tf_thread ON turn_fingerprints(thread_id, timestamp DESC);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tf_turn ON turn_fingerprints(turn_id);")
 
+        # 35. NiaCore vNext Shadow (Phase N0: pseudo-teacher observation)
+        ensure_niacore_vnext_shadow_schema(conn)
+
+        # 36. Expression Layer E0: utterance metadata observations
+        ensure_expression_observations_schema(conn)
+
+        # 37. Per-call LLM usage observations
+        ensure_llm_usage_records_schema(conn)
+
         # Migration: add candidate_id to memory_evidence (for existing DBs)
         try:
             conn.execute("ALTER TABLE memory_evidence ADD COLUMN candidate_id TEXT")
         except Exception:
             pass  # column already exists
+
+        # Migration: rebuild legacy memory_evidence if claim_id is still NOT NULL.
+        # Phase A evidence records start at candidate stage, so claim_id must be nullable.
+        me_info = conn.execute("PRAGMA table_info(memory_evidence)").fetchall()
+        me_cols = {row[1] for row in me_info}
+        me_claim_notnull = any(row[1] == "claim_id" and row[3] == 1 for row in me_info)
+        if me_claim_notnull:
+            legacy_table = f"memory_evidence_legacy_{int(time.time())}"
+            conn.execute(f"ALTER TABLE memory_evidence RENAME TO {legacy_table}")
+            conn.execute("""
+            CREATE TABLE memory_evidence (
+                evidence_id              TEXT PRIMARY KEY,
+                candidate_id             TEXT,
+                claim_id                 TEXT,
+                source_type              TEXT NOT NULL,
+                source_ref               TEXT,
+                evidence_date            TEXT,
+                reliability              REAL NOT NULL DEFAULT 0.5,
+                thread_id                TEXT,
+                turn_id                  TEXT,
+                message_id               TEXT,
+                stream_id                TEXT,
+                trace_id                 TEXT,
+                created_at               REAL NOT NULL
+            );
+            """)
+            candidate_select = "candidate_id" if "candidate_id" in me_cols else "NULL AS candidate_id"
+            thread_select = "thread_id" if "thread_id" in me_cols else "NULL AS thread_id"
+            turn_select = "turn_id" if "turn_id" in me_cols else "NULL AS turn_id"
+            message_select = "message_id" if "message_id" in me_cols else "NULL AS message_id"
+            stream_select = "stream_id" if "stream_id" in me_cols else "NULL AS stream_id"
+            trace_select = "trace_id" if "trace_id" in me_cols else "NULL AS trace_id"
+            conn.execute(
+                f"""
+                INSERT INTO memory_evidence (
+                    evidence_id, candidate_id, claim_id,
+                    source_type, source_ref,
+                    evidence_date, reliability,
+                    thread_id, turn_id, message_id, stream_id, trace_id,
+                    created_at
+                )
+                SELECT
+                    evidence_id, {candidate_select}, claim_id,
+                    source_type, source_ref,
+                    evidence_date, reliability,
+                    {thread_select}, {turn_select}, {message_select}, {stream_select}, {trace_select},
+                    created_at
+                FROM {legacy_table}
+                """
+            )
+            conn.execute(f"DROP TABLE {legacy_table}")
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_me_claim ON memory_evidence(claim_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_me_date ON memory_evidence(evidence_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_me_candidate ON memory_evidence(candidate_id);")
 
         # Migration: add provenance columns to governance tables (for existing DBs)
@@ -836,6 +890,10 @@ def _init_schema_inner(conn: sqlite3.Connection) -> None:
                     conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT")
                 except Exception:
                     pass  # column already exists
+
+        # Run ordered migrations (schema_version tracking)
+        from backend.core.db_migrations import run_migrations
+        run_migrations(conn)
 
         logger.info(f"[DB] Schema initialized at {settings.DB_PATH}")
     except Exception as e:

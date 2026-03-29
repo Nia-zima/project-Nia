@@ -234,6 +234,80 @@ class TestG6ThinRetrieval:
         assert result is None
 
 
+class TestG6IntentAware:
+    """G6 intent-aware exemption tests (Step 2)."""
+
+    def test_direct_answer_short_text_skips_hold(self):
+        """direct_answer + 短文 + ユーザー主張なし → hold しない"""
+        metrics = {"context_coverage": 0.2}
+        result = check_thin_retrieval(
+            "まだ言えてない。", metrics, turn_intent="direct_answer",
+        )
+        assert result is None
+
+    def test_correction_response_short_text_skips_hold(self):
+        """correction_response + 短文 → hold しない"""
+        metrics = {"context_coverage": 0.2}
+        result = check_thin_retrieval(
+            "それは違うよ。", metrics, turn_intent="correction_response",
+        )
+        assert result is None
+
+    def test_open_reflection_still_holds(self):
+        """open_reflection + 低 coverage + 強断定 → hold する（既存動作維持）"""
+        metrics = {"context_coverage": 0.2}
+        result = check_thin_retrieval(
+            "正解はAだ", metrics, turn_intent="open_reflection",
+        )
+        assert result is not None
+        assert result.severity == "hold"
+
+    def test_direct_answer_long_text_still_holds(self):
+        """direct_answer + 4文以上 → hold する"""
+        metrics = {"context_coverage": 0.2}
+        long_text = "絶対にこれが正しい。間違いなく確実だ。必ずこうなる。しかないんだよ。そうに決まっている。"
+        result = check_thin_retrieval(
+            long_text, metrics, turn_intent="direct_answer",
+        )
+        # 4+ sentences, so not exempted; and _looks_strong_conclusion matches
+        assert result is not None
+
+    def test_direct_answer_with_user_claim_still_holds(self):
+        """direct_answer + 短文 + ユーザー属性断定 → hold する"""
+        metrics = {"context_coverage": 0.2}
+        result = check_thin_retrieval(
+            "あなたは猫が好きだよね。絶対そうだ。", metrics, turn_intent="direct_answer",
+        )
+        # Has user claim ("あなた...好き") → not exempted
+        assert result is not None
+
+    def test_direct_answer_over_150_chars_still_holds(self):
+        """direct_answer + 150字超 → hold する"""
+        metrics = {"context_coverage": 0.2}
+        # Build a text >150 chars with strong assertion
+        long_text = "絶対にそうだと思う。" + "あ" * 150
+        result = check_thin_retrieval(
+            long_text, metrics, turn_intent="direct_answer",
+        )
+        assert result is not None
+
+    def test_high_coverage_passes_regardless_of_intent(self):
+        """coverage ≥ 0.4 → intent に関係なく通過"""
+        metrics = {"context_coverage": 0.5}
+        result = check_thin_retrieval(
+            "正解はAだ", metrics, turn_intent="open_reflection",
+        )
+        assert result is None
+
+    def test_soft_language_passes_regardless_of_intent(self):
+        """_looks_strong_conclusion が false → intent に関係なく通過"""
+        metrics = {"context_coverage": 0.2}
+        result = check_thin_retrieval(
+            "たぶんそうかも", metrics, turn_intent="open_reflection",
+        )
+        assert result is None
+
+
 # ── run_guardrails (integration) ───────────────────────────────
 
 

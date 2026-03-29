@@ -57,3 +57,5 @@ class ConversationSkeleton:
     source: str = "nia_internal"  # "nia_internal" | "nero_external"
     confidence: float = 0.5
     rule_trace: list[str] = field(default_factory=list)
+    turn_role: Optional[str] = None
+    turn_role_source: Optional[str] = None

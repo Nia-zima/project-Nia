@@ -425,10 +425,12 @@ async def run_agent_stream(
     turn_id = None
     stream_id = None
     message_id = None
+    test_mode = False
     if isinstance(memory_refs, dict):
         turn_id = memory_refs.get("turn_id")
         stream_id = memory_refs.get("stream_id")
         message_id = memory_refs.get("message_id")
+        test_mode = bool(memory_refs.get("test_mode"))
 
     output_queue = asyncio.Queue()
     resolved_voice_id = _resolve_voice_id(voice_id)
@@ -492,10 +494,14 @@ async def run_agent_stream(
                     "turn_id": ctx.turn_id,
                     "message_id": ctx.message_id,
                     "stream_id": ctx.stream_id,
+                    "test_mode": test_mode,
                     # Prevent stale checkpoint values from leaking across turns.
                     "draft": "",
                     "depth1_text": "",
+                    "depth1_contract_ok": None,
                     "depth2_text": "",
+                    "turn_role": None,
+                    "turn_role_source": None,
                 }
 
                 ctx.raw_buffer = ""

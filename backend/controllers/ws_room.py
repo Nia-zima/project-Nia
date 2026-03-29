@@ -1,13 +1,16 @@
 """
 WebSocket endpoint for Nia's Room — real-time state sync with Unity.
 
-Design doc: docs/pip_and_room_design.md
-Plan: U.1+U.3 Step 1a
+Design doc: docs/pip_and_room_design.md, docs/pip_room_temporal_livestream_integration.md §8
+Plan: U.1+U.3 Step 1a + Contract 3
 
 Server → Client messages:
   {"type": "room_state", "data": {…full RoomState…}}
   {"type": "pip_update", "data": {"mood", "animation", "position", "energy"}}
   {"type": "lighting_update", "data": {"time_of_day", "intensity", "color"}}
+  {"type": "snapshot", …}           — sent on connect (Contract 3)
+  {"type": "state", "key": …}       — conversation state transition (Contract 3)
+  {"type": "motion", …}             — motion events (Contract 3)
 
 Client → Server messages:
   {"type": "room_action", "data": {"action_type", "template", "position", …}}
@@ -55,6 +58,15 @@ class RoomConnectionManager:
     def __init__(self) -> None:
         self._connections: list[WebSocket] = []
         self._lock = asyncio.Lock()
+        # Contract 3: track current conversation state for snapshot
+        from backend.services.room.motion_events import ConversationState
+        self._conversation_state: ConversationState = ConversationState.IDLE
+        # Contract 3: Global motion prev state (NOT thread-scoped).
+        # Room/Pip are global, so motion events must compare against last
+        # *broadcast* state, not per-thread telemetry_kv.
+        self._motion_prev_pip_visible: str | None = None
+        self._motion_prev_time_of_day: str | None = None
+        self._motion_prev_pip_position_near: bool = False
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -65,6 +77,32 @@ class RoomConnectionManager:
         room = load_room_state()
         state_dict = _strip_bond(asdict(room))
         await ws.send_json({"type": "room_state", "data": state_dict})
+
+        # Contract 3: Send snapshot so late subscribers know current state
+        try:
+            from backend.services.room.motion_events import (
+                ConversationState,
+                build_snapshot,
+            )
+            from backend.services.room.runtime_facts import (
+                PipVisible,
+                TimeOfDay,
+                hour_to_time_of_day,
+                mood_to_visible,
+            )
+            from datetime import datetime
+
+            pip = room.pip_state or {}
+            snapshot = build_snapshot(
+                conversation_state=self._conversation_state,
+                pip_visible=mood_to_visible(pip.get("mood", "idle")),
+                pip_position_near=pip.get("position", "") in ("near_nia", "next_to_nia"),
+                time_of_day=hour_to_time_of_day(datetime.now().hour),
+            )
+            await ws.send_json(snapshot)
+        except Exception:
+            pass  # non-critical: snapshot is a bonus
+
         logger.info("[WS_ROOM] client connected (total: %d)", len(self._connections))
 
     async def disconnect(self, ws: WebSocket) -> None:
@@ -122,6 +160,23 @@ class RoomConnectionManager:
                 "color": color,
             },
         })
+
+    # ── Contract 3: Motion events ──
+
+    async def broadcast_conversation_state(self, state: str) -> None:
+        """Broadcast conversation state transition."""
+        from backend.services.room.motion_events import (
+            ConversationState,
+            build_conversation_state_message,
+        )
+        cs = ConversationState(state)
+        self._conversation_state = cs
+        await self.broadcast(build_conversation_state_message(cs))
+
+    async def broadcast_motion_events(self, events: list) -> None:
+        """Broadcast motion events to all connected clients."""
+        for event in events:
+            await self.broadcast(event.to_ws_message())
 
 
 # Global singleton — imported by update_loop.py for broadcasting

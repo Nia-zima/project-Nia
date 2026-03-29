@@ -17,7 +17,7 @@ export interface ChatMessage {
     timestamp?: string;
     type?: 'text' | 'audio' | 'image';
     image?: string;
-    kind?: 'dream';
+    kind?: 'dream' | 'drawing' | 'drawing_error';
     meta?: { mood?: string; created_at?: string; [key: string]: unknown };
 }
 
@@ -148,6 +148,7 @@ class APIClient {
             mode?: string;
             streamId?: string;
             messageId?: string;
+            testMode?: boolean;
         },
         signal?: AbortSignal,
     ): Promise<Response> {
@@ -162,6 +163,7 @@ class APIClient {
                 stream_id: params.streamId,
                 message_id: params.messageId,
                 thread_id: params.threadId,
+                test_mode: Boolean(params.testMode),
             }),
             signal,
         });

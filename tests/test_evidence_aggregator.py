@@ -148,6 +148,56 @@ class TestMatchCandidate:
 
 
 class TestRepositoryExtensions:
+    def test_init_schema_rebuilds_legacy_memory_evidence_claim_nullable(self, tmp_db):
+        """Legacy memory_evidence with claim_id NOT NULL should be rebuilt as nullable."""
+        conn = get_conn()
+        try:
+            conn.execute("DROP TABLE IF EXISTS memory_evidence")
+            conn.execute(
+                """
+                CREATE TABLE memory_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    claim_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_ref TEXT,
+                    evidence_date TEXT,
+                    reliability REAL NOT NULL DEFAULT 0.5,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        init_schema()
+
+        conn = get_conn()
+        try:
+            cols = conn.execute("PRAGMA table_info(memory_evidence)").fetchall()
+            claim_row = next(row for row in cols if row[1] == "claim_id")
+            candidate_row = next(row for row in cols if row[1] == "candidate_id")
+            assert claim_row[3] == 0  # nullable after rebuild
+            assert candidate_row[2] == "TEXT"
+
+            insert_evidence(
+                conn,
+                MemoryEvidence(
+                    evidence_id="ev_nullable_claim",
+                    candidate_id="cand_nullable_claim",
+                    claim_id=None,
+                    source_type="skeleton",
+                    created_at=time.time(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        inserted = list_evidence_by_candidate("cand_nullable_claim")
+        assert len(inserted) == 1
+        assert inserted[0].claim_id is None
+
     def test_insert_evidence_with_candidate_id(self, tmp_db):
         """Evidence can be inserted with candidate_id and no claim_id."""
         from backend.core.db import managed_conn

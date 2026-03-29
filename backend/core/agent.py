@@ -162,7 +162,10 @@ async def run_agent_non_stream(input_text: str, thread_id: str = "default_thread
                 # Prevent stale checkpoint values from leaking across turns.
                 "draft": "",
                 "depth1_text": "",
+                "depth1_contract_ok": None,
                 "depth2_text": "",
+                "turn_role": None,
+                "turn_role_source": None,
             }
 
             result = await app_instance.ainvoke(inputs, config=config)

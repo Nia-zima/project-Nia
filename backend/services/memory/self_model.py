@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import date as _date
@@ -395,13 +396,20 @@ def _is_identity_stale(max_days: int) -> bool:
     return days_since > max_days
 
 
-def _mark_identity_updated() -> None:
+def _mark_identity_updated(conn: sqlite3.Connection | None = None) -> None:
     """Record that identity.md was just updated."""
+    now = int(time.time())
+    if conn is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES (?, ?, ?)",
+            ("self_model_last_identity_update", str(now), now),
+        )
+        return
+
     from backend.core.db import managed_conn
 
-    now = int(time.time())
-    with managed_conn() as conn:
-        conn.execute(
+    with managed_conn() as owned_conn:
+        owned_conn.execute(
             "INSERT OR REPLACE INTO telemetry_kv (k, v, updated_at) VALUES (?, ?, ?)",
             ("self_model_last_identity_update", str(now), now),
         )
