@@ -69,9 +69,11 @@ def setup_function():
     init_schema()
     conn = get_conn()
     try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DELETE FROM memory_events")
         conn.execute("DELETE FROM events")
         conn.execute("DELETE FROM x_post_proposals")
-        conn.execute("DELETE FROM memory_events")
+        conn.execute("PRAGMA foreign_keys = ON")
     finally:
         conn.close()
 

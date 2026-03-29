@@ -31,11 +31,11 @@ class TestIsWsOriginAllowed:
             from backend.controllers.ws_security import is_ws_origin_allowed
             assert is_ws_origin_allowed("http://anything.com") is True
 
-    def test_wildcard_still_rejects_none(self):
-        """Even with wildcard config, None origin should be rejected."""
+    def test_wildcard_accepts_none(self):
+        """With wildcard config, None origin is accepted (Unity WS clients don't send Origin)."""
         with patch("backend.controllers.ws_security.allowed_ws_origins", return_value={"*"}):
             from backend.controllers.ws_security import is_ws_origin_allowed
-            assert is_ws_origin_allowed(None) is False
+            assert is_ws_origin_allowed(None) is True
 
 
 class TestConstants:

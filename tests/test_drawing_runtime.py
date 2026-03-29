@@ -550,7 +550,8 @@ class TestRoomHang:
 
         assert not mock_exec.called  # Deduped
 
-    def test_replay_does_not_hang(self):
+    @pytest.mark.asyncio
+    async def test_replay_does_not_hang(self):
         """replay=True result should not trigger room hang (tested via runtime flow)."""
         from backend.core.drawing.runtime import render_and_store_drawing
         from backend.core.drawing.trace_store import ensure_drawing_trace_schema
@@ -569,20 +570,19 @@ class TestRoomHang:
             mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=conn)
             mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            import asyncio
             # First call
-            asyncio.get_event_loop().run_until_complete(render_and_store_drawing({
+            await render_and_store_drawing({
                 "drawing_id": "draw:replay_room:0",
                 "dsl_code": "a: circle\na at center",
-            }))
+            })
             assert mock_hang.call_count == 1
 
             # Replay call — should NOT call hang again
             mock_hang.reset_mock()
-            result = asyncio.get_event_loop().run_until_complete(render_and_store_drawing({
+            result = await render_and_store_drawing({
                 "drawing_id": "draw:replay_room:0",
                 "dsl_code": "a: circle\na at center",
-            }))
+            })
             assert result.get("replay") is True
             assert mock_hang.call_count == 0
 
