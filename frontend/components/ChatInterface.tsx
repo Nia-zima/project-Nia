@@ -296,8 +296,8 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                 return;
             }
             const rawText = extractSpeech(normalizeContent(last.content));
-            // Strip draw fences from backfilled text (DrawingCard handles display)
-            const text = rawText?.replace(/```draw\s*\n[\s\S]*?```/gi, "").trim();
+            // Strip draw/intent fences from backfilled text (DrawingCard handles display)
+            const text = rawText?.replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```/gi, "").trim();
             if (!text) {
                 if (attempt < 2) {
                     setTimeout(() => backfillLastAssistantMessage(attempt + 1), 250);
@@ -441,8 +441,8 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                 const ft = String(payload.final_text ?? "");
                 console.info("[SSE final_result] len=%d merge_mode=%s", ft.length, payload.merge_mode);
                 if (ft.trim() && ft.trim() !== "WAIT") {
-                    // Strip ```draw fences from display text (rendered as DrawingCard instead)
-                    const displayText = ft.replace(/```draw\s*\n[\s\S]*?```/gi, "").trim();
+                    // Strip draw/intent fences from display text (rendered as DrawingCard instead)
+                    const displayText = ft.replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```/gi, "").trim();
                     if (displayText) {
                         if (!aiMsgIdRef.current) {
                             beginAiMessage();

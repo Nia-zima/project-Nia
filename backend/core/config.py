@@ -351,6 +351,11 @@ class Settings:
 
         # Drawing Language: hang drawings on room wall after render
         self.DRAWING_ROOM_ENABLED = _env_bool("DRAWING_ROOM_ENABLED", False)
+        # Drawing Language: reject legacy ```draw, require ```draw-intent only
+        self.DRAWING_INTENT_ONLY = _env_bool("DRAWING_INTENT_ONLY", False)
+
+        # Skeleton Realizer: C.0 shadow (generate guidance + adherence, do NOT inject into LLM)
+        self.SKELETON_GUIDANCE_SHADOW_ENABLED = _env_bool("SKELETON_GUIDANCE_SHADOW_ENABLED", False)
 
         # Conversation Adaptation: failure-to-policy / success-to-preference
         # Phase A: DDL + writer only, no runtime connection

@@ -14,6 +14,7 @@ import ProfileEditor from '@/components/ProfileEditor';
 import SettingsPanel from '@/components/SettingsPanel';
 import StatsPanel from '@/components/StatsPanel';
 import DrawLab from '@/components/DrawLab';
+import DrawingViewer from '@/components/DrawingViewer';
 import GamePanel from '@/components/GamePanel';
 import VideoPanel from '@/components/VideoPanel';
 import IdentityPanel from '@/components/IdentityPanel';
@@ -254,9 +255,7 @@ export default function Home() {
 
           {/* Draw Lab Tab */}
           {activeTab === 'draw_lab' && (
-            <div className="flex-1 glass rounded-3xl overflow-hidden">
-              <DrawLab />
-            </div>
+            <DrawLabWithViewer />
           )}
 
           {/* Game Tab */}
@@ -313,5 +312,40 @@ export default function Home() {
         </div>
       </div>
     </main>
+  );
+}
+
+function DrawLabWithViewer() {
+  const [subTab, setSubTab] = useState<'canvas' | 'traces'>('canvas');
+  return (
+    <div className="flex-1 glass rounded-3xl overflow-hidden flex flex-col">
+      <div className="flex gap-1 p-2 border-b border-white/5">
+        <button
+          onClick={() => setSubTab('canvas')}
+          className={`px-3 py-1 text-xs rounded-lg transition ${
+            subTab === 'canvas' ? 'bg-white/10 text-gray-200' : 'text-gray-500 hover:bg-white/5'
+          }`}
+        >
+          Canvas
+        </button>
+        <button
+          onClick={() => setSubTab('traces')}
+          className={`px-3 py-1 text-xs rounded-lg transition ${
+            subTab === 'traces' ? 'bg-amber-700/40 text-amber-200' : 'text-gray-500 hover:bg-white/5'
+          }`}
+        >
+          Trace Viewer
+        </button>
+      </div>
+      <div className="flex-1 overflow-hidden relative">
+        {/* Keep DrawLab mounted to preserve session state; hide with CSS */}
+        <div className={`h-full ${subTab === 'canvas' ? '' : 'hidden'}`}>
+          <DrawLab />
+        </div>
+        <div className={`h-full ${subTab === 'traces' ? '' : 'hidden'}`}>
+          <DrawingViewer />
+        </div>
+      </div>
+    </div>
   );
 }

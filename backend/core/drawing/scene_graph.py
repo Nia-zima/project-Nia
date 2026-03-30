@@ -104,6 +104,10 @@ def _resolve_spatial_ref(ref: str, canvas: CanvasConfig) -> tuple[float, float]:
         "lower": (cx, canvas.height * 0.8),
         "left_edge": (canvas.width * 0.1, cy),
         "right_edge": (canvas.width * 0.9, cy),
+        "upper_left": (canvas.width * 0.15, canvas.height * 0.15),
+        "upper_right": (canvas.width * 0.85, canvas.height * 0.15),
+        "lower_left": (canvas.width * 0.15, canvas.height * 0.85),
+        "lower_right": (canvas.width * 0.85, canvas.height * 0.85),
         "corner": (canvas.width * 0.1, canvas.height * 0.1),
         "margin": (canvas.width * 0.05, canvas.height * 0.05),
         "field": (cx, cy),  # field = whole canvas, centered

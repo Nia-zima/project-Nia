@@ -816,3 +816,121 @@ def _aggregate_governance_evidence(
     )
 
     aggregate_evidence(signals)
+
+
+# =============================================================================
+# Skeleton Realizer C.0: Shadow Recording
+# =============================================================================
+
+
+def _record_skeleton_guidance_shadow(
+    state: dict,
+    thread_id: str,
+    turn_id: str,
+) -> None:
+    """Skeleton Realizer C.0: generate guidance + evaluate adherence + record.
+
+    Fire-and-forget. Gated by SKELETON_GUIDANCE_SHADOW_ENABLED.
+    Does NOT inject into LLM context.
+    """
+    if not getattr(settings, "SKELETON_GUIDANCE_SHADOW_ENABLED", False):
+        return
+
+    final_text = str(state.get("final_text") or "")
+    if not final_text.strip():
+        return
+
+    try:
+        from datetime import datetime, timezone
+        import uuid
+
+        from backend.core.skeleton_realizer.input_adapter import build_realizer_input
+        from backend.core.skeleton_realizer.realizer import realize_skeleton
+        from backend.core.skeleton_realizer.adherence import (
+            evaluate_adherence,
+            classify_low_adherence,
+        )
+        from backend.core.skeleton_realizer.schema import AdherenceRecord
+        from backend.core.skeleton_realizer.store import (
+            ensure_schema,
+            save_shadow_record,
+        )
+        from backend.core.db import managed_conn as _managed_conn
+
+        # 1. Build RealizerInput from SkeletonCore + NiaCore vNext
+        realizer_input = build_realizer_input(
+            selected_depth=int(state.get("selected_depth") or 0),
+            confidence=float(state.get("confidence") or 0.5),
+            conversation_skeleton=state.get("conversation_skeleton"),
+            niacore_vnext_shadow=state.get("niacore_vnext_shadow"),
+            turn_role=state.get("turn_role"),
+            somatic_senses=state.get("somatic_senses"),
+        )
+
+        # 2. Generate skeleton guidance
+        guidance = realize_skeleton(realizer_input)
+
+        # 3. Evaluate adherence (shadow: compare LLM output vs guidance)
+        # Use Expression Layer features if available
+        expression_feats: dict = {}
+        try:
+            from backend.core.expression.extractor import extract_expression_features
+            ef = extract_expression_features(final_text)
+            expression_feats = {
+                "assertion_ratio": ef.assertion_ratio,
+                "hedge_ratio": ef.hedge_ratio,
+                "directive_ratio": ef.directive_ratio,
+            }
+        except Exception:
+            pass  # Expression Layer unavailable — proceed without
+        adherence_scores = evaluate_adherence(
+            realizer_input, final_text, expression_feats,
+        )
+
+        # 4. Classify low adherence
+        # Note: prompt_stack_conflict detection is not yet wired (C.0 limitation).
+        # had_prompt_stack_conflict=False means this branch never fires in C.0.
+        # This is a known gap — §13 分類の prompt_stack_conflict は C.1 で接続する。
+        low_cause, low_confidence = classify_low_adherence(
+            adherence_scores, realizer_input, had_prompt_stack_conflict=False,
+        )
+        low_detected = (
+            adherence_scores.composite_score is not None
+            and adherence_scores.composite_score < 0.4
+        )
+        low_heads = []
+        from backend.core.skeleton_realizer.schema import AdherenceLevel
+        for attr in ("mode_adherence", "target_adherence", "posture_adherence",
+                     "tone_adherence", "structure_adherence"):
+            if getattr(adherence_scores, attr) == AdherenceLevel.LOW:
+                low_heads.append(attr.replace("_adherence", ""))
+
+        # 5. Build and save record
+        now = datetime.now(timezone.utc).isoformat()
+        record = AdherenceRecord(
+            record_id=f"sgr_{uuid.uuid4().hex[:12]}",
+            turn_id=turn_id,
+            thread_id=thread_id,
+            realizer_input=realizer_input,
+            skeleton_guidance=guidance,
+            adherence_scores=adherence_scores,
+            low_adherence_detected=low_detected,
+            low_adherence_heads=low_heads,
+            feedback_target=low_cause,
+            feedback_confidence=low_confidence,
+            created_at=now,
+        )
+
+        with _managed_conn() as conn:
+            ensure_schema(conn)
+            save_shadow_record(conn, record)
+
+        logger.info(
+            "[SKELETON_REALIZER] shadow: mode=%s composite=%.2f low=%s heads=%s",
+            realizer_input.respond_mode.value,
+            adherence_scores.composite_score or 0,
+            low_detected,
+            low_heads,
+        )
+    except Exception:
+        logger.debug("[SKELETON_REALIZER] shadow record failed", exc_info=True)

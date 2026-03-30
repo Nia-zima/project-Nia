@@ -1,22 +1,22 @@
 # Nia 統合ロードマップ
 
-> **目的:** 個別設計書と feature gate 台帳を横断して、「今どこにいて、次に何を有効化し、何を後回しにするか」を一枚で確認できるようにする。  
-> **更新タイミング:** gate の stage 変更時、大きな設計追加時、ロードマップの順序変更時。  
-> **基準日:** 2026-03-24
+> 目的: 個別設計書と feature gate 台帳を横断して、`今どこまで live で、何が shadow で、次にどこへ進むか` を 1 本で確認できるようにする。  
+> 更新日: 2026-03-30
 
 ---
 
 ## 1. この文書の位置づけ
 
-この文書は設計書そのものではない。  
-各コンポーネントの仕様は個別設計書を正とし、ここでは **統合順序** と **依存関係** だけを扱う。
+この文書は仕様書ではない。  
+各 subsystem の正本は個別設計書を見て、ここでは **統合順序 / 依存関係 / 進め方** だけを扱う。
 
-優先順位の判断軸は次の 4 つ:
+判断軸は次の 5 つ。
 
 1. 本線を壊さない
 2. 観測を先に、制御を後に
-3. rollback が簡単なものから有効化する
-4. データ量のしきい値を満たしてから次段階へ進む
+3. 1 回に 1 段階だけ進める
+4. rollback が簡単なものから先に進める
+5. LLM 境界の変更は canary / shadow を挟む
 
 ---
 
@@ -24,280 +24,279 @@
 
 ### 2.1 本線
 
-- 会話本線: 稼働中
-- `review_window`: 稼働中
-- `S5 Commit`: 稼働中
-- 品質基盤: gate registry / deferred items / state taxonomy / migration / retention / recovery / review checklist まで整備済み
+- 会話本線は live
+- `review_window` は live
+- `S5 Commit` は live
+- 会話品質修正 Step 0〜8 は完了
+- Conversation Adaptation Phase A〜C は完了
+- open_reflection の trigger-based family cap は完了
 
-### 2.2 稼働中の観測系
+### 2.2 観測中 / canary
 
 | 項目 | 状態 | 補足 |
-|------|------|------|
-| NiaCore Experience | on | `niacore_experience` 蓄積中 |
-| NiaCore Shadow | on | depth 決定はまだ rule-based |
-| NiaCore vNext Shadow | on | N0 観測専用で `niacore_vnext_shadow` 蓄積中 |
-| Skeleton Record | on | record-only |
-| Governance Observe / Candidate / Evidence | on | Observe は record-only、Candidate/Evidence は canary |
-| Fingerprint Record | on | TS.0 稼働中 |
-| Expression Layer E0 | on | record-only |
-| RuntimeFacts | on | Phase A 観測中 |
+|---|---|---|
+| Metabolic Hardening | canary | Step 0〜4 完了、Phase 4.5 / 4.6 live |
+| RuntimeFacts | live (Phase A 観測中) | `RUNTIME_FACTS_ENABLED=true` |
+| Governance Observe / Candidate / Evidence | record-only / canary | Phase A live |
+| NiaCore Experience | record-only | `NIACORE_EXPERIENCE_ENABLED=true` |
+| NiaCore Shadow | shadow | `NIACORE_SHADOW_ENABLED=true` |
+| NiaCore vNext Shadow | shadow | `NIACORE_VNEXT_SHADOW_ENABLED=true` |
+| Skeleton Record | record-only | `SKELETON_RECORD_ENABLED=true` |
+| Expression Record | record-only | `EXPRESSION_RECORD_ENABLED=true` |
+| Fingerprint Record | record-only | `FINGERPRINT_RECORD_ENABLED=true` |
 
-### 2.3 実装済みだが未有効化
+### 2.3 一旦完成
 
-| 項目 | Gate | 理由 |
-|------|------|------|
-| Atmosphere | `ATMOSPHERE_ENABLED` | RuntimeFacts Phase A の観測後に判断 |
-| Skeleton Somatic | `SKELETON_SOMATIC_ENABLED` | record-only 観測後 |
-| NiaCore Training | `NIACORE_TRAINING_ENABLED` | Shadow 期間・品質条件待ち |
+| 項目 | 状態 | 補足 |
+|---|---|---|
+| Drawing Language | 一旦完成 | Dual Ingress、trace/viewer/room/test-render まで接続済み |
 
-### 2.4 可変データの確認方法
+### 2.4 まだ off / 未着手
 
-この節の数値は腐りやすい。  
-**具体的な行数は常に `python -m backend.scripts.report_gate_status` を正とする。**
-
-このロードマップでは、次の項目だけを確認すればよい:
-
-- `niacore_experience`: Training 判定に十分な蓄積があるか
-- `conversation_skeletons`: `SKELETON_SOMATIC_ENABLED` 判定ラインに近いか
-- `turn_fingerprints`: TS.1 の前提量に達したか
-- `governance_events`: Phase A 観測が十分進んでいるか
-- `expression_observations`: E0.5 に進めるだけの分量があるか
-- `niacore_vnext_shadow`: N0 の分析を始められるか
+| 項目 | 状態 | 補足 |
+|---|---|---|
+| Skeleton Somatic | off | `SKELETON_SOMATIC_ENABLED=false` |
+| Atmosphere | off | `ATMOSPHERE_ENABLED=false` |
+| NiaCore Training | off | `NIACORE_TRAINING_ENABLED=false` |
+| Skeleton Realizer | 設計完了 | C.0 shadow 未着手 |
+| knot -> NiaCore 学習信号 | 設計完了 | candidate/review/sample 未着手 |
+| Governance Phase B/C | 未実装 | claim 正規化、decay / merge 審査 |
+| failure-to-policy / success-to-preference | 未実装 | staging memo 上は後段 |
+| Idle Consolidation | 構想段階 | `processing_pipeline_staging_memo.md` |
 
 ---
 
-## 3. 統合順序の原則
+## 3. ロードマップ全体像
 
-### 3.1 一度に進めるのは 1 段階まで
+進行順は次の 6 段で考える。
 
-- 同時に複数の gate を有効化すると、挙動変化の原因が分からなくなる
-- 特に LLM context を変えるものと、観測専用のものを同日に混ぜない
+1. live 観測を閉じる
+2. Skeleton Realizer C.0 shadow
+3. Skeleton Realizer C.1 canary
+4. knot -> NiaCore の candidate / review レイヤー
+5. NiaCore training 判定
+6. Governance / Consolidation の後段
 
-### 3.2 先に有効化するもの
-
-- fire-and-forget
-- rollback が env 1 個で済む
-- 既存本線に制御影響を持たない
-
-### 3.3 後に有効化するもの
-
-- LLM prompt / context を変えるもの
-- depth 決定や memory policy に影響するもの
-- 学習や自動更新を伴うもの
+Drawing はここでは「新規本線」ではなく、後段観測トラックに置く。
 
 ---
 
-## 4. 推奨ロードマップ
+## 4. フェーズ別ロードマップ
 
-## Phase 0: 運用基盤
+## Phase 0: 基準線の維持
 
 **状態:** 完了
 
-- gate registry / deferred items / taxonomy
-- gate status report
-- lightweight migration
-- retention policy / prune
-- recovery runbook
-- review checklist
+- gate registry
+- handoff / assistant context
+- state taxonomy
+- recovery / rollback 手順
+- migration / retention / deferred items
 
-この段階は完了したので、次は **低リスク観測の拡張** に進む。
-
----
-
-## Phase 1: 低リスク観測の拡張
-
-**目的:** 本線に影響しない観測レイヤーを先に開ける。
-
-**状態:** 完了（観測継続中）
-
-### 推奨順
-
-1. `EXPRESSION_RECORD_ENABLED`
-2. `NIACORE_VNEXT_SHADOW_ENABLED`
-3. Chroma 再構築リハーサル（メンテ時）
-
-### 理由
-
-- Expression E0 と vNext Shadow はどちらも fire-and-forget
-- rollback は gate を off にするだけ
-- 次段階の分析や vNext N1 の前提データになる
-
-### 卒業条件
-
-- `EXPRESSION_RECORD_ENABLED`: `expression_observations >= 100` 行
-- `NIACORE_VNEXT_SHADOW_ENABLED`: `niacore_vnext_shadow >= 100` 行
-- 観測期間中に writer エラーログ 0 件
-- S5 / 本線エラー率に悪影響がない
-
-**補足:** ここでの「100 行」は卒業判定の最小ラインであり、分析開始ラインではない。
+この段階は今後も維持対象で、新しい系を入れる前にここを崩さない。
 
 ---
 
-## Phase 2: Context 注入の段階投入
+## Phase 1: 現在 live の観測を閉じる
 
-**目的:** LLM context に影響する要素を 1 つずつ入れる。
-
-**状態:** 進行中（`RUNTIME_FACTS_ENABLED=true`、Phase A 観測中）
-
-### 推奨順
-
-1. `RUNTIME_FACTS_ENABLED`（完了）
-2. `SKELETON_SOMATIC_ENABLED`
-3. `ATMOSPHERE_ENABLED`
-
-### 理由
-
-- `RuntimeFacts` は context 注入系の中で最も説明可能性が高い
-- `Skeleton Somatic` は `conversation_skeletons` が 500 付近に達してから入れるのが自然
-- `Atmosphere` は最も「空気」を変えやすいので最後
-
-### 進め方
-
-- 各 gate ごとに観測期間を設ける
-- 1 回の有効化で見るのは 1 コンポーネントだけ
-- 観測対象:
-  - Depth0 の立ち止まり品質
-  - 過剰な即答化が起きないか
-  - 不自然な自己言及や説明口調が増えないか
-
-### 観測方法
-
-- **writer 生存確認:** `python -m backend.scripts.report_gate_status`
-- **WAIT / spoken バランス:** `expression_observations.event_kind` の分布を見る
-- **Depth の偏り:** `expression_observations.selected_depth` と `turn_fingerprints` の増え方を見る
-- **品質確認:** 有効化前後で 20 ターン程度を手動レビューする
-- **レビュー観点:** 即答化、説明臭さ、自己言及、WAIT の消失、迎合の増加
-
-### 卒業条件
-
-- prompt 変化が「仕組みの露出」になっていない
-- WAIT が減りすぎない
-- 迎合や説明臭さが増えない
-
----
-
-## Phase 3: 学習・分析の起動
-
-**目的:** 観測から分析・学習へ進める。
-
-### 推奨順
-
-1. `NIACORE_TRAINING_ENABLED`
-2. Expression E0.5 分析
-3. TS.1 Contrast Engine
-
-### 理由
-
-- `NIACORE_TRAINING_ENABLED` はもっとも影響が大きいので、日数条件を守る必要がある
-- 最短判定日は **2026-04-05**（Shadow 開始 2026-03-06 から 30 日後）
-- Expression E0.5 と TS.1 は、観測量が揃ってから分析へ進む
-
-### NiaCore Training の前提条件
-
-- Shadow 期間が 30 日以上
-- `niacore_experience` が十分量ある
-- 一致率、逸脱後成功率、Depth 分布の条件を満たす
-- rollback 手順が明確
-
-### Expression / TS の前提条件
-
-- `expression_observations` の十分な蓄積
-- `turn_fingerprints` が 500+ に到達
-- strata ごとの分布が読める状態
-
----
-
-## Phase 4: 制度の本格化（Phase 3 と並行可能）
-
-**目的:** Governance と vNext を次段階へ進める。
+**目的:** すでに動いている canary / live の観測結果を揃え、次の制御系追加の前提を作る。
 
 ### 対象
 
-- Governance Phase B
-- Governance Phase C
-- NiaCore vNext Phase N1
+- Phase 4.6 live 観測
+- `contradiction_hold` の実データ確認
+- `RK-1` / `SK-2` の L1→L2 安定性確認
+- RuntimeFacts Phase A 観測
+- drawing の canonicalizer 観測継続
 
-### 進行条件
+### 出口条件
 
-- Governance Phase A の candidate / evidence 分布が安定
-- vNext Shadow の attention / action 分布が十分見えた
-- writer / provenance / taxonomy が崩れていない
+- `contradiction_hold` の hold / review / split の有無が確認できる
+- `RK-1` と `SK-2` の stability が読める
+- RuntimeFacts が即答化 / 説明臭さ / WAIT 消失を起こしていない
+- drawing の production path が legacy DSL + canonicalizer で安定している
+
+### この段階でやらないこと
+
+- Skeleton Realizer を即 C.1 にしない
+- NiaCore training を始めない
+- Governance Phase B/C を先に進めない
+
+---
+
+## Phase 2: Skeleton Realizer C.0 shadow
+
+**目的:** NiaCore / Skeleton の判断を LLM に渡す前に、骨格指示の生成品質と観測基盤を作る。
+
+### やること
+
+- 日本語の `Skeleton Guidance` を生成
+- `structured_header / interpretation_lines / full_text` を記録
+- `adherence record` を保存
+- low adherence を次の 3 分岐で分類
+  - `realizer_rule_issue`
+  - `prompt_stack_conflict`
+  - `llm_non_adherence`
+
+### 前提
+
+- prompt stack の統治順位が固定されていること
+- `adherence` が knot / NiaCore 学習に直結しないこと
+
+### 出口条件
+
+- guidance 生成自体が安定している
+- 分布が偏りすぎていない
+- prompt stack conflict が頻発していない
+- low adherence の原因分類が読める
+
+---
+
+## Phase 3: Skeleton Realizer C.1 canary
+
+**目的:** shadow で問題が少なければ、骨格指示を LLM に限定投入して追従性を観測する。
+
+### やること
+
+- `Skeleton Guidance` を LLM context に入れる
+- composite adherence と head 別 adherence を追う
+- `C.1 -> C.2` の卒業条件を数値で判定する
+
+### 卒業条件の基準線
+
+- applicable turns 60 以上
+- 直近 14 日 composite adherence 平均 0.72 以上
+- 2 head 以上が継続 low になっていない
+- human audit 20 件で致命的逸脱なし
 
 ### 注意
 
-- この段階からは「観測専用」ではなく、制度そのものが複雑になる
-- 先に state / signal 境界を再点検してから進める
-- `NIACORE_TRAINING_ENABLED` と Governance Phase B/C は直列依存ではない
-- それぞれの前提条件が満たされれば、**並行トラック** として進めてよい
+- Drawing Language の教訓どおり、これは `LLM が従うか` の観測段階
+- low adherence は即 NiaCore の未熟さにしない
 
 ---
 
-## Phase 5: 長期統合トラック
+## Phase 4: knot -> NiaCore の candidate / review 層
 
-**目的:** 体感・Pip・Unity・配信系を広げる。
+**目的:** knot をそのまま教師にせず、training signal 候補と review 制度を先に実装する。
+
+### やること
+
+- Stage 1: `training_target_candidate`
+- Stage 2: `training_review`
+- `approved_weight` rubric
+- `head budget`
+- `global sentinel`
+- `effect_window timeout`
+
+### 設計上のルール
+
+- `approved_weight` は rubric -> 段階値
+  - `0.1 / 0.25 / 0.4 / 0.6`
+- Origin は `veto` か `±0.1` 補正のみ
+- corrective は各 head family で 1 本まで
+- reinforcement は別枠で 1 本まで
+- side effect は pairwise 全探索ではなく global sentinel で見る
+
+### 出口条件
+
+- candidate が十分量たまる
+- review の分布が極端に人手依存でない
+- `surface prompting` や `LLM non-adherence` を誤って training signal にしていない
+
+---
+
+## Phase 5: NiaCore training 判定
+
+**目的:** 観測と審査の層が揃った後にだけ、学習本体を検討する。
 
 ### 対象
 
-- S.2 体感 + Pip 統合
-- TS.3 Idle Tick
-- P.3 お絵かき統合
-- P.7 配信
-- M.4 Retrieval Observability
+- `NIACORE_TRAINING_ENABLED`
+- NiaCore v1 training
+- vNext N1 判定
+
+### 前提
+
+- feature gate registry の training 条件を満たす
+- shadow 期間が十分
+- mode collapse が起きていない
+- training sample の provenance が追える
+- adherence / knot / runtime quality のどこに問題があるかを分けられる
+
+### 注意
+
+- 先に学習を始めるより、学習してよい原因だけを残す方が重要
+- v1 training と vNext 拡張は同時に本線へ入れない
+
+---
+
+## Phase 6: Governance / Consolidation の後段
+
+**目的:** 会話中の観測を、静けさに応じた整理と制度へ拡張する。
+
+### 対象
+
+- Governance Phase B: claim 正規化
+- Governance Phase C: decay / merge 審査
+- failure-to-policy / success-to-preference
+- replay / shadow 検証
+- Idle Consolidation Pipeline
+- Maintenance Pipeline 再編
 
 ### 位置づけ
 
-- これらは本線の安定より後
-- Unity / renderer / 外部連携が増えるため、別トラックとして扱うのが安全
-- 「ニアの中身」を先に整え、「見せ方」は後から被せる順序を守る
+- これは training と直列ではないが、観測系と review 系が安定してから進める
+- 「Sleep の夜バッチ」固定から、turn / session / idle / maintenance の 4 段へ寄せる
 
 ---
 
-## 5. 直近の実行順
+## 5. Drawing の位置づけ
 
-2026-03-24 時点での、もっとも自然な順序はこれ。
+Drawing は主タスクではなく、`LLM 境界の教訓を与えた完了済み subsystem` として扱う。
 
-1. RuntimeFacts Phase A を観測し、説明臭さや即答化の副作用がないか確認する
-2. `conversation_skeletons` が 500 超 + 目視確認後、`SKELETON_SOMATIC_ENABLED=true`
-3. `ATMOSPHERE_ENABLED=true` は RuntimeFacts 観測後に判断
-4. メンテナンス時に Chroma 再構築リハーサルを実施
-5. **2026-04-05 以降**に `NIACORE_TRAINING_ENABLED` 判定
+### 現在地
 
----
+- Core は完成
+- production path は legacy DSL + canonicalizer
+- Intent Adapter は test-render / 外部クライアント / 将来モデル向けに温存
 
-## 6. 別トラック
+### 後段タスク
 
-### Nero（anti-stagnation / companion）
-
-- Nero は別リポジトリ
-- Nia 側の統合ロードマップには直接含めない
-- ただし会話品質には影響するため、**Nero 側の変更は別トラックで管理し、Nia 側への影響は `/api/chat` と読み取り API 経由のみ** と明記しておく
-- Nia 側で先にやるべきなのは、Nero 依存ではなく Nia 本体の観測・安定化
+- canonicalizer 観測継続
+- drawing knot 抽出
+- `line from/to` 正式対応の判断
+- model 比較は「YAML を出せるか」ではなく「DSL の壊れ方が少ないか」で行う
 
 ---
 
-## 7. 今やらないもの
+## 6. 直近ではやらないこと
 
-次はやらない方がよいものを明示しておく。
-
-- Governance Phase B/C を先に進めること
-- vNext N1 を N0 データなしで始めること
-- `ATMOSPHERE_ENABLED` を `RUNTIME_FACTS_ENABLED` より先に入れること
-- `NIACORE_TRAINING_ENABLED` を 2026-04-05 より前に入れること
-- Unity / 配信系を、内部状態系より先に広げること
+- `ATMOSPHERE_ENABLED` を先に上げること
+- Skeleton Realizer を shadow なしで本線投入すること
+- knot をそのまま training signal にすること
+- `NIACORE_TRAINING_ENABLED` を観測不足のまま有効化すること
+- Governance B/C を adaptation / knot 観測より先に進めること
+- drawing の大きな再設計を先に始めること
 
 ---
 
-## 8. 関連文書
+## 7. 参照順
 
-- `docs/feature_gate_registry.md`
-- `docs/deferred_items.md`
-- `docs/state_field_taxonomy.md`
-- `docs/nia_expression_layer_design.md`
-- `docs/niacore_lnn_design.md`
-- `docs/niacore_vnext_design.md`
-- `docs/skeletoncore_design.md`
-- `docs/temporal_somatic_contrast_design.md`
-- `docs/pip_room_temporal_livestream_integration.md`
-- `docs/governance_phase_a_status_2026-03-11.md`
+1. `docs/session_handoff.md`
+2. `docs/feature_gate_registry.md`
+3. `docs/nia_core_summary.md`
+4. `docs/metabolic_hardening_design.md`
+5. `docs/skeletoncore_design.md`
+6. `docs/skeleton_realizer_design.md` または設計メモ
+7. `docs/knot_to_niacore.md` または設計メモ
+8. `docs/processing_pipeline_staging_memo.md`
+9. `docs/nia_drawing_language.md`
 
-この文書を更新するときは、上の台帳類と矛盾しないことを確認する。
+---
+
+## 8. 一言で
+
+> 今は「新しい制御を増やす段階」ではなく、  
+> **観測済みの本線を閉じ、Skeleton Realizer の shadow を足し、  
+> そのうえで knot -> NiaCore の review 層へ進む段階** である。

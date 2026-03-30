@@ -17,11 +17,13 @@ from backend.core.drawing.schema import (
     DrawingAST,
     DriftLevel,
     ELEMENT_MODIFIER_ATTRIBUTES,
+    ELEMENT_MODIFIER_LEVELS,
     ElementDecl,
     ElementType,
     MODIFIER_ATTRIBUTES,
     ModifierStmt,
     OpacityLevel,
+    PaletteColor,
     PlacementStmt,
     Relation,
     SizeLevel,
@@ -39,8 +41,46 @@ _COMPOSITION_PREPOSITIONS = COMPOSITION_PREPOSITIONS
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def _normalize_dsl(code: str) -> str:
+    """Pre-process DSL: split single-line DSL into proper lines.
+
+    LLMs sometimes output the entire DSL on one line without newlines.
+    Strategy: use findall to extract declaration statements (name: type(...))
+    and composition statements (repeat/scatter ...), then return each as a line.
+    Placement and modifier statements glued after declarations are kept on the
+    same line as the declaration — the parser will error on them, which is correct
+    (they should be separate lines).
+    """
+    if "\n" in code.strip():
+        return code  # Already multi-line, don't touch
+
+    _ELEMENT_KW = "|".join(e.value for e in ElementType)
+
+    # Step 1: Insert \n before "name: element_type" patterns.
+    # Use a regex that requires the name to be preceded by ) or a known
+    # because-tag word boundary (not a partial word).
+    result = re.sub(
+        rf"(?<=[)\s])(?=[A-Za-z_][A-Za-z0-9_-]*:\s*(?:{_ELEMENT_KW}))",
+        "\n",
+        code.strip(),
+    )
+
+    # Step 2: Insert \n before composition keywords.
+    result = re.sub(
+        r"(?<=[)\s])(?=(?:repeat|scatter)\s)",
+        "\n",
+        result,
+    )
+
+    if "\n" in result:
+        return result
+
+    return code  # Single statement or couldn't split
+
+
 def parse_drawing(code: str) -> DrawingAST:
     """Parse Nia drawing code into AST."""
+    code = _normalize_dsl(code)
     ast = DrawingAST()
     for line_num, raw_line in enumerate(code.splitlines(), 1):
         line = raw_line.strip()
@@ -55,6 +95,7 @@ def parse_drawing(code: str) -> DrawingAST:
             free_text = free_text.strip()
 
         try:
+            line = _canonicalize_line(line)
             _parse_line(ast, line, free_text)
         except Exception as e:
             raise ValueError(f"Line {line_num}: {e}\n  {raw_line}") from e
@@ -62,12 +103,98 @@ def parse_drawing(code: str) -> DrawingAST:
     return ast
 
 
+# ── Bounded Canonicalizer ─────────────────────────────────────────────
+# Only fixes well-defined patterns. Everything else is left for the strict parser.
+
+_TWO_WORD_SPATIAL = {
+    "upper right": "upper_right",
+    "upper left": "upper_left",
+    "lower right": "lower_right",
+    "lower left": "lower_left",
+    "upper-right": "upper_right",
+    "upper-left": "upper_left",
+    "lower-right": "lower_right",
+    "lower-left": "lower_left",
+}
+
+_LINE_FROM_TO_RE = re.compile(r"\bline\s+from\b", re.IGNORECASE)
+
+
+# Strictly bounded: only "name: dot" with composition kwargs.
+# Not generalized to circle/area/line — those need more observation first.
+_DECL_DOT_COMPOSITION_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_-]*:\s*"
+    r"(dot)\s+"
+    r"((?:count|density|drift|spacing)=.*)"
+    r"$"
+)
+
+
+def _canonicalize_line(line: str) -> str:
+    """Apply bounded repairs to a single DSL line.
+
+    Repairs:
+    - 2-word spatial refs: "upper right" -> "upper_right"
+    - Declaration-as-scatter: "name: dot count=50 around X" -> "scatter dot count=50 around X"
+      Only when composition kwargs (count=, density=, drift=, spacing=) follow the element type.
+    Errors:
+    - "line from/to" syntax (unsupported)
+    """
+    # Reject unsupported "line from/to" syntax with a clear error
+    if _LINE_FROM_TO_RE.search(line):
+        raise ValueError(
+            "'line from ... to ...' is not supported. "
+            "Use 'name: line(weight=thin)' + placement instead."
+        )
+
+    # Repair 2-word spatial references
+    for two_word, canonical in _TWO_WORD_SPATIAL.items():
+        if two_word in line:
+            line = line.replace(two_word, canonical)
+
+    # Repair declaration-as-scatter: "name: dot count=50 around X because Y"
+    # Condition: declaration form + composition kwargs immediately after element type.
+    # Strictly bounded: only triggers when count=/density=/drift=/spacing= follows.
+    m = _DECL_DOT_COMPOSITION_RE.match(line)
+    if m:
+        elem_type = m.group(1)
+        rest = m.group(2)
+        line = f"scatter {elem_type} {rest}"
+
+    return line
+
+
 def _parse_line(ast: DrawingAST, line: str, free_text: str) -> None:
     """Parse a single line into the appropriate AST node."""
     tokens = line.split()
 
-    # Declaration: `name: type(args)`
+    # Declaration: `name: type(args)` — re-tokenize preserving parens content
     if len(tokens) >= 2 and tokens[0].endswith(":"):
+        # Rejoin and re-split to handle spaces inside parentheses
+        # e.g. "sky: area(color=cool_1, opacity=faint) at field because background"
+        decl_match = re.match(r"(\S+)\s+(\w+\([^)]*\)|\w+)(.*)", line)
+        if decl_match:
+            name_token = decl_match.group(1)
+            type_token = decl_match.group(2)
+            rest = decl_match.group(3).strip()
+            decl_tokens = [name_token, type_token]
+            # Parse rest as placement/modifier if present
+            _parse_declaration(ast, decl_tokens, free_text)
+            # If there's trailing text (e.g. "at field because background"),
+            # parse it as a separate placement statement
+            if rest:
+                rest_tokens = rest.split()
+                name_bare = name_token.rstrip(":")
+                if rest_tokens and rest_tokens[0] in _RELATIONS:
+                    _parse_placement(ast, [name_bare] + rest_tokens, free_text)
+                elif len(rest_tokens) >= 2 and rest_tokens[0] in _MODIFIER_ATTRS:
+                    _parse_modifier(ast, [name_bare] + rest_tokens, free_text)
+                else:
+                    raise ValueError(
+                        f"Unexpected trailing text after declaration: '{rest}'. "
+                        f"Each statement (declaration, placement, modifier) must be on its own line."
+                    )
+            return
         _parse_declaration(ast, tokens, free_text)
         return
 
@@ -87,6 +214,27 @@ def _parse_line(ast: DrawingAST, line: str, free_text: str) -> None:
         return
 
     raise ValueError(f"Cannot parse: {line}")
+
+
+_PALETTE_VALUES = {c.value for c in PaletteColor}
+
+
+def _validate_modifier_value(attr: str, value: str) -> None:
+    """Validate a modifier value against known enums.
+
+    Prevents silent fallback to defaults in scene_graph.
+    """
+    if attr == "color":
+        if value not in _PALETTE_VALUES:
+            raise ValueError(
+                f"Unknown color '{value}'. Valid: {', '.join(sorted(_PALETTE_VALUES))}"
+            )
+    elif attr in ELEMENT_MODIFIER_LEVELS:
+        valid = {lv.value for lv in ELEMENT_MODIFIER_LEVELS[attr]}
+        if value not in valid:
+            raise ValueError(
+                f"Unknown {attr} level '{value}'. Valid: {', '.join(sorted(valid))}"
+            )
 
 
 def _validate_name(name: str) -> None:
@@ -128,6 +276,19 @@ def _parse_declaration(ast: DrawingAST, tokens: list[str], free_text: str) -> No
     )
     ast.declarations.append(decl)
 
+    # Auto-promote modifier-like args (color, opacity, softness) to ModifierStmt.
+    # LLMs often write area(color=cool_1, opacity=faint) instead of separate lines.
+    # Validate values to prevent silent fallback in scene_graph.
+    for attr in ELEMENT_MODIFIER_ATTRIBUTES:
+        if attr in args and attr not in ("size", "weight"):
+            value = args[attr]
+            _validate_modifier_value(attr, value)
+            ast.modifiers.append(ModifierStmt(
+                subject=name,
+                attribute=attr,
+                value=value,
+            ))
+
 
 def _parse_placement(ast: DrawingAST, tokens: list[str], free_text: str) -> None:
     """Parse: `subject relation target [distance] [because tag+...]`"""
@@ -136,6 +297,7 @@ def _parse_placement(ast: DrawingAST, tokens: list[str], free_text: str) -> None
     target = tokens[2]
 
     # Look for optional distance qualifier and because
+    _DISTANCE_WORDS = {"near", "far", "touching"}
     distance = None
     because = None
     i = 3
@@ -143,8 +305,13 @@ def _parse_placement(ast: DrawingAST, tokens: list[str], free_text: str) -> None
         if tokens[i] == "because":
             because = _parse_because(tokens[i + 1:], free_text)
             break
-        elif tokens[i] in ("near", "far", "touching"):
+        elif tokens[i] in _DISTANCE_WORDS:
             distance = tokens[i]
+        else:
+            raise ValueError(
+                f"Unexpected token '{tokens[i]}' in placement statement. "
+                f"Each statement must be on its own line."
+            )
         i += 1
 
     if because is None and free_text:
@@ -176,6 +343,10 @@ def _parse_modifier(ast: DrawingAST, tokens: list[str], free_text: str) -> None:
             f"'{attribute}' is a declaration-only parameter (use in element declaration). "
             f"Cannot be used as element modifier: '{subject} {attribute} {value}'"
         )
+
+    # Validate value against known enums to prevent silent fallback in scene_graph
+    if attribute in ELEMENT_MODIFIER_ATTRIBUTES:
+        _validate_modifier_value(attribute, value)
 
     because = None
     if len(tokens) > 3 and tokens[3] == "because":

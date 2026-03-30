@@ -246,6 +246,7 @@ from backend.controllers.api.tts_router import router as tts_router
 from backend.controllers.api.tts_events_router import router as tts_events_router
 from backend.controllers.api.actions_router import router as actions_router
 from backend.controllers.api.draw_router import router as draw_router
+from backend.controllers.api.drawing_router import router as drawing_router
 from backend.controllers.api.profile_router import router as profile_router
 from backend.controllers.api.livestream_router import router as livestream_router
 from backend.controllers.api.voice_router import router as voice_router
@@ -267,6 +268,7 @@ app.include_router(profile_router, prefix="/api", tags=["api"])
 app.include_router(review_router, prefix="/api", tags=["api"])
 app.include_router(actions_router, prefix="/api", tags=["api"])
 app.include_router(draw_router, prefix="/api", tags=["api"])
+app.include_router(drawing_router, prefix="/api", tags=["drawing"])
 app.include_router(tts_router, prefix="/api", tags=["api"])
 app.include_router(tts_events_router, prefix="/api", tags=["api"])
 app.include_router(livestream_router, prefix="/api", tags=["livestream"])
