@@ -17,6 +17,7 @@ from .commit_helpers import (
     _record_niacore_experience,
     _record_niacore_vnext_shadow,
     _record_skeleton,
+    _record_skeleton_guidance_shadow,
     _record_expression_observation,
     _harvest_governance_candidates,
     _aggregate_governance_evidence,
@@ -26,15 +27,43 @@ from .commit_helpers import (
 
 
 # =============================================================================
-# Draw block extraction
+# Draw block extraction (Layer 1 intent + legacy Layer 3 DSL)
 # =============================================================================
 
-_DRAW_BLOCK_RE = re.compile(r"```draw\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+# Matches both ```draw and ```draw-intent as a unified drawing channel.
+_DRAW_FENCE_RE = re.compile(
+    r"```draw(?:-intent)?\b[ \t]*\n?(.*?)```", re.DOTALL | re.IGNORECASE,
+)
 
 
-def _extract_draw_blocks(text: str) -> list[str]:
-    """Extract draw DSL blocks from fenced code blocks."""
-    return [m.strip() for m in _DRAW_BLOCK_RE.findall(text or "") if m.strip()]
+def _extract_draw_content(text: str) -> list[str]:
+    """Extract content from ```draw or ```draw-intent fenced blocks."""
+    return [m.strip() for m in _DRAW_FENCE_RE.findall(text or "") if m.strip()]
+
+
+def _try_parse_as_intent(content: str) -> str | None:
+    """Try to parse draw block content as YAML intent.
+
+    Returns the raw YAML string if it validates as DrawingIntent.
+    Returns None if it's not valid intent YAML (probably legacy DSL).
+    """
+    import yaml
+    from backend.core.drawing.intent_schema import DrawingIntent
+
+    try:
+        raw = yaml.safe_load(content)
+        if not isinstance(raw, dict):
+            return None
+        # Support nested {intent: {elements: [...]}}
+        if "intent" in raw and isinstance(raw["intent"], dict):
+            raw = raw["intent"]
+        # Must have elements key to be intent
+        if "elements" not in raw:
+            return None
+        DrawingIntent.model_validate(raw)
+        return content
+    except Exception:
+        return None
 
 
 def _make_drawing_id(state: AgentState, block_index: int) -> str | None:
@@ -133,20 +162,20 @@ async def action_processing(state: AgentState) -> dict:
         except Exception as exc:
             logger.warning("[ACTION] tweet generation failed: %s", exc, exc_info=True)
 
-    # Drawing Language: detect ```draw blocks in final_text
-    draw_blocks = _extract_draw_blocks(final_text)
-    if len(draw_blocks) > 1:
-        # Pre-gate rejection: multiple draw blocks are not allowed in v0
+    # Drawing Language: unified ```draw / ```draw-intent channel
+    # Content routing: try intent YAML first, fall back to legacy DSL
+    draw_contents = _extract_draw_content(final_text)
+    if len(draw_contents) > 1:
         rejected_actions.append({
             "action_id": "render_drawing",
             "status": "REJECTED",
-            "reason": f"multiple_draw_blocks: found {len(draw_blocks)}, expected at most 1",
+            "reason": f"multiple_draw_blocks: found {len(draw_contents)}, expected at most 1",
         })
         logger.warning(
             "[ACTION_PROCESSING] multiple draw blocks (%d) rejected",
-            len(draw_blocks),
+            len(draw_contents),
         )
-    elif len(draw_blocks) == 1:
+    elif len(draw_contents) == 1:
         drawing_id = _make_drawing_id(state, 0)
         if drawing_id is None:
             rejected_actions.append({
@@ -156,14 +185,40 @@ async def action_processing(state: AgentState) -> dict:
             })
             logger.warning("[ACTION_PROCESSING] draw block rejected: no provenance ID")
         else:
-            proposed_actions.append({
-                "action_id": "render_drawing",
-                "payload": {
-                    "drawing_id": drawing_id,
-                    "dsl_code": draw_blocks[0],
-                    "thread_id": str(state.get("thread_id") or "default_thread"),
-                },
-            })
+            content = draw_contents[0]
+            intent_yaml = _try_parse_as_intent(content)
+            if intent_yaml:
+                logger.info("[ACTION_PROCESSING] draw block routed as intent YAML")
+                proposed_actions.append({
+                    "action_id": "render_drawing",
+                    "payload": {
+                        "drawing_id": drawing_id,
+                        "intent_yaml": intent_yaml,
+                        "thread_id": str(state.get("thread_id") or "default_thread"),
+                    },
+                })
+            else:
+                # Content is not valid intent — check DRAWING_INTENT_ONLY gate
+                from backend.core.config import settings
+                if getattr(settings, "DRAWING_INTENT_ONLY", False):
+                    rejected_actions.append({
+                        "action_id": "render_drawing",
+                        "status": "REJECTED",
+                        "reason": "legacy_draw_emitted; intent block required (DRAWING_INTENT_ONLY=true)",
+                    })
+                    logger.warning(
+                        "[ACTION_PROCESSING] legacy draw rejected: DRAWING_INTENT_ONLY=true",
+                    )
+                else:
+                    logger.info("[ACTION_PROCESSING] draw block routed as legacy DSL")
+                    proposed_actions.append({
+                        "action_id": "render_drawing",
+                        "payload": {
+                            "drawing_id": drawing_id,
+                            "dsl_code": content,
+                            "thread_id": str(state.get("thread_id") or "default_thread"),
+                        },
+                    })
 
     if not proposed_actions:
         return {
@@ -531,6 +586,9 @@ async def s5_commit(state: AgentState) -> dict:
                         _record_skeleton(state, thread_id, turn_id)
                     except Exception:
                         logger.debug("[S5_COMMIT] skeleton record failed", exc_info=True)
+
+                # Skeleton Realizer C.0: Shadow recording (fire-and-forget)
+                _record_skeleton_guidance_shadow(state, thread_id, turn_id)
 
                 # Governance Phase A: Harvest promotion candidates
                 _triggered_kinds: list[str] = []

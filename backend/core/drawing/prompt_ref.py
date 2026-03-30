@@ -1,23 +1,25 @@
 """Drawing Language — prompt reference generator.
 
-Generates a minimal drawing language reference from schema.py constants.
-This is the single source of truth for what the LLM sees vs what the parser accepts.
+Generates a minimal intent schema reference from intent_schema.py.
+LLM は DSL の語彙を知る必要はない — 構造化された意図を YAML で出力する。
+Intent Parser (Layer 2) が決定論的に DSL に変換する。
 
 Injected into LLM context only when draw_intent is detected.
 """
 from __future__ import annotations
 
-from backend.core.drawing.schema import (
-    COMPOSITION_KWARG_LEVELS,
-    COMPOSITION_KWARGS,
-    COMPOSITION_PREPOSITIONS,
-    CompositionOp,
-    ELEMENT_MODIFIER_ATTRIBUTES,
-    ELEMENT_MODIFIER_LEVELS,
-    ElementType,
-    PaletteColor,
-    Relation,
-    SpatialRef,
+from backend.core.drawing.intent_schema import (
+    IntentArrangement,
+    IntentColorFeel,
+    IntentCountMode,
+    IntentDistance,
+    IntentDominance,
+    IntentElementType,
+    IntentOpacityFeel,
+    IntentPosition,
+    IntentRelationStrength,
+    IntentRole,
+    IntentSize,
 )
 
 
@@ -39,73 +41,83 @@ def detect_draw_intent(user_text: str) -> bool:
     return any(kw in user_text for kw in _DRAW_INTENT_KEYWORDS)
 
 
+def _enum_values(enum_cls: type) -> str:
+    return " / ".join(e.value for e in enum_cls)
+
+
 def build_drawing_reference() -> str:
-    """Build a minimal drawing language reference for LLM context injection.
+    """Build a minimal intent schema reference for LLM context injection.
 
-    All vocabulary is derived from schema.py constants — no hardcoded strings.
+    LLM は DSL を書かない。感覚的な意図を YAML で出力する。
     """
-    elements = ", ".join(e.value for e in ElementType)
-    relations = ", ".join(r.value for r in Relation)
-    spatial = ", ".join(s.value for s in SpatialRef)
-    colors = ", ".join(c.value for c in PaletteColor)
-    comp_ops = ", ".join(o.value for o in CompositionOp)
-    prepositions = ", ".join(
-        f"{k} (= {v.value})" for k, v in COMPOSITION_PREPOSITIONS.items()
-    )
-
-    # Element modifiers (applied per element)
-    elem_mod_lines: list[str] = []
-    for attr in sorted(ELEMENT_MODIFIER_ATTRIBUTES):
-        if attr == "color":
-            elem_mod_lines.append(f"  color: {colors}")
-        elif attr in ELEMENT_MODIFIER_LEVELS:
-            levels = " / ".join(lv.value for lv in ELEMENT_MODIFIER_LEVELS[attr])
-            elem_mod_lines.append(f"  {attr}: {levels}")
-
-    # Composition kwargs (used inside repeat/scatter)
-    comp_kwarg_lines: list[str] = []
-    for kw in sorted(COMPOSITION_KWARGS):
-        if kw in COMPOSITION_KWARG_LEVELS:
-            levels = " / ".join(lv.value for lv in COMPOSITION_KWARG_LEVELS[kw])
-            comp_kwarg_lines.append(f"  {kw}: {levels}")
-        elif kw == "count":
-            comp_kwarg_lines.append("  count: 整数")
-        elif kw == "seed":
-            comp_kwarg_lines.append("  seed: 整数（再現用）")
-        elif kw == "spacing":
-            comp_kwarg_lines.append("  spacing: tight / normal / loose / wide")
+    types = _enum_values(IntentElementType)
+    roles = _enum_values(IntentRole)
+    sizes = _enum_values(IntentSize)
+    dominance = _enum_values(IntentDominance)
+    opacity = _enum_values(IntentOpacityFeel)
+    color = _enum_values(IntentColorFeel)
+    position = _enum_values(IntentPosition)
+    arrangement = _enum_values(IntentArrangement)
+    distance = _enum_values(IntentDistance)
 
     return f"""\
 === 描画の手 ===
-あなたは ```draw ブロックで絵を描けます。
+あなたは絵を描けます。```draw ブロックで描画意図を出力してください。
+DSL やコードではなく、感じたことをそのまま YAML で構造化してください。
 
-要素: {elements}
-関係: {relations}
-空間参照: {spatial}
+出力フォーマット:
+```draw
+elements:
+  - name: 識別名（英字）
+    type: {types}
+    role: {roles}
+    size: {sizes}
+    dominance: {dominance}
+    opacity_feel: {opacity}
+    color_feel: {color}
+    position: {position}
+    relation_to: 他の要素のname
+    arrangement: {arrangement}
+    distance: {distance}
+    count: 数（arrangement: scattered_around のときだけ）
+    reason: 選んだ理由（自由）
+```
 
-要素の修飾（name attribute value）:
-{chr(10).join(elem_mod_lines)}
-
-構成: {comp_ops} (前置詞: {prepositions})
-構成のオプション:
-{chr(10).join(comp_kwarg_lines)}
-
-文の種類:
-  宣言: name: element(size=small, weight=bold)
-  配置: name relation target [distance] [because tag -- 自由文]
-  修飾: name attribute value [because tag]
-  構成: repeat/scatter element relation target count=N density=level
+ルール:
+- 最初の要素は position を指定する（例: center, field）
+- 2つ目以降は relation_to + arrangement で他の要素との関係で置く
+- 散布は count + arrangement: scattered_around で指定
+- 上の制約を除き、フィールドは optional（name, type は必須）
+- reason は自由文。なぜその選択をしたか書きたいときに
 
 例:
 ```draw
-sky: area(size=vast)
-core: circle(size=small)
-sky at field because background
-core at center because anchor
-sky color cool_1
-sky opacity faint
-core color warm_3
-scatter dot around core count=6 density=sparse because ambient
-```
+elements:
+  - name: sky
+    type: area
+    role: background
+    size: vast
+    color_feel: quiet
+    opacity_feel: faint
+    position: field
+    reason: background
 
-because は任意。選んだ理由を残したいときに使います。"""
+  - name: core
+    type: circle
+    role: anchor
+    size: small
+    color_feel: warm
+    opacity_feel: solid
+    position: center
+    dominance: primary
+    reason: presence
+
+  - name: fragments
+    type: dot
+    count: 6
+    relation_to: core
+    arrangement: scattered_around
+    color_feel: warm_fading
+    opacity_feel: soft
+    reason: orbiting
+```"""

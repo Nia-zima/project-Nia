@@ -564,6 +564,30 @@ class APIClient {
         });
     }
 
+    // ── Drawing Traces ──
+
+    async fetchDrawingTraces(limit: number = 20): Promise<{ items: Array<Record<string, unknown>>; count: number }> {
+        return this.request(`/drawing/traces?limit=${limit}`);
+    }
+
+    async fetchDrawingTrace(drawingId: string, version?: number): Promise<Record<string, unknown>> {
+        const params = version != null ? `?version=${version}` : "";
+        return this.request(`/drawing/traces/${encodeURIComponent(drawingId)}${params}`);
+    }
+
+    async testRenderDrawing(dslCode: string): Promise<Record<string, unknown>> {
+        return this.request("/drawing/test-render", {
+            method: "POST",
+            body: JSON.stringify({ dsl_code: dslCode }),
+        });
+    }
+
+    async fetchDrawingAttempts(limit: number = 20, drawingId?: string): Promise<{ items: Array<Record<string, unknown>>; count: number }> {
+        const params = new URLSearchParams({ limit: String(limit) });
+        if (drawingId) params.set("drawing_id", drawingId);
+        return this.request(`/drawing/attempts?${params.toString()}`);
+    }
+
     // ── Diary ──
 
     async fetchDiaries(limit: number = 14): Promise<Array<{

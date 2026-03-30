@@ -1,6 +1,12 @@
 """Drawing runtime — execute the full drawing pipeline for action_processing.
 
-Pipeline: DSL code → parse → scene_graph → render → trace_store → file save → room hang
+Pipeline (4-layer):
+  Layer 1: LLM → intent YAML (structured meaning)
+  Layer 2: Intent Parser → DSL (deterministic)
+  Layer 3: DSL → parse → scene_graph → render
+  Layer 4: trace_store → file save → room hang
+
+Legacy path: DSL code → parse → scene_graph → render (canonicalizer)
 Failure: record in attempt_store (never silent)
 
 Knot compensation:
@@ -46,7 +52,8 @@ async def render_and_store_drawing(payload: dict) -> dict:
     """Execute the full drawing pipeline and persist the result.
 
     Args:
-        payload: Must contain 'drawing_id' and 'dsl_code'.
+        payload: Must contain 'drawing_id' and either 'intent_yaml' (Layer 1)
+                 or 'dsl_code' (legacy Layer 3).
                  Optional: 'thread_id', 'internal_state'.
 
     Returns:
@@ -56,11 +63,19 @@ async def render_and_store_drawing(payload: dict) -> dict:
         DrawingPipelineError on parse/scene/render failure (after recording attempt).
     """
     drawing_id: str = payload["drawing_id"]
-    dsl_code: str = payload["dsl_code"]
     thread_id: str | None = payload.get("thread_id")
     internal_state: dict | None = payload.get("internal_state")
 
     now = datetime.now(timezone.utc).isoformat()
+
+    # Layer 1→2: Intent YAML → DSL (preferred path)
+    intent_yaml = payload.get("intent_yaml")
+    if intent_yaml:
+        dsl_code = _intent_to_dsl(drawing_id, intent_yaml, thread_id, now)
+    else:
+        dsl_code = payload["dsl_code"]
+        intent_yaml = None  # legacy path: no intent
+
     phase = "parse"
 
     try:
@@ -83,6 +98,7 @@ async def render_and_store_drawing(payload: dict) -> dict:
         svg,
         version=1,
         internal_state=internal_state,
+        intent_yaml=intent_yaml,
     )
 
     try:
@@ -259,3 +275,37 @@ def _hang_drawing_in_room(
         )
     except Exception:
         logger.warning("[DRAWING_RUNTIME] room hang failed", exc_info=True)
+
+
+def _intent_to_dsl(
+    drawing_id: str,
+    intent_yaml: str,
+    thread_id: str | None,
+    now: str,
+) -> str:
+    """Parse YAML intent and convert to DSL via Intent Parser.
+
+    Raises DrawingPipelineError on validation/parse failure.
+    """
+    import yaml
+    from backend.core.drawing.intent_schema import DrawingIntent
+    from backend.core.drawing.intent_parser import intent_to_dsl
+
+    phase = "intent_parse"
+    try:
+        raw = yaml.safe_load(intent_yaml)
+        if not isinstance(raw, dict):
+            raise ValueError("Intent YAML must be a mapping")
+        # Support both top-level {elements: [...]} and nested {intent: {elements: [...]}}
+        if "intent" in raw and isinstance(raw["intent"], dict):
+            raw = raw["intent"]
+        intent = DrawingIntent.model_validate(raw)
+        dsl_code = intent_to_dsl(intent)
+        logger.info(
+            "[DRAWING_RUNTIME] intent→DSL: drawing_id=%s elements=%d dsl_lines=%d",
+            drawing_id, len(intent.elements), dsl_code.count("\n") + 1,
+        )
+        return dsl_code
+    except Exception as exc:
+        _record_attempt(drawing_id, intent_yaml, phase, str(exc), thread_id, now)
+        raise DrawingPipelineError(phase, str(exc)) from exc

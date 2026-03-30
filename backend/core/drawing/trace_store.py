@@ -32,6 +32,7 @@ class DrawingTrace(BaseModel):
     version: int = 1
 
     # Source
+    intent_yaml: Optional[str] = None  # Layer 1 raw intent (None for legacy DSL path)
     dsl_code: str
     ast_json: str  # serialized DrawingAST
 
@@ -82,6 +83,7 @@ def ensure_drawing_trace_schema(conn: sqlite3.Connection) -> None:
             drawing_id          TEXT NOT NULL,
             version             INTEGER NOT NULL,
 
+            intent_yaml         TEXT,
             dsl_code            TEXT NOT NULL,
             ast_json            TEXT NOT NULL,
             scene_graph_json    TEXT NOT NULL,
@@ -110,6 +112,15 @@ def ensure_drawing_trace_schema(conn: sqlite3.Connection) -> None:
         ON drawing_traces(drawing_id);
         CREATE INDEX IF NOT EXISTS idx_dt_created
         ON drawing_traces(created_at DESC);
+    """)
+
+    # Migration: add intent_yaml column to existing tables
+    try:
+        conn.execute("ALTER TABLE drawing_traces ADD COLUMN intent_yaml TEXT")
+    except Exception:
+        pass  # Column already exists
+
+    conn.executescript("""
 
         CREATE TABLE IF NOT EXISTS drawing_revisions (
             drawing_id          TEXT NOT NULL,
@@ -142,15 +153,16 @@ def save_trace(conn: sqlite3.Connection, trace: DrawingTrace) -> None:
     conn.execute(
         """INSERT INTO drawing_traces (
             drawing_id, version,
-            dsl_code, ast_json, scene_graph_json, resolved_layout,
+            intent_yaml, dsl_code, ast_json, scene_graph_json, resolved_layout,
             because_tags, because_texts, seeds_used,
             palette_used, relations_used, element_count,
             svg_artifact, artifact_path,
             internal_state_snapshot,
             created_at, updated_at
-        ) VALUES (?,?, ?,?,?,?, ?,?,?, ?,?,?, ?,?, ?, ?,?)""",
+        ) VALUES (?,?, ?,?,?,?,?, ?,?,?, ?,?,?, ?,?, ?, ?,?)""",
         (
             trace.drawing_id, trace.version,
+            trace.intent_yaml,
             trace.dsl_code, trace.ast_json, trace.scene_graph_json,
             json.dumps(trace.resolved_layout, ensure_ascii=False),
             json.dumps(trace.because_tags), json.dumps(trace.because_texts),
@@ -266,6 +278,7 @@ def build_trace_from_drawing(
     *,
     version: int = 1,
     internal_state: Optional[dict] = None,
+    intent_yaml: Optional[str] = None,
 ) -> DrawingTrace:
     """Build a DrawingTrace from the full drawing pipeline output.
 
@@ -307,6 +320,7 @@ def build_trace_from_drawing(
     return DrawingTrace(
         drawing_id=drawing_id,
         version=version,
+        intent_yaml=intent_yaml,
         dsl_code=dsl_code,
         ast_json=ast.model_dump_json(),
         scene_graph_json=_json.dumps({

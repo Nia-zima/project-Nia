@@ -24,47 +24,47 @@ class TestDrawBlockExtraction:
     """Test ```draw block detection in final_text."""
 
     def test_single_draw_block(self):
-        from backend.core.agent_graph.nodes.actions import _extract_draw_blocks
+        from backend.core.agent_graph.nodes.actions import _extract_draw_content
 
         text = "ここは応答テキスト\n```draw\na: circle\na at center\n```\n後続テキスト"
-        blocks = _extract_draw_blocks(text)
+        blocks = _extract_draw_content(text)
         assert len(blocks) == 1
         assert "a: circle" in blocks[0]
         assert "a at center" in blocks[0]
 
     def test_no_draw_block(self):
-        from backend.core.agent_graph.nodes.actions import _extract_draw_blocks
+        from backend.core.agent_graph.nodes.actions import _extract_draw_content
 
         text = "普通の応答テキスト"
-        blocks = _extract_draw_blocks(text)
+        blocks = _extract_draw_content(text)
         assert blocks == []
 
     def test_multiple_draw_blocks(self):
-        from backend.core.agent_graph.nodes.actions import _extract_draw_blocks
+        from backend.core.agent_graph.nodes.actions import _extract_draw_content
 
         text = "```draw\na: circle\n```\ntext\n```draw\nb: rect\n```"
-        blocks = _extract_draw_blocks(text)
+        blocks = _extract_draw_content(text)
         assert len(blocks) == 2
 
     def test_empty_draw_block_ignored(self):
-        from backend.core.agent_graph.nodes.actions import _extract_draw_blocks
+        from backend.core.agent_graph.nodes.actions import _extract_draw_content
 
         text = "```draw\n\n```"
-        blocks = _extract_draw_blocks(text)
+        blocks = _extract_draw_content(text)
         assert blocks == []
 
     def test_case_insensitive(self):
-        from backend.core.agent_graph.nodes.actions import _extract_draw_blocks
+        from backend.core.agent_graph.nodes.actions import _extract_draw_content
 
         text = "```Draw\na: dot\n```"
-        blocks = _extract_draw_blocks(text)
+        blocks = _extract_draw_content(text)
         assert len(blocks) == 1
 
     def test_other_fenced_code_ignored(self):
-        from backend.core.agent_graph.nodes.actions import _extract_draw_blocks
+        from backend.core.agent_graph.nodes.actions import _extract_draw_content
 
         text = "```python\nprint('hello')\n```\n```draw\na: dot\n```\n```json\n{}\n```"
-        blocks = _extract_draw_blocks(text)
+        blocks = _extract_draw_content(text)
         assert len(blocks) == 1
         assert "a: dot" in blocks[0]
 
@@ -150,8 +150,10 @@ class TestActionProcessingDraw:
             yield {"gate": gate_method, "registry": reg_get, "executor": exe_method}
 
     @pytest.mark.asyncio
-    async def test_single_block_proposed(self, _patch_deps):
+    async def test_single_block_proposed(self, _patch_deps, monkeypatch):
         from backend.core.agent_graph.nodes.actions import action_processing
+        from backend.core.config import settings
+        monkeypatch.setattr(settings, "DRAWING_INTENT_ONLY", False)
 
         state = {
             "selected_depth": 0,
@@ -215,9 +217,11 @@ class TestActionProcessingDraw:
         assert result["approved_actions"] == []
 
     @pytest.mark.asyncio
-    async def test_invalid_dsl_returns_error_status(self, _patch_deps):
+    async def test_invalid_dsl_returns_error_status(self, _patch_deps, monkeypatch):
         """Invalid DSL → executor returns error → action_results.status == 'error'."""
         from backend.core.agent_graph.nodes.actions import action_processing
+        from backend.core.config import settings
+        monkeypatch.setattr(settings, "DRAWING_INTENT_ONLY", False)
 
         _patch_deps["executor"].return_value = {
             "status": "error",

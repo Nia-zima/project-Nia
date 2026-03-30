@@ -228,6 +228,13 @@ async def _handle_merge_end(ctx, data: dict) -> None:
         # Safety net: strip residual LLM tokens (ChatML sections etc.)
         final_text_str = strip_llm_special_tokens(final_text_str).strip() or final_text_str
         ctx.merge_final_text = final_text_str
+
+    # Strip draw fences from TTS input (DrawingCard handles visual display)
+    # Unified pattern: ```draw and ```draw-intent
+    import re
+    tts_text = final_text_str or ""
+    tts_text = re.sub(r"```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```", "", tts_text, flags=re.IGNORECASE)
+    tts_text = tts_text.strip()
     ctx.suppress_stream_text = hold_required or is_wait or final_text_str.startswith("WAIT")
 
     if hold_required:
@@ -240,13 +247,20 @@ async def _handle_merge_end(ctx, data: dict) -> None:
                 if ctx.stream_id and str(ctx.stream_id) in ctx.tts_enqueued_stream_ids:
                     logger.info("[TTS] skipped final_text enqueue: stream already enqueued")
                     return
+                # Use tts_text (draw fences stripped) for speech.
+                # If tts_text is empty (draw-only turn), skip TTS entirely.
+                _tts_input = tts_text
+                if not _tts_input:
+                    logger.info("[TTS] skipped final_text enqueue: draw-only (no speech text)")
+                    ctx.tts_enqueued = True
+                    return
                 if bool(getattr(settings, "TTS_SENTENCE_CHUNKING", True)):
                     max_chars = int(getattr(settings, "TTS_SENTENCE_MAX_CHARS", 90) or 90)
-                    units = _split_tts_units(final_text_str, max_chars=max_chars)
+                    units = _split_tts_units(_tts_input, max_chars=max_chars)
                 else:
-                    units = [final_text_str]
+                    units = [_tts_input]
                 if not units:
-                    units = [final_text_str]
+                    units = [_tts_input]
                 logger.info(
                     "[TTS] enqueue (final_text) text_len=%d units=%d voice_id=%s",
                     len(final_text_str),
