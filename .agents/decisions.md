@@ -51,6 +51,10 @@
     - 最初の観測: ask adherence=low, reflect adherence=high → ask mode の弱さが構造的かを観測継続
     - shadow-only（実行パスに影響しない）
 
+15. Drawing intent path reached first live success, but 2 cleanup items remain
+    - `DRAWING_INTENT_ONLY=true` で intent YAML live success を 1 回確認
+    - 未解決 cleanup: `last_drawing_ts:{thread_id}` の window 短縮、Skeleton adherence 集計から timeout fallback turn を除外
+
 ## 参照先
 
 - `docs/decision_log.md`

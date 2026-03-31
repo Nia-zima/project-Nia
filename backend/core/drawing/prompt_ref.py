@@ -30,15 +30,58 @@ _DRAW_INTENT_KEYWORDS: frozenset[str] = frozenset({
 """Keywords that signal the user is asking Nia to draw."""
 
 
-def detect_draw_intent(user_text: str) -> bool:
+def detect_draw_intent(user_text: str, *, recent_drawing: bool = False) -> bool:
     """Check if user_text contains drawing-related intent.
 
-    Pure function — no state dependency. Used by helpers.py to decide
-    whether to inject the drawing reference into the LLM context.
+    Args:
+        user_text: Current user input
+        recent_drawing: True if a drawing was attempted recently (from telemetry_kv)
     """
-    if not user_text:
+    if not user_text and not recent_drawing:
         return False
-    return any(kw in user_text for kw in _DRAW_INTENT_KEYWORDS)
+    if any(kw in (user_text or "") for kw in _DRAW_INTENT_KEYWORDS):
+        return True
+    if recent_drawing:
+        return True
+    return False
+
+
+def has_recent_drawing_context(thread_id: str = "default_thread", window_minutes: int = 2) -> bool:
+    """Check if a drawing was attempted recently in this thread.
+
+    Reads telemetry_kv for last_drawing_turn_ts. Returns True if within window.
+    Short window (2 min) to avoid contaminating normal conversation with draw mode.
+    """
+    import time
+    try:
+        from backend.core.db import managed_conn
+        with managed_conn() as conn:
+            row = conn.execute(
+                "SELECT v FROM telemetry_kv WHERE k = ?",
+                (f"last_drawing_ts:{thread_id}",),
+            ).fetchone()
+            if not row:
+                return False
+            last_ts = float(row[0])
+            return (time.time() - last_ts) < (window_minutes * 60)
+    except Exception:
+        return False
+
+
+def mark_drawing_attempted(thread_id: str = "default_thread") -> None:
+    """Record that a drawing was attempted in this thread."""
+    import time
+    try:
+        from backend.core.db import managed_conn
+        now = time.time()
+        with managed_conn() as conn:
+            conn.execute(
+                "INSERT INTO telemetry_kv (k, v, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(k) DO UPDATE SET v = ?, updated_at = ?",
+                (f"last_drawing_ts:{thread_id}", str(now), int(now), str(now), int(now)),
+            )
+    except Exception:
+        pass
 
 
 def _enum_values(enum_cls: type) -> str:

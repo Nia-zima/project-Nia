@@ -109,6 +109,11 @@ export default function ChatMessages() {
                         );
                     }
 
+                    // Skip empty AI messages (e.g. draw-only turns where content was cleared)
+                    if (msg.role === 'ai' && !msg.content && !msg.image) {
+                        return null;
+                    }
+
                     return (
                         <div
                             key={msg.id}

@@ -39,9 +39,12 @@ def build_realizer_input(
     focus = skeleton.get("focus", "")
     response_intent = skeleton.get("response_intent", "")
     question_intent = skeleton.get("question_intent", "")
+    rule_trace = skeleton.get("rule_trace", [])
 
     # ── respond_mode ──
-    respond_mode = _infer_respond_mode(response_intent, turn_role, confidence)
+    respond_mode = _infer_respond_mode(
+        response_intent, turn_role, confidence, rule_trace,
+    )
 
     # ── attention_target ──
     attention_target = _infer_attention_target(
@@ -75,13 +78,32 @@ def build_realizer_input(
 
 
 def _infer_respond_mode(
-    response_intent: str, turn_role: Optional[str], confidence: float,
+    response_intent: str,
+    turn_role: Optional[str],
+    confidence: float,
+    rule_trace: list[str] | None = None,
 ) -> RespondMode:
-    """SkeletonCore response_intent → respond_mode."""
+    """SkeletonCore response_intent → respond_mode.
+
+    I5_anti_repetition 経由の ask は「開いたまま返す」意味であり、
+    「質問文を出す」意味ではない。RespondMode.REFLECT に寄せる。
+    I2_low_coverage_ask だけが真の ASK。
+    """
+    trace = rule_trace or []
+
+    if response_intent == "ask":
+        # I2_low_coverage_ask → 真の質問意図
+        if "I2_low_coverage_ask" in trace:
+            return RespondMode.ASK
+        # I5_anti_repetition → 繰り返し回避で開いたまま返す = reflect
+        if "I5_anti_repetition" in trace:
+            return RespondMode.REFLECT
+        # その他の ask → デフォルトは ASK
+        return RespondMode.ASK
+
     intent_map: dict[str, RespondMode] = {
         "receive": RespondMode.HOLD,
         "organize": RespondMode.REFLECT,
-        "ask": RespondMode.ASK,
         "hold": RespondMode.HOLD,
         "offer_fragile_self_observation": RespondMode.REFLECT,
     }

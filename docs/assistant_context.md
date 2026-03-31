@@ -43,6 +43,7 @@
 - Drawing Language は **Dual Ingress 完了**（Intent Layer 温存、Legacy DSL + canonicalizer が本番）
 - **Phase 1 closed** (SK-2 score 0.658, contradiction_hold live/0fires, RuntimeFacts Phase A complete)
 - **Phase 2 live**: Skeleton Realizer C.0 shadow 稼働中（40テスト、`SKELETON_GUIDANCE_SHADOW_ENABLED=true`）
+- Drawing intent path は live success を 1 回確認済み（`DRAWING_INTENT_ONLY=true`）
 
 主要な現在地:
 
@@ -93,6 +94,10 @@
   - 151件テスト通過
   - ローカル LLM 3モデル（qwen3.5-9b, qwen3-14b-abliterated, gpt-oss-20b）で YAML intent 未達
   - gpt-oss-20b はストリーミング問題で使えず
+  - その後、` ```draw ` transport + 2-pass normalize + intent-like reject で intent YAML live success を 1 回確認
+  - 未解決 cleanup:
+    - `last_drawing_ts:{thread_id}` は 10 分 window だと広すぎる。one-shot / short TTL に再設計予定
+    - Skeleton adherence は timeout fallback turn を除外して集計する必要あり
 
 可変データの正本は常に `python -m backend.scripts.report_gate_status`。
 

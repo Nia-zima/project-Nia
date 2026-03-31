@@ -8,6 +8,7 @@
   - 会話品質修正 Step 0〜8 完了
   - Metabolic Hardening Step 0〜4 完了、**Phase 1 closed**（SK-2 score 0.658, L2 ~2日）
   - Drawing Language Dual Ingress 完了（Intent Layer 温存、Legacy DSL が本番）
+  - Drawing intent path は live success を 1 回確認（`DRAWING_INTENT_ONLY=true`）
   - **Phase 2 live: Skeleton Realizer C.0 shadow 稼働中**（40テスト、`SKELETON_GUIDANCE_SHADOW_ENABLED=true`）
   - 最初の観測: ask adherence=low, reflect adherence=high（composite 1.0）
   - `nia_integration_roadmap.md` が統合順序の正本
@@ -16,6 +17,9 @@
   - **SK-2 L2 到達確認**（~2日後）
   - adherence パターン分析 → knot→training candidate への接続
   - Drawing canonicalizer 観測継続
+  - 後で締める cleanup:
+    - `last_drawing_ts:{thread_id}` の作用範囲を短くする
+    - Skeleton adherence から `timeout_fallback` turn を除外するため origin 記録を追加
 
 詳細の正本:
 - `docs/nia_integration_roadmap.md`

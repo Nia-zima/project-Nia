@@ -33,6 +33,10 @@
   - 最初の非対称性: ask < reflect
   - まだ観測フェーズ。データ蓄積中
 - **モデル**: `qwen/qwen3.5-9b` 確定
+- **Drawing intent path**:
+  - `DRAWING_INTENT_ONLY=true` で **intent YAML live success を 1 回確認**
+  - 2-pass normalize + `upper_center` alias + `cool_fading` 正式追加で、malformed intent の通過率が改善
+  - raw draw 漏れ / legacy reject replay / historical draw mimic は修正済み
 - **統合順序の正本**: `docs/nia_integration_roadmap.md`
 
 ---
@@ -43,6 +47,7 @@
 - Skeleton Realizer C.0 shadow を実装し、shadow 記録を開始した
 - 最初の観測結果: ask mode は adherence が低い、reflect mode は高い
 - まだ数レコードなので分布判断は早い。depth/focus/turn_role 別の分布を見る必要がある
+- Drawing intent path は live で 1 回成功した。残る主論点は truncation 系の安定化
 - `METABOLIC_KNOT_ENABLED=true`、`ADAPTATION_RECORD_ENABLED=true`、`SKELETON_GUIDANCE_SHADOW_ENABLED=true` 有効
 
 ---
@@ -54,6 +59,9 @@
 3. **adherence パターン分析** — ask mode の低 adherence が構造的か文脈依存かを見極める
 4. **knot→training candidate** — 設計書完了済み、C.0 shadow のデータが十分になったら実装
 5. Drawing は canonicalizer 観測継続
+6. Drawing/Skeleton cleanup を忘れない:
+   - `last_drawing_ts:{thread_id}` の作用範囲を短くする（10分は広すぎる。one-shot / short TTL を再設計）
+   - Skeleton adherence 集計から `timeout_fallback` 系 turn を除外できるように origin 記録を追加する
 
 ## 作業原則
 

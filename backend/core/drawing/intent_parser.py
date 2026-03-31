@@ -27,6 +27,7 @@ _COLOR_FEEL_MAP: dict[str, str] = {
     "warm": "warm_2",
     "warm_fading": "warm_1",
     "cool": "cool_2",
+    "cool_fading": "cool_1",
     "quiet": "cool_1",
     "neutral": "neutral_2",
     "dark": "neutral_3",

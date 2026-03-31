@@ -41,29 +41,103 @@ def _extract_draw_content(text: str) -> list[str]:
     return [m.strip() for m in _DRAW_FENCE_RE.findall(text or "") if m.strip()]
 
 
+_INTENT_FIELD_KEYS = [
+    "elements", "overall_mood", "intent",
+    "name", "type", "role", "size", "dominance", "opacity_feel",
+    "color_feel", "position", "relation_to", "arrangement",
+    "distance", "count", "count_mode", "reason",
+    "relation_strength",
+]
+
+
+def _fix_colon_spacing(s: str) -> str:
+    """Fix key:value → key: value for all known intent field keys."""
+    import re as _re
+    for key in _INTENT_FIELD_KEYS:
+        s = _re.sub(rf"\b{key}:(\S)", rf"{key}: \1", s)
+    return s
+
+
+def _normalize_intent_yaml(content: str) -> str:
+    """Normalize 1-line YAML blob into proper YAML with newlines.
+
+    LLM (especially local models) often outputs YAML without newlines
+    and missing spaces after colons (e.g. "reason:represents").
+
+    Two-pass: colon fix → structure insert → colon fix again.
+    Bounded repairs only — no value guessing.
+    """
+    import re as _re
+    s = content
+
+    # Pass 1: Fix key:value spacing before structure insertion
+    s = _fix_colon_spacing(s)
+
+    # Insert newline before list items: "- name:" or "  - name:"
+    s = _re.sub(r"(?<!\n)\s*-\s*name:", "\n  - name:", s)
+
+    # Insert newline before top-level keys
+    for key in ("elements:", "overall_mood:", "intent:"):
+        s = _re.sub(rf"(?<!\n){key}", f"\n{key}", s)
+
+    # Insert newline before field keys within elements (indented)
+    elem_field_keys = [
+        "type:", "role:", "size:", "dominance:", "opacity_feel:",
+        "color_feel:", "position:", "relation_to:", "arrangement:",
+        "distance:", "count:", "count_mode:", "reason:",
+        "relation_strength:",
+    ]
+    for fk in elem_field_keys:
+        s = _re.sub(rf"(?<!\n)\s*{fk}", f"\n    {fk}", s)
+
+    # Pass 2: Fix any remaining key:value that appeared after structure insertion
+    s = _fix_colon_spacing(s)
+
+    return s.strip()
+
+
+def _looks_like_intent(content: str) -> bool:
+    """Check if content looks like intent YAML (even if malformed).
+
+    Used to prevent intent-like content from falling to legacy DSL.
+    """
+    markers = ["elements:", "- name:", "type:", "role:", "color_feel:"]
+    match_count = sum(1 for m in markers if m in content or m.replace(":", ": ") in content)
+    # Also check without space: "elements:" or "type:area"
+    no_space_count = sum(
+        1 for key in ("elements", "type", "role", "color_feel")
+        if f"{key}:" in content
+    )
+    return match_count >= 2 or no_space_count >= 3
+
+
 def _try_parse_as_intent(content: str) -> str | None:
     """Try to parse draw block content as YAML intent.
 
-    Returns the raw YAML string if it validates as DrawingIntent.
+    Returns the normalized YAML string if it validates as DrawingIntent.
     Returns None if it's not valid intent YAML (probably legacy DSL).
+    Applies YAML normalization for 1-line blob output from local LLMs.
     """
     import yaml
     from backend.core.drawing.intent_schema import DrawingIntent
 
-    try:
-        raw = yaml.safe_load(content)
-        if not isinstance(raw, dict):
-            return None
-        # Support nested {intent: {elements: [...]}}
-        if "intent" in raw and isinstance(raw["intent"], dict):
-            raw = raw["intent"]
-        # Must have elements key to be intent
-        if "elements" not in raw:
-            return None
-        DrawingIntent.model_validate(raw)
-        return content
-    except Exception:
-        return None
+    # Try raw first, then normalized
+    for attempt in (content, _normalize_intent_yaml(content)):
+        try:
+            raw = yaml.safe_load(attempt)
+            if not isinstance(raw, dict):
+                continue
+            # Support nested {intent: {elements: [...]}}
+            if "intent" in raw and isinstance(raw["intent"], dict):
+                raw = raw["intent"]
+            # Must have elements key to be intent
+            if "elements" not in raw:
+                continue
+            DrawingIntent.model_validate(raw)
+            return attempt
+        except Exception:
+            continue
+    return None
 
 
 def _make_drawing_id(state: AgentState, block_index: int) -> str | None:
@@ -103,6 +177,7 @@ async def action_processing(state: AgentState) -> dict:
             "approved_actions": [],
             "pending_actions": [],
             "rejected_actions": [],
+            "new_rejected_actions": [],
             "action_results": [],
         }
 
@@ -112,13 +187,16 @@ async def action_processing(state: AgentState) -> dict:
             "approved_actions": [],
             "pending_actions": state.get("pending_actions") or [],
             "rejected_actions": state.get("rejected_actions") or [],
+            "new_rejected_actions": [],
             "action_results": [],
         }
 
     # Phase 5.1: アクション提案の抽出（簡易版）
     proposed_actions: list[dict] = []
     # Preserve existing rejected_actions from state (cross-turn accumulation)
-    rejected_actions: list[dict] = list(state.get("rejected_actions") or [])
+    existing_rejected: list[dict] = list(state.get("rejected_actions") or [])
+    rejected_actions: list[dict] = list(existing_rejected)  # full list for state
+    new_rejected_actions: list[dict] = []  # this-turn-only for SSE
 
     if "記憶" in final_text and "保存" in final_text:
         proposed_actions.append({
@@ -176,6 +254,12 @@ async def action_processing(state: AgentState) -> dict:
             len(draw_contents),
         )
     elif len(draw_contents) == 1:
+        # Record that drawing was attempted (for follow-up turn detection)
+        try:
+            from backend.core.drawing.prompt_ref import mark_drawing_attempted
+            mark_drawing_attempted(str(state.get("thread_id") or "default_thread"))
+        except Exception:
+            pass
         drawing_id = _make_drawing_id(state, 0)
         if drawing_id is None:
             rejected_actions.append({
@@ -197,17 +281,32 @@ async def action_processing(state: AgentState) -> dict:
                         "thread_id": str(state.get("thread_id") or "default_thread"),
                     },
                 })
+            elif _looks_like_intent(content):
+                # Intent-like but malformed YAML — do NOT fall to legacy DSL.
+                # Record as intent_parse_error instead of silently misrouting.
+                rejected_actions.append({
+                    "action_id": "render_drawing",
+                    "status": "REJECTED",
+                    "reason": f"intent_parse_error: content looks like intent YAML but failed validation",
+                })
+                logger.warning(
+                    "[ACTION_PROCESSING] intent-like draw block failed YAML parse, "
+                    "NOT falling to legacy DSL (content len=%d)",
+                    len(content),
+                )
             else:
                 # Content is not valid intent — check DRAWING_INTENT_ONLY gate
                 from backend.core.config import settings
-                if getattr(settings, "DRAWING_INTENT_ONLY", False):
+                _intent_only = getattr(settings, "DRAWING_INTENT_ONLY", False)
+                if _intent_only:
                     rejected_actions.append({
                         "action_id": "render_drawing",
                         "status": "REJECTED",
-                        "reason": "legacy_draw_emitted; intent block required (DRAWING_INTENT_ONLY=true)",
+                        "reason": f"legacy_draw_emitted; intent block required (DRAWING_INTENT_ONLY={_intent_only})",
                     })
                     logger.warning(
-                        "[ACTION_PROCESSING] legacy draw rejected: DRAWING_INTENT_ONLY=true",
+                        "[ACTION_PROCESSING] legacy draw rejected: DRAWING_INTENT_ONLY=%s",
+                        _intent_only,
                     )
                 else:
                     logger.info("[ACTION_PROCESSING] draw block routed as legacy DSL")
@@ -220,12 +319,17 @@ async def action_processing(state: AgentState) -> dict:
                         },
                     })
 
+    # Compute this-turn-only rejects (for SSE — don't replay historical rejects)
+    _existing_ids = {id(r) for r in existing_rejected}
+    new_rejected = [r for r in rejected_actions if id(r) not in _existing_ids]
+
     if not proposed_actions:
         return {
             "proposed_actions": [],
             "approved_actions": [],
             "pending_actions": state.get("pending_actions") or [],
             "rejected_actions": rejected_actions,
+            "new_rejected_actions": new_rejected,
             "action_results": [],
         }
 
@@ -355,6 +459,7 @@ async def action_processing(state: AgentState) -> dict:
         "approved_actions": approved_actions,
         "pending_actions": pending_actions,
         "rejected_actions": rejected_actions,
+        "new_rejected_actions": new_rejected,
         "action_results": action_results,
     }
 

@@ -63,6 +63,7 @@ class IntentColorFeel(str, Enum):
     WARM = "warm"
     WARM_FADING = "warm_fading"
     COOL = "cool"
+    COOL_FADING = "cool_fading"
     QUIET = "quiet"
     NEUTRAL = "neutral"
     DARK = "dark"
@@ -133,7 +134,21 @@ class IntentElement(BaseModel):
     color_feel: Optional[IntentColorFeel] = None
 
     # 配置（最初の要素は position、2つ目以降は relation_to + arrangement）
-    position: Optional[IntentPosition] = None
+    position: Optional[IntentPosition] = Field(None)
+
+    @field_validator("position", mode="before")
+    @classmethod
+    def normalize_position_alias(cls, v: object) -> object:
+        """Absorb common LLM aliases (e.g. upper_center → upper)."""
+        if not isinstance(v, str):
+            return v
+        aliases: dict[str, str] = {
+            "upper_center": "upper",
+            "lower_center": "lower",
+            "center_left": "left_edge",
+            "center_right": "right_edge",
+        }
+        return aliases.get(v, v)
     relation_to: Optional[str] = None
     arrangement: Optional[IntentArrangement] = None
     distance: Optional[IntentDistance] = None

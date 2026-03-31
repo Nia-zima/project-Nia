@@ -297,7 +297,10 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
             }
             const rawText = extractSpeech(normalizeContent(last.content));
             // Strip draw/intent fences from backfilled text (DrawingCard handles display)
-            const text = rawText?.replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```/gi, "").trim();
+            const text = rawText
+                ?.replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```/gi, "")
+                .replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*$/gi, "")  // unclosed fence (truncation)
+                .trim();
             if (!text) {
                 if (attempt < 2) {
                     setTimeout(() => backfillLastAssistantMessage(attempt + 1), 250);
@@ -442,7 +445,10 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                 console.info("[SSE final_result] len=%d merge_mode=%s", ft.length, payload.merge_mode);
                 if (ft.trim() && ft.trim() !== "WAIT") {
                     // Strip draw/intent fences from display text (rendered as DrawingCard instead)
-                    const displayText = ft.replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```/gi, "").trim();
+                    const displayText = ft
+                        .replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```/gi, "")
+                        .replace(/```draw(?:-intent)?\b[ \t]*\n?[\s\S]*$/gi, "")  // unclosed fence
+                        .trim();
                     if (displayText) {
                         if (!aiMsgIdRef.current) {
                             beginAiMessage();
@@ -451,8 +457,14 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                         aiTextRef.current = displayText;
                         if (id) updateMessageContent(id, displayText);
                     } else {
-                        // draw-only response: DrawingCard handles display, skip backfill
+                        // draw-only response: DrawingCard handles display
                         drawOnlyTurnRef.current = true;
+                        // Clear any raw draw chunks that were streamed into the AI bubble
+                        const id = aiMsgIdRef.current;
+                        if (id) {
+                            aiTextRef.current = "";
+                            updateMessageContent(id, "");
+                        }
                     }
                     finalTextLockedRef.current = true;
                 }
@@ -494,7 +506,7 @@ export default function ChatInterface({ agentMode }: ChatInterfaceProps) {
                                 replay: r.replay,
                             },
                         });
-                    } else if (msg.name === "action_failed") {
+                    } else if (msg.name === "action_failed" || msg.name === "action_blocked") {
                         const errMsg = p.result?.message || p.reason || "描画に失敗しました";
                         const failId = `drawing-err-${p.action_id}-${sseStreamIdRef.current || p.message_id || "unknown"}`;
                         upsertMessage({
