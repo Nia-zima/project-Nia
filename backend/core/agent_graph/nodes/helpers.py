@@ -859,9 +859,13 @@ def build_context_suffix(
     # Drawing Language: draw_intent があるターンだけ最小リファレンスを注入
     if not state.get("test_mode"):
         try:
-            from backend.core.drawing.prompt_ref import detect_draw_intent, build_drawing_reference
+            from backend.core.drawing.prompt_ref import (
+                detect_draw_intent, build_drawing_reference, has_recent_drawing_context,
+            )
             user_text = state.get("user_text") or ""
-            if detect_draw_intent(user_text):
+            thread_id = str(state.get("thread_id") or "default_thread")
+            _recent = has_recent_drawing_context(thread_id)
+            if detect_draw_intent(user_text, recent_drawing=_recent):
                 parts.append(f"\n\n{build_drawing_reference()}")
         except Exception:
             logger.debug("[CONTEXT_SUFFIX] drawing prompt injection failed", exc_info=True)

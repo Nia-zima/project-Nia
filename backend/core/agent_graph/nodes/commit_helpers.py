@@ -840,6 +840,16 @@ def _record_skeleton_guidance_shadow(
     if not final_text.strip():
         return
 
+    # Skip adherence evaluation for non-LLM responses (timeout/error/empty fallback).
+    # These are system-generated text, not LLM adherence to skeleton guidance.
+    response_origin = str(state.get("response_origin") or "llm")
+    if response_origin != "llm":
+        logger.debug(
+            "[SKELETON_REALIZER] skipped: response_origin=%s (not LLM)",
+            response_origin,
+        )
+        return
+
     try:
         from datetime import datetime, timezone
         import uuid

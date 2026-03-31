@@ -145,7 +145,15 @@ def _build_merge_result(
 ) -> dict:
     """Build the standardized merge output dict and log observation."""
     em = external_meta or {}
-    msg_content = "WAIT" if hold_required or final_text == "WAIT" else final_text
+    # Draw fences are action artifacts, not conversation content.
+    # Strip them from AIMessage to prevent LLM from mimicking draw blocks
+    # in subsequent turns (draw output lives in trace_store, not chat history).
+    import re as _re
+    _history_text = final_text or ""
+    _history_text = _re.sub(r"```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```", "", _history_text, flags=_re.IGNORECASE)
+    _history_text = _re.sub(r"```draw(?:-intent)?\b[ \t]*\n?[\s\S]*$", "", _history_text, flags=_re.IGNORECASE)
+    _history_text = _history_text.strip()
+    msg_content = "WAIT" if hold_required or final_text == "WAIT" else _history_text
     out: dict = {
         "final_text": final_text,
         "merge_mode": merge_mode,
@@ -290,6 +298,16 @@ def _postprocess_candidate_text(
     _sel_depth = int(state.get("selected_depth") or 0)
     _max_sents = 5 if _sel_depth >= 1 else 3
     _max_chars = 500 if _sel_depth >= 1 else 280
+    # draw block がある場合は YAML intent の出力に十分な文字数を確保
+    # user_text の draw_intent だけでなく、ニアが自発的に描いた場合も検出
+    _has_draw = "```draw" in t.lower()
+    try:
+        from backend.core.drawing.prompt_ref import detect_draw_intent
+        if detect_draw_intent(user_text) or _has_draw:
+            _max_chars = 1500
+            _max_sents = 20  # YAML は文ではないので実質制限なし
+    except Exception:
+        pass
     t = _apply_identity_tone_policy(
         _limit_questions(t),
         user_text=user_text,

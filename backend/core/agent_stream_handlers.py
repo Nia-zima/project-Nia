@@ -234,6 +234,8 @@ async def _handle_merge_end(ctx, data: dict) -> None:
     import re
     tts_text = final_text_str or ""
     tts_text = re.sub(r"```draw(?:-intent)?\b[ \t]*\n?[\s\S]*?```", "", tts_text, flags=re.IGNORECASE)
+    # Also strip unclosed fence (truncated draw blocks)
+    tts_text = re.sub(r"```draw(?:-intent)?\b[ \t]*\n?[\s\S]*$", "", tts_text, flags=re.IGNORECASE)
     tts_text = tts_text.strip()
     ctx.suppress_stream_text = hold_required or is_wait or final_text_str.startswith("WAIT")
 
@@ -332,7 +334,12 @@ async def _handle_action_end(ctx, data: dict) -> None:
     output = data.get("output") or {}
     proposed = output.get("proposed_actions") or []
     pending = output.get("pending_actions") or []
-    rejected = output.get("rejected_actions") or []
+    # Use new_rejected_actions (this-turn only) for SSE to avoid replaying
+    # historical rejects. Do not fall back when the explicit value is [].
+    if "new_rejected_actions" in output:
+        rejected = output.get("new_rejected_actions") or []
+    else:
+        rejected = output.get("rejected_actions") or []
     results = output.get("action_results") or []
 
     for item in proposed:

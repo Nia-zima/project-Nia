@@ -56,6 +56,7 @@ class AgentState(TypedDict, total=False):
     depth1_contract_ok: Optional[bool]
     depth2_text: Optional[str]
     depth2_fallback_used: Optional[bool]
+    response_origin: Optional[str]  # llm | timeout_fallback | empty_fallback | error_fallback
     merge_mode: Optional[str]
     final_text: Optional[str]
 

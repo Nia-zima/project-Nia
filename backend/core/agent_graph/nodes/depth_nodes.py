@@ -129,15 +129,25 @@ async def depth0_reflex(state: AgentState) -> dict:
     system_prompt += prompt_suffix(ThinkMode.NO_THINK)
 
     rep_boost = max(_repetition_count(state) - 2, 0)  # 3回目から効き始める
-    llm = get_depth_llm(temperature=0.6, max_tokens=300, reasoning_effort="low", repetition_boost=rep_boost)
+    _d0_max_tokens = 300
+    try:
+        from backend.core.drawing.prompt_ref import detect_draw_intent, has_recent_drawing_context
+        _thread = str(state.get("thread_id") or "default_thread")
+        if detect_draw_intent(str(state.get("user_text") or ""), recent_drawing=has_recent_drawing_context(_thread)):
+            _d0_max_tokens = 900
+    except Exception:
+        pass
+    llm = get_depth_llm(temperature=0.6, max_tokens=_d0_max_tokens, reasoning_effort="low", repetition_boost=rep_boost)
+    _d0_timeout = 60.0 if _d0_max_tokens > 300 else 30.0
     # 会話履歴を含める（depth0 は即応なので直近15ターン）
     llm_messages = [SystemMessage(content=system_prompt)]
     llm_messages.extend(_recent_history(state, max_pairs=15))
     llm_messages.append(HumanMessage(content=user_text))
+    _d0_response_origin = "llm"
     try:
         resp = await asyncio.wait_for(
             llm.ainvoke(llm_messages),
-            timeout=30.0,
+            timeout=_d0_timeout,
         )
         _record_depth_usage(
             state=state,
@@ -155,11 +165,11 @@ async def depth0_reflex(state: AgentState) -> dict:
         raw = _strip_think_blocks(raw)
         draft = _normalize_whitespace(raw)
     except asyncio.TimeoutError:
-        logger.warning("[DEPTH0] LLM timeout (30s)")
-        return {"draft": "WAIT"}
+        logger.warning("[DEPTH0] LLM timeout (%.0fs)", _d0_timeout)
+        return {"draft": "WAIT", "response_origin": "timeout_fallback"}
     except Exception as e:
         logger.warning("[DEPTH0] LLM error: %s", e, exc_info=True)
-        return {"draft": "WAIT"}
+        return {"draft": "WAIT", "response_origin": "error_fallback"}
 
     # Phase 0: Depth0 契約検証
     if draft and draft != "WAIT":
@@ -180,7 +190,7 @@ async def depth0_reflex(state: AgentState) -> dict:
                 len(validation_result.violations)
             )
 
-    return {"draft": draft}
+    return {"draft": draft, "response_origin": _d0_response_origin}
 
 
 async def depth1_organize_and_ask(state: AgentState) -> dict:
@@ -269,17 +279,28 @@ async def depth1_organize_and_ask(state: AgentState) -> dict:
         system_prompt += _direct_stance_hint(state)
         system_prompt += prompt_suffix(ThinkMode.NO_THINK)
         rep_boost = max(_repetition_count(state) - 2, 0)
-        llm = get_depth_llm(temperature=0.4, max_tokens=500, reasoning_effort="low", repetition_boost=rep_boost)
+        # draw_intent がある場合、YAML intent の出力に十分な token を確保
+        _d1_max_tokens = 500
+        try:
+            from backend.core.drawing.prompt_ref import detect_draw_intent, has_recent_drawing_context
+            _thread = str(state.get("thread_id") or "default_thread")
+            if detect_draw_intent(str(state.get("user_text") or ""), recent_drawing=has_recent_drawing_context(_thread)):
+                _d1_max_tokens = 900
+        except Exception:
+            pass
+        llm = get_depth_llm(temperature=0.4, max_tokens=_d1_max_tokens, reasoning_effort="low", repetition_boost=rep_boost)
         llm_messages = [SystemMessage(content=system_prompt)]
         llm_messages.extend(_recent_history(
             state, max_pairs=30,
             turn_intent=state.get("turn_intent") or "open_reflection",
         ))
         llm_messages.append(HumanMessage(content=user_text))
+        _d1_timeout = 60.0 if _d1_max_tokens > 500 else 30.0
+        _d1_response_origin = "llm"
         try:
             resp = await asyncio.wait_for(
                 llm.ainvoke(llm_messages),
-                timeout=30.0,
+                timeout=_d1_timeout,
             )
             _record_depth_usage(
                 state=state,
@@ -303,13 +324,16 @@ async def depth1_organize_and_ask(state: AgentState) -> dict:
             depth1_text = _normalize_whitespace(raw)
             if not depth1_text:
                 depth1_text = "まだ少し整理しきれていない。要点を一つだけ言い直してくれる？"
+                _d1_response_origin = "empty_fallback"
                 logger.warning("[DEPTH1] empty response; using deterministic clarification")
         except asyncio.TimeoutError:
-            logger.warning("[DEPTH1] LLM timeout (30s)")
+            logger.warning("[DEPTH1] LLM timeout (%.0fs)", _d1_timeout)
             depth1_text = "ちょっと考えるのに時間がかかってる……もう一回言ってくれる？"
+            _d1_response_origin = "timeout_fallback"
         except Exception as e:
             logger.warning("[DEPTH1] LLM error: %s", e, exc_info=True)
             depth1_text = "うまく考えがまとまらなかった。もう少しシンプルに聞いてくれる？"
+            _d1_response_origin = "error_fallback"
 
     depth1_contract_ok: bool | None = None
 
@@ -346,6 +370,7 @@ async def depth1_organize_and_ask(state: AgentState) -> dict:
     return {
         "depth1_text": depth1_text,
         "depth1_contract_ok": depth1_contract_ok,
+        "response_origin": _d1_response_origin,
     }
 
 
